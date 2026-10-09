@@ -4,7 +4,7 @@
   <img src="mobile/assets/polysparq-wordmark.png" alt="PolySparQ++" width="560">
 </p>
 
-**PolySparQ++ is an independent C++20 Polymarket trading bot and prediction-market research toolkit.** It combines Polymarket market-data and order execution with risk controls, a Python operations cockpit, PostgreSQL persistence, replay tools, and a React Native companion app.
+**PolySparQ++ is an independent C++20 Polymarket trading bot and prediction-market research toolkit.** It combines Polymarket CLOB API market data and order execution with risk controls, a Python operations cockpit, PostgreSQL persistence, replay tools, and a React Native companion app.
 
 > **Research software.** The project is experimental and can place real orders when explicitly configured to do so. Prediction-market trading can lose all funds committed to a position. Start in paper mode, review every setting, and do not treat this project as financial advice or a promise of returns.
 
@@ -15,7 +15,7 @@ This is a source-available project, not a permissively licensed open-source rele
 ## Polymarket bot features
 
 - A C++20 Polymarket bot engine for market feeds, strategy evaluation, risk checks, paper trading, and optional live order execution.
-- Polymarket order-book and market-data integration, with additional reference-price feeds for research and strategy evaluation.
+- Polymarket CLOB API, order-book, and market-data integration, with additional reference-price feeds for research and strategy evaluation.
 - A Python web cockpit for inspecting markets, positions, strategy state, and fleet activity.
 - PostgreSQL schemas and migrations for trading and research data.
 - A React Native / Expo mobile client for connecting to a PolySparQ++ server.

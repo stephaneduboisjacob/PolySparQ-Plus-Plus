@@ -2,6 +2,17 @@ cff-version: 1.2.0
 message: "If PolySparQ++ supports your research, please cite this repository."
 title: "PolySparQ++"
 type: software
+abstract: >-
+  PolySparQ++ is an independent C++20 Polymarket bot for prediction-market research,
+  paper trading, risk controls, and optional live order execution. It includes a
+  Python operations cockpit, PostgreSQL persistence, replay tools, and a mobile client.
+keywords:
+  - Polymarket
+  - Polymarket bot
+  - prediction markets
+  - trading bot
+  - paper trading
+  - algorithmic trading
 authors:
   - family-names: Jacob
     given-names: Stephane
