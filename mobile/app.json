@@ -1,0 +1,34 @@
+{
+  "expo": {
+    "name": "PolySparQ++",
+    "slug": "polysparq-mobile",
+    "version": "2.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/polysparq-icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "polypulse",
+    "ios": {
+      "supportsTablet": true,
+      "buildNumber": "2.1.0",
+      "bundleIdentifier": "io.polypulse.mobile"
+    },
+    "android": {
+      "versionCode": 3,
+      "permissions": ["POST_NOTIFICATIONS"],
+      "adaptiveIcon": {
+        "backgroundColor": "#0a0e17",
+        "foregroundImage": "./assets/polysparq-icon.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "package": "io.polypulse.mobile",
+      "googleServicesFile": "./google-services.json"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "@react-native-firebase/app",
+      "@react-native-firebase/messaging"
+    ]
+  }
+}

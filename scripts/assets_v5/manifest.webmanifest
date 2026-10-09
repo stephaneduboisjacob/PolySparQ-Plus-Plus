@@ -1,0 +1,14 @@
+{
+  "id": "/v5",
+  "name": "PolySparQ++ Cockpit V5",
+  "short_name": "PolySparQ V5",
+  "start_url": "/v5",
+  "scope": "/v5",
+  "display": "standalone",
+  "background_color": "#080d14",
+  "theme_color": "#0a0e15",
+  "icons": [
+    { "src": "/assets_v4/logo-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/assets_v4/logo-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

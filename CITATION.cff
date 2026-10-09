@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If PolySparQ++ supports your research, please cite this repository."
+title: "PolySparQ++"
+type: software
+authors:
+  - family-names: Jacob
+    given-names: Stephane
+    email: jacobstephane@outlook.com
+license: PolyForm-Noncommercial-1.0.0
+repository-code: https://github.com/stephaneduboisjacob/polysparq-plus-plus
+date-released: 2026-10-09

@@ -1,0 +1,39 @@
+# Minimal local-development configuration for PolySparQ++.
+# Copy this file to config/polypulse.toml and keep it in PAPER mode.
+# The runtime config is ignored by Git.
+
+[runtime]
+mode = "paper"
+log_level = "info"
+journal_dir = "./journal"
+
+[postgres]
+# The database and schema identifiers retain their historical names.
+conninfo = "postgresql:///vantagepulse"
+read_replica = ""
+
+[llm]
+# The advisor is optional and disabled until you configure your own endpoint.
+enabled = false
+url = ""
+model = ""
+api_key_file = ""
+
+[wallet]
+# No wallet or trading credentials are needed for paper mode.
+credentials_file = ""
+private_key_file = ""
+api_key = ""
+api_secret = ""
+api_passphrase = ""
+starting_balance_usd = 0.0
+
+[data_collection]
+# Enable only the datasets you intend to store; high-frequency data can grow quickly.
+oracle_ticks_enabled = false
+binance_ticks_enabled = false
+coinbase_ticks_enabled = false
+window_events_enabled = false
+features_enabled = false
+book_snapshots_enabled = false
+pm_trades_enabled = false

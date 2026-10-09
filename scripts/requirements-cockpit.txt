@@ -1,0 +1,3 @@
+# Runtime dependencies for the PolySparQ++ cockpit server.
+psycopg2-binary==2.9.11
+firebase-admin==7.1.0

@@ -1,0 +1,43 @@
+{
+  "name": "polysparq-mobile",
+  "version": "2.1.0",
+  "main": "expo-router/entry",
+  "dependencies": {
+    "@expo/vector-icons": "^15.1.1",
+    "@react-native-firebase/app": "^25.1.0",
+    "@react-native-firebase/messaging": "^25.1.0",
+    "@tanstack/react-query": "^5.101.1",
+    "expo": "~56.0.21",
+    "expo-constants": "^56.0.18",
+    "expo-font": "^56.0.7",
+    "expo-linking": "~56.0.17",
+    "expo-router": "~56.2.20",
+    "expo-secure-store": "^56.0.4",
+    "expo-status-bar": "~56.0.4",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-gesture-handler": "~2.31.1",
+    "react-native-reanimated": "4.3.1",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
+    "react-native-sse": "^1.2.1",
+    "react-native-web": "^0.21.2",
+    "react-native-worklets": "0.8.3",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "android:apk:debug": "cd android && ./gradlew :app:assembleDebug",
+    "android:apk:release": "cd android && ./gradlew :app:assembleRelease",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit"
+  },
+  "private": true
+}
