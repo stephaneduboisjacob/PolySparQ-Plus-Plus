@@ -1,10 +1,10 @@
-# PolySparQ++
+# PolySparQ++: Polymarket Bot and Research Toolkit
 
 <p align="center">
   <img src="mobile/assets/polysparq-wordmark.png" alt="PolySparQ++" width="560">
 </p>
 
-**A research and automation toolkit for prediction markets.** PolySparQ++ combines a C++ market-data and execution engine with a Python cockpit, PostgreSQL persistence, replay tools, and a React Native companion app.
+**PolySparQ++ is an independent C++20 Polymarket trading bot and prediction-market research toolkit.** It combines Polymarket market-data and order execution with risk controls, a Python operations cockpit, PostgreSQL persistence, replay tools, and a React Native companion app.
 
 > **Research software.** The project is experimental and can place real orders when explicitly configured to do so. Prediction-market trading can lose all funds committed to a position. Start in paper mode, review every setting, and do not treat this project as financial advice or a promise of returns.
 
@@ -12,17 +12,20 @@ PolySparQ++ is source-available under the [PolyForm Noncommercial License 1.0.0]
 
 This is a source-available project, not a permissively licensed open-source release. Noncommercial use is governed by the published license; commercial rights are reserved for a separate agreement.
 
-## What is included
+## Polymarket bot features
 
-- A C++20 engine for market feeds, strategy evaluation, risk checks, paper execution, and optional live execution.
+- A C++20 Polymarket bot engine for market feeds, strategy evaluation, risk checks, paper trading, and optional live order execution.
+- Polymarket order-book and market-data integration, with additional reference-price feeds for research and strategy evaluation.
 - A Python web cockpit for inspecting markets, positions, strategy state, and fleet activity.
 - PostgreSQL schemas and migrations for trading and research data.
 - A React Native / Expo mobile client for connecting to a PolySparQ++ server.
 - C++ and Python tests, plus configuration examples that keep credentials out of the repository.
 
+The codebase is intended for developers exploring Polymarket bots, prediction-market data, paper trading, and execution or risk-control systems. The example configuration starts in paper mode; live execution requires deliberate local configuration and credentials.
+
 The product branding is PolySparQ++. A few internal executable, database, and configuration identifiers retain their historic names for compatibility with existing installations.
 
-## Quick start: C++ engine
+## Build the Polymarket bot
 
 See [INSTALL.md](INSTALL.md) for the complete native dependency list, database setup, mobile build steps, and troubleshooting.
 
