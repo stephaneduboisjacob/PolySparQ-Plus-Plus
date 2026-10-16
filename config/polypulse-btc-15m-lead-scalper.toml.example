@@ -1,0 +1,104 @@
+# Strategy overlay for the independent multi-asset 15-minute Coinbase-lead scalper.
+# Merge these sections into a local full config; retain that installation's
+# database and feed settings. Paper mode is deliberate.
+
+[runtime]
+mode = "paper"
+instance_label = "btc-15m-lead-scalper"
+journal_dir = "./journal/btc-15m-lead-scalper"
+
+[polymarket]
+universe_horizons_seconds = [900]
+universe_max_windows_per_series = 10
+universe_max_markets = 80
+universe_prewarm_ahead_minutes = 20
+
+[binance]
+streams = ["btcusdt@trade", "ethusdt@trade", "solusdt@trade", "xrpusdt@trade", "btcusdt@bookTicker", "ethusdt@bookTicker", "solusdt@bookTicker", "xrpusdt@bookTicker"]
+
+[strategy.hot]
+autopilot_on_start = true
+autopilot_startup_delay_secs = 30
+autopilot_throttle_ms = 250
+autopilot_max_per_sweep = 2
+blocked_assets = []
+per_click_size_usd = 5.0
+min_order_usd = 1.0
+min_size_usd = 1.0
+max_size_usd = 5.0
+max_per_window_usd = 25.0
+hard_share_price_ceil = 0.60
+max_entry_share_price = 0.60
+min_entry_share_price = 0.03
+oracle_max_token_price = 0.60
+predictor_max_token_price = 0.60
+ideal_entry_share_price = 0.50
+max_entries_per_window = 20
+autopilot_conf_floor = 0.50
+
+recycler_mode = "off"
+predictor_mode = true
+window_predictor_pm_flow = true
+trend_filter_enabled = false
+window_predictor_mode = false
+digital_fv_mode = false
+oracle_lag_mode = false
+endgame_mode = false
+coinbase_lead_mode = false
+scalp_v2_enabled = false
+scalp_v3_enabled = false
+momentum_scalp_enabled = false
+stop_loss_mode = false
+profit_take_mode = false
+oracle_reversal_exit = false
+oracle_panic_exit = false
+momentum_flip_exit = false
+entry_persist_gate = false
+max_book_age_ms = 1000
+max_entry_spread_pct = 8.0
+
+entry_order_mode = "maker"
+maker_improve_ticks = 1
+maker_reprice_ms = 250
+maker_poll_ms = 250
+maker_max_age_ms = 5000
+maker_cancel_before_close_ms = 45000
+
+lead_lag_scalp_enabled = true
+lead_lag_scalp_horizon_s = 900
+lead_lag_scalp_min_signal_confidence = 0.80
+lead_lag_scalp_min_cb_move_bps = 0.5
+lead_lag_scalp_min_cb_lead_bps = 0.5
+lead_lag_scalp_max_oracle_counter_bps = 1.5
+lead_lag_scalp_min_net_edge_pct = 1.5
+lead_lag_scalp_min_price = 0.03
+lead_lag_scalp_max_price = 0.60
+lead_lag_scalp_max_spread_pct = 8.0
+lead_lag_scalp_max_book_age_ms = 1000
+lead_lag_scalp_stop_entry_secs = 270
+lead_lag_scalp_stop_entry_5m_secs = 90
+lead_lag_scalp_stop_entry_15m_secs = 270
+lead_lag_scalp_flatten_secs = 30
+lead_lag_scalp_max_entries_per_window = 5
+lead_lag_scalp_order_usd = 5.0
+lead_lag_scalp_profit_target_pct = 15.0
+lead_lag_scalp_hard_stop_pct = 0.0
+lead_lag_scalp_reversal_exit_enabled = false
+lead_lag_scalp_rearm_bps = 0.25
+
+[risk]
+max_order_usd = 5.0
+max_per_window_usd = 25.0
+max_deployed_usd = 25.0
+min_order_usd = 1.0
+daily_loss_kill_pct = 0.0
+
+[data_collection]
+# Capture this horizon's lifecycle; the 5m instance owns shared raw-feed writes.
+oracle_ticks_enabled = false
+binance_ticks_enabled = false
+coinbase_ticks_enabled = false
+window_events_enabled = true
+features_enabled = false
+book_snapshots_enabled = false
+pm_trades_enabled = false
