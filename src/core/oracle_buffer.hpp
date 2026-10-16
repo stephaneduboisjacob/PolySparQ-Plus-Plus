@@ -42,6 +42,23 @@ public:
             buf.pop_front();
     }
 
+    // Insert a timestamped observation recovered from durable history. Unlike
+    // add(), this permits an older sample to be inserted into an already-live
+    // stream, while preserving the timestamp order required by lookups.
+    void add_historical(const std::string& asset, double timestamp_s, double price) {
+        std::lock_guard lk(mu_);
+        if (!std::isfinite(price) || price <= 0 || !std::isfinite(timestamp_s)) return;
+        auto& buf = data_[asset];
+        auto it = std::lower_bound(buf.begin(), buf.end(), timestamp_s,
+            [](const std::pair<double, double>& sample, double ts) {
+                return sample.first < ts;
+            });
+        if (it != buf.end() && it->first == timestamp_s) return;
+        buf.insert(it, {timestamp_s, price});
+        while (buf.size() > max_depth_)
+            buf.pop_front();
+    }
+
     // Return most recent price for asset, or 0.0 if no data.
     double latest(const std::string& asset) const {
         std::lock_guard lk(mu_);
@@ -89,6 +106,40 @@ public:
         auto it = data_.find(asset);
         if (it == data_.end() || it->second.empty()) return 0.0;
         return it->second.front().second;
+    }
+
+    // Time-weighted mean over [start_ts_s, end_ts_s], treating each sample as
+    // valid until the next observation. Returns 0 if the buffer does not cover
+    // the full interval. Used to condition the final Chainlink TWAP estimate on
+    // the portion of its averaging window that has already been observed.
+    double time_weighted_average(const std::string& asset,
+                                 double start_ts_s, double end_ts_s) const {
+        if (!std::isfinite(start_ts_s) || !std::isfinite(end_ts_s) ||
+            end_ts_s <= start_ts_s) return 0.0;
+        std::lock_guard lk(mu_);
+        auto it = data_.find(asset);
+        if (it == data_.end() || it->second.size() < 2) return 0.0;
+        const auto& buf = it->second;
+        auto upper = std::upper_bound(buf.begin(), buf.end(), start_ts_s,
+            [](double ts, const std::pair<double, double>& e) {
+                return ts < e.first;
+            });
+        if (upper == buf.begin()) return 0.0;
+        auto sample = std::prev(upper);
+        if (!(sample->second > 0.0) || sample->first > start_ts_s) return 0.0;
+        double cursor = start_ts_s;
+        double price = sample->second;
+        double area = 0.0;
+        for (++sample; sample != buf.end() && sample->first < end_ts_s; ++sample) {
+            if (sample->first > cursor)
+                area += price * (sample->first - cursor);
+            cursor = sample->first;
+            price = sample->second;
+            if (!(price > 0.0) || !std::isfinite(price)) return 0.0;
+        }
+        if (end_ts_s > cursor) area += price * (end_ts_s - cursor);
+        const double mean = area / (end_ts_s - start_ts_s);
+        return std::isfinite(mean) && mean > 0.0 ? mean : 0.0;
     }
 
     // Return number of samples stored for an asset (useful for diagnostics).

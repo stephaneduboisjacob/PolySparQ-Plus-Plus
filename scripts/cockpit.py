@@ -177,6 +177,14 @@ COCKPIT_TUNABLE = {
     "profit_take_price_thresh":    ("float", 0.0, 1.0),
     "stop_loss_pct":               ("float", 0.0, 100.0),
     "hard_stop_pct":               ("float", 0.0, 100.0),
+    "lead_lag_scalp_hard_stop_ticks": ("int", 0, 1000),
+    "lead_lag_scalp_min_signal_confidence": ("float", 0.55, 0.92),
+    "lead_lag_scalp_max_entries_per_window": ("int", 1, 10),
+    "lead_lag_scalp_order_usd": ("float", 1.0, 5.0),
+    "late_window_sniper_hard_stop_ticks": ("int", 0, 1000),
+    "late_window_sniper_max_entries_per_window": ("int", 1, 10),
+    "late_window_sniper_min_net_edge_pct": ("float", 0.0, 25.0),
+    "late_window_sniper_order_usd": ("float", 1.0, 5.0),
     "timed_exit_secs":             ("int", 0, 3600),
     "ride_to_settle_secs":         ("int", 0, 3600),
     # ── entry counts / pacing ──
@@ -209,14 +217,15 @@ COCKPIT_TUNABLE = {
     'recycler_late_taker_exit_enabled': ('bool',),
     'recycler_settlement_entry_enabled': ('bool',),
     'recycler_settlement_entry_secs': ('int', 1, 120),
-    'recycler_settlement_entry_min_price': ('float', 0.90, 0.98),
-    'recycler_settlement_entry_max_price': ('float', 0.90, 0.98),
+    'recycler_settlement_entry_min_price': ('float', 0.85, 0.98),
+    'recycler_settlement_entry_max_price': ('float', 0.85, 0.98),
+    'recycler_settlement_only': ('bool',),
     'recycler_max_cycles': ('int', 1, 15),
     'recycler_lookback_secs': ('int', 30, 300),
     'recycler_min_range': ('float', 0.02, 0.4),
     'recycler_max_window_loss': ('float', 0.01, 100),
     'recycler_max_session_loss': ('float', 0.01, 1000),
-    "entry_order_mode":            ("enum", ["taker", "maker", "hybrid"]),
+    "entry_order_mode":            ("enum", ["maker"]),
     "maker_improve_ticks":         ("int", 0, 20),
     "maker_reprice_ms":            ("int", 100, 60000),
     "maker_poll_ms":               ("int", 100, 60000),
@@ -315,7 +324,6 @@ COCKPIT_TUNABLE = {
     "max_gap_btc_usd":                 ("float", 0.0, 1000000.0),
     "max_gap_eth_usd":                 ("float", 0.0, 1000000.0),
     # ── order construction / book health ──
-    "entry_cross_ticks":               ("float", 0.0, 100.0),
     "manual_buy_slippage_pct":         ("float", 0.0, 1.0),
     "manual_buy_slippage_extra":       ("float", 0.0, 1.0),
     "max_entry_spread_pct":            ("float", 0.0, 100.0),
@@ -1738,6 +1746,384 @@ def api_settles(limit=40, instance=None, all_modes=False):
     return {'settles':rows}
 
 
+def _settlement_cursor_encode(ts, order_id):
+    raw = json.dumps([str(ts), str(order_id)], separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _settlement_cursor_decode(cursor):
+    if not cursor:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(str(cursor) + "=" * (-len(str(cursor)) % 4))
+        ts, order_id = json.loads(raw.decode())
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", str(order_id)):
+            raise ValueError
+        datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        return str(ts), str(order_id)
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("Invalid settlement history cursor")
+
+
+def _settlement_result(source, price, pnl, avg_entry):
+    if source == "settle":
+        return "WIN" if (price or 0) > 0.5 else "LOSS"
+    if pnl is not None:
+        return "WIN" if pnl >= 0 else "LOSS"
+    if avg_entry is not None:
+        return "WIN" if (price or 0) >= avg_entry else "LOSS"
+    return "UNKNOWN"
+
+
+def _settlement_row(candidate, exit_record):
+    shares = exit_record["shares"]
+    gross = exit_record["gross_proceeds"]
+    matched = bool(exit_record["matched"])
+    entry_cost = exit_record["entry_cost"]
+    cost_basis = exit_record["cost_basis"]
+    total_fees = exit_record["fees"]
+    exit_fees = total_fees - (cost_basis - entry_cost)
+    avg_entry = entry_cost / shares if matched and shares else None
+    price = gross / shares if shares else None
+    pnl = exit_record["realized_pnl"] if matched else None
+    source = candidate.get("source") or "settle"
+    return {
+        "exit_order_id": candidate["client_order_id"],
+        "exit_ts": candidate["exit_ts"],
+        "ts_created": candidate["ts_created"],
+        "condition_id": candidate["condition_id"],
+        "token_id": candidate["token_id"],
+        "side_label": candidate["side_label"],
+        "instance": candidate["instance"],
+        "session_id": candidate.get("session_id"),
+        "exchange_order_id": candidate.get("exchange_order_id"),
+        "source": source,
+        "mode": candidate["mode"],
+        "asset": candidate.get("asset") or "?",
+        "horizon_seconds": candidate.get("horizon_seconds"),
+        "target_price": candidate.get("target_price"),
+        "window_open": candidate.get("window_open"),
+        "window_close": candidate.get("window_close"),
+        "resolved_outcome": candidate.get("resolved_outcome"),
+        "question": candidate.get("question"),
+        "slug": candidate.get("slug"),
+        "execution_mode": candidate.get("execution_mode"),
+        "post_only": candidate.get("post_only"),
+        "status": candidate.get("status"),
+        "order_price": candidate.get("price"),
+        "order_size_shares": candidate.get("size_shares"),
+        "settle_price": price,
+        "size_shares": shares,
+        "gross_proceeds": gross,
+        "payout_usd": gross - exit_fees,
+        "avg_entry": avg_entry,
+        "unit_cost": cost_basis / shares if matched and shares else None,
+        "entry_cost": entry_cost if matched else None,
+        "cost_basis": cost_basis if matched else None,
+        "realized_pnl": pnl,
+        "fee_usd": total_fees,
+        "accounting_complete": matched,
+        "result": _settlement_result(source, price, pnl, avg_entry),
+        "_cursor_ts": candidate["cursor_ts"],
+    }
+
+
+def api_settlement_history(instance=None, params=None):
+    """Filterable, cursor-paginated exit history costed by the durable fill ledger."""
+    from accounting import replay_fills
+
+    params = params or {}
+    mode = str(params.get("mode") or "").lower()
+    if mode not in ("", "paper", "live"):
+        raise ValueError("Invalid trading mode")
+    asset = str(params.get("asset") or "").upper()
+    if asset not in ("", "BTC", "ETH", "SOL", "XRP"):
+        raise ValueError("Invalid asset")
+    side = str(params.get("side") or "").upper()
+    if side not in ("", "UP", "DOWN"):
+        raise ValueError("Invalid side")
+    result_filter = str(params.get("result") or "all").lower()
+    if result_filter not in ("all", "win", "loss", "unknown"):
+        raise ValueError("Invalid result filter")
+    search = str(params.get("search") or "").strip()[:100]
+    source = str(params.get("source") or "")[:100]
+    try:
+        horizon = int(params.get("horizon") or 0)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("Invalid market duration")
+    if horizon not in (0, 300, 900, 3600, 86400):
+        raise ValueError("Invalid market duration")
+    try:
+        limit = max(1, min(100, int(params.get("limit") or 50)))
+    except (TypeError, ValueError, OverflowError):
+        limit = 50
+
+    def epoch_ms(value, label):
+        if value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("Invalid " + label + " timestamp")
+        if parsed < 0 or parsed > 4_102_444_800_000:
+            raise ValueError("Invalid " + label + " timestamp")
+        return parsed
+
+    from_ms = epoch_ms(params.get("from_ms"), "start")
+    to_ms = epoch_ms(params.get("to_ms"), "end")
+    if from_ms is not None and to_ms is not None and from_ms > to_ms:
+        raise ValueError("Start time must be before end time")
+    cursor = _settlement_cursor_decode(params.get("cursor"))
+
+    filters = ["o.direction='sell'", "EXISTS (SELECT 1 FROM vp.fills f WHERE f.client_order_id=o.client_order_id)"]
+    args = []
+    if instance:
+        filters.append("o.instance=%s")
+        args.append(instance)
+    if mode:
+        filters.append("o.mode::text=%s")
+        args.append(mode)
+    if asset:
+        filters.append("m.asset=%s")
+        args.append(asset)
+    if horizon:
+        filters.append("m.horizon_seconds=%s")
+        args.append(horizon)
+    if side:
+        filters.append("o.side_label::text=%s")
+        args.append(side)
+    if source:
+        filters.append("o.source=%s")
+        args.append(source)
+    if search:
+        filters.append("(o.condition_id ILIKE %s OR o.source ILIKE %s OR o.instance ILIKE %s OR COALESCE(m.question,'') ILIKE %s)")
+        needle = "%" + search + "%"
+        args.extend([needle] * 4)
+    outer_filters, outer_args = [], []
+    if from_ms is not None:
+        outer_filters.append("x.exit_ts >= to_timestamp(%s / 1000.0)")
+        outer_args.append(from_ms)
+    if to_ms is not None:
+        outer_filters.append("x.exit_ts <= to_timestamp(%s / 1000.0)")
+        outer_args.append(to_ms)
+    def fetch_candidates(after, batch_size):
+        candidate_filters = list(outer_filters)
+        candidate_args = list(outer_args)
+        if after:
+            candidate_filters.append("(x.exit_ts < %s::timestamptz OR (x.exit_ts = %s::timestamptz AND o.client_order_id::text < %s))")
+            candidate_args.extend([after[0], after[0], after[1]])
+        where_outer = ("WHERE " + " AND ".join(candidate_filters)) if candidate_filters else ""
+        return q(f"""
+            WITH exit_orders AS (
+              SELECT o.client_order_id, MAX(f.ts) AS exit_ts
+              FROM vp.orders o JOIN vp.fills f USING(client_order_id)
+              LEFT JOIN vp.pm_markets m USING(condition_id)
+              WHERE {' AND '.join(filters)}
+              GROUP BY o.client_order_id
+            )
+            SELECT o.client_order_id::text, x.exit_ts,
+                   to_char(x.exit_ts AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US') || '+00:00' AS cursor_ts,
+                   o.ts_created, o.ts_submitted, o.ts_terminal, o.instance, o.mode::text AS mode,
+                   o.session_id::text AS session_id, o.condition_id, o.token_id,
+                   o.side_label::text AS side_label, o.direction::text AS direction,
+                   o.source, o.execution_mode, o.post_only, o.status::text AS status,
+                   o.price, o.size_shares, o.notional_usd,
+                   o.exchange_order_id,
+                   m.asset, m.horizon_seconds, m.target_price, m.window_open, m.window_close,
+                   m.resolved_outcome::text AS resolved_outcome, m.question, m.slug
+            FROM exit_orders x JOIN vp.orders o USING(client_order_id)
+            LEFT JOIN vp.pm_markets m USING(condition_id)
+            {where_outer}
+            ORDER BY x.exit_ts DESC, o.client_order_id::text DESC
+            LIMIT %s
+        """, tuple(args + candidate_args + [batch_size]))
+
+    # Bot/source choices are scoped to this request's authorized instance.
+    option_filters = ["o.direction='sell'", "EXISTS (SELECT 1 FROM vp.fills f WHERE f.client_order_id=o.client_order_id)"]
+    option_args = []
+    if instance:
+        option_filters.append("o.instance=%s")
+        option_args.append(instance)
+    options = q(f"""SELECT DISTINCT o.instance, o.source
+        FROM vp.orders o WHERE {' AND '.join(option_filters)}
+        ORDER BY o.instance, o.source""", tuple(option_args))
+    bots = sorted({str(r["instance"]) for r in options if r.get("instance")})
+    sources = sorted({str(r["source"]) for r in options if r.get("source")})
+
+    rows, scan_cursor, scanned, exhausted = [], cursor, 0, False
+    next_cursor = None
+    batch_size, max_scan = 200, 1200
+    while scanned < max_scan:
+        batch = fetch_candidates(scan_cursor, min(batch_size, max_scan - scanned))
+        if not batch:
+            exhausted = True
+            break
+        fills = q("""SELECT f.id, f.ts, f.price, f.size_shares, f.fee_usd,
+                    o.client_order_id::text, o.mode::text AS mode, o.instance,
+                    o.session_id::text AS session_id, o.condition_id, o.token_id,
+                    o.side_label::text AS side_label, o.direction::text AS direction,
+                    o.source, o.ts_created, m.asset, m.horizon_seconds
+             FROM vp.orders o JOIN vp.fills f USING(client_order_id)
+             LEFT JOIN vp.pm_markets m USING(condition_id)
+             WHERE o.condition_id=ANY(%s) ORDER BY f.ts,f.id""",
+             (list({r["condition_id"] for r in batch}),))
+        ledger = replay_fills(fills)
+        exits = {e["client_order_id"]: e for e in ledger["exits"]}
+        for candidate in batch:
+            scanned += 1
+            scan_cursor = (candidate["cursor_ts"], candidate["client_order_id"])
+            exit_record = exits.get(candidate["client_order_id"])
+            if not exit_record:
+                continue
+            row = _settlement_row(candidate, exit_record)
+            if result_filter != "all" and row["result"].lower() != result_filter:
+                continue
+            row["_cursor_id"] = candidate["client_order_id"]
+            rows.append(row)
+            if len(rows) > limit:
+                boundary = rows[limit - 1]
+                next_cursor = _settlement_cursor_encode(boundary["_cursor_ts"], boundary["_cursor_id"])
+                rows = rows[:limit]
+                break
+        if next_cursor:
+            break
+        if len(batch) < min(batch_size, max_scan - (scanned - len(batch))):
+            exhausted = True
+            break
+        if scanned >= max_scan:
+            next_cursor = _settlement_cursor_encode(*scan_cursor)
+            break
+
+    for row in rows:
+        row.pop("_cursor_ts", None)
+        row.pop("_cursor_id", None)
+    return {"rows": rows, "next_cursor": next_cursor, "has_more": bool(next_cursor),
+            "scanned": scanned, "bots": bots, "sources": sources,
+            "server_ts": int(time.time() * 1000)}
+
+
+def _settlement_public_payload(value, depth=0):
+    if depth > 5:
+        return None
+    if isinstance(value, dict):
+        blocked = re.compile(r"(?:private|secret|credential|authorization|password|api.?key)", re.I)
+        return {str(k): _settlement_public_payload(v, depth + 1)
+                for k, v in value.items() if not blocked.search(str(k))}
+    if isinstance(value, list):
+        return [_settlement_public_payload(v, depth + 1) for v in value[:100]]
+    if isinstance(value, str):
+        return value[:3000]
+    return value
+
+
+def api_settlement_detail(order_id, instance=None):
+    """Full, safe transaction detail for one matched exit order."""
+    from accounting import replay_fills
+
+    order_id = str(order_id or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", order_id):
+        raise ValueError("Invalid transaction id")
+    where = "o.client_order_id=%s AND o.direction='sell'"
+    args = [order_id]
+    if instance:
+        where += " AND o.instance=%s"
+        args.append(instance)
+    trade = q(f"""SELECT o.client_order_id::text, o.ts_created, o.ts_submitted, o.ts_terminal,
+            o.instance, o.mode::text AS mode, o.session_id::text AS session_id,
+            o.condition_id, o.token_id, o.side_label::text AS side_label,
+            o.direction::text AS direction, o.source, o.execution_mode, o.post_only,
+            o.status::text AS status, o.price, o.size_shares, o.notional_usd,
+            o.exchange_order_id, MAX(f.ts) AS exit_ts,
+            to_char(MAX(f.ts) AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US') || '+00:00' AS cursor_ts,
+            m.asset, m.horizon_seconds, m.target_price, m.window_open, m.window_close,
+            m.resolved_outcome::text AS resolved_outcome, m.question, m.slug
+        FROM vp.orders o JOIN vp.fills f USING(client_order_id)
+        LEFT JOIN vp.pm_markets m USING(condition_id)
+        WHERE {where}
+        GROUP BY o.client_order_id,m.asset,m.horizon_seconds,m.target_price,m.window_open,
+                 m.window_close,m.resolved_outcome,m.question,m.slug""", tuple(args), one=True)
+    if not trade:
+        return {"error": "Settlement transaction not found"}
+
+    fills = q("""SELECT f.id, f.ts, f.price, f.size_shares, f.fee_usd,
+            o.client_order_id::text, o.instance, o.mode::text AS mode,
+            o.session_id::text AS session_id, o.condition_id, o.token_id,
+            o.side_label::text AS side_label, o.direction::text AS direction,
+            o.source, o.execution_mode, o.post_only, o.status::text AS status,
+            o.price AS order_price, o.size_shares AS order_size_shares,
+            o.notional_usd AS order_notional_usd, o.ts_created AS order_created,
+            o.ts_submitted, o.ts_terminal, o.exchange_order_id
+        FROM vp.orders o JOIN vp.fills f USING(client_order_id)
+        WHERE o.condition_id=%s AND o.token_id=%s AND o.mode::text=%s
+          AND o.instance IS NOT DISTINCT FROM %s
+          AND o.session_id IS NOT DISTINCT FROM %s
+          AND f.ts <= %s::timestamptz
+        ORDER BY f.ts,f.id""", (trade["condition_id"], trade["token_id"], trade["mode"],
+                                  trade["instance"], trade["session_id"], trade["cursor_ts"]))
+    ledger = replay_fills(fills)
+    exit_record = next((e for e in ledger["exits"] if e["client_order_id"] == order_id), None)
+    if not exit_record:
+        return {"error": "Transaction fill accounting is unavailable"}
+    summary = _settlement_row(trade, exit_record)
+    summary.pop("_cursor_ts", None)
+    entry = next((f for f in fills if f.get("direction") == "buy"), None)
+    signal = None
+    if entry:
+        signal = q("""SELECT ts, side_label::text AS side_label, confidence, recommended,
+                      reason, model_version, regime_label, payload
+               FROM vp.signals WHERE condition_id=%s AND side_label::text=%s
+                 AND direction='buy' AND ts <= to_timestamp(%s / 1000.0)
+                 AND payload->>'instance' IS NOT DISTINCT FROM %s
+                 AND (payload->>'session_id' IS NULL OR payload->>'session_id' IS NOT DISTINCT FROM %s)
+               ORDER BY (payload->>'client_order_id'=%s) DESC, ts DESC LIMIT 1""",
+               (trade["condition_id"], trade["side_label"], entry["ts"],
+                trade["instance"], trade["session_id"], entry["client_order_id"]), one=True)
+    for fill in fills:
+        gross = float(fill["price"] or 0) * float(fill["size_shares"] or 0)
+        fee = float(fill["fee_usd"] or 0)
+        fill["gross_cashflow_usd"] = gross if fill["direction"] == "sell" else -gross
+        fill["net_cashflow_usd"] = fill["gross_cashflow_usd"] - fee
+    window_events = []
+    open_tick = close_tick = None
+    try:
+        window_events = q("""SELECT ts,event_type,payload FROM vp.window_events
+            WHERE condition_id=%s ORDER BY ts,id LIMIT 40""", (trade["condition_id"],))
+    except Exception:
+        pass
+    if trade.get("asset") and trade.get("window_open"):
+        try:
+            open_tick = q("""SELECT ts,price,source FROM vp.oracle_ticks
+                WHERE asset=%s AND ts BETWEEN to_timestamp(%s / 1000.0)-interval '10 seconds'
+                    AND to_timestamp(%s / 1000.0)+interval '10 seconds'
+                ORDER BY ABS(EXTRACT(EPOCH FROM(ts-to_timestamp(%s / 1000.0)))) LIMIT 1""",
+                (trade["asset"], trade["window_open"], trade["window_open"], trade["window_open"]), one=True)
+            if trade.get("window_close"):
+                close_tick = q("""SELECT ts,price,source FROM vp.oracle_ticks
+                    WHERE asset=%s AND ts BETWEEN to_timestamp(%s / 1000.0)-interval '30 seconds'
+                        AND to_timestamp(%s / 1000.0)+interval '10 seconds'
+                    ORDER BY ABS(EXTRACT(EPOCH FROM(ts-to_timestamp(%s / 1000.0)))) LIMIT 1""",
+                    (trade["asset"], trade["window_close"], trade["window_close"], trade["window_close"]), one=True)
+        except Exception:
+            open_tick = close_tick = None
+    if signal and signal.get("payload") is not None:
+        signal["payload"] = _settlement_public_payload(signal["payload"])
+    for event in window_events:
+        if event.get("payload") is not None:
+            event["payload"] = _settlement_public_payload(event["payload"])
+    allocated_entry_fees = exit_record["cost_basis"] - exit_record["entry_cost"]
+    return {"trade": summary,
+            "market": {k: trade.get(k) for k in ("condition_id", "asset", "horizon_seconds", "target_price",
+                "window_open", "window_close", "resolved_outcome", "question", "slug")},
+            "signal": signal, "fills": fills, "window_events": window_events,
+            "oracle_open": open_tick, "oracle_close": close_tick,
+            "math": {"shares": exit_record["shares"], "gross_proceeds": exit_record["gross_proceeds"],
+                "entry_cost": exit_record["entry_cost"], "allocated_entry_fees": allocated_entry_fees,
+                "exit_fees": exit_record["fees"] - allocated_entry_fees,
+                "total_fees": exit_record["fees"], "net_realized_pnl": exit_record["realized_pnl"],
+                "accounting_complete": bool(exit_record["matched"])},
+            "server_ts": int(time.time() * 1000)}
+
+
 def api_predictor(instance=None, limit=150):
     """PREDICTOR tab feed: WPRED checkpoint predictions joined to their outcome.
 
@@ -2148,24 +2534,23 @@ def _local_candle_baselines():
     return out
 
 
-def api_manual_predictions(force=False, interval=None):
-    """Read the continuously refreshed snapshot without blocking on upstreams."""
+def api_manual_predictions(force=False, after_version=None, wait_s=0):
+    """Return a fresh snapshot, optionally waiting for the next producer update."""
     global _manual_prediction_service
     from prediction_board import PredictionService
     try:
-        requested_interval = int(interval) if interval is not None else 5
-    except (TypeError, ValueError):
-        requested_interval = 5
-    if requested_interval not in (2, 5, 10, 15):
-        requested_interval = 5
+        after_version = max(0, int(after_version)) if after_version is not None else None
+    except (TypeError, ValueError, OverflowError):
+        after_version = None
+    try:
+        wait_s = min(3.0, max(0.0, float(wait_s)))
+    except (TypeError, ValueError, OverflowError):
+        wait_s = 0.0
     with _manual_prediction_lock:
         if _manual_prediction_service is None:
-            _manual_prediction_service = PredictionService(q, _public_json, ROOT, _prediction_news,
-                                                            interval=requested_interval)
+            _manual_prediction_service = PredictionService(q, _public_json, ROOT, _prediction_news)
             _manual_prediction_service.start()
-        elif interval is not None:
-            _manual_prediction_service.set_interval(requested_interval)
-    return _manual_prediction_service.snapshot(force)
+    return _manual_prediction_service.snapshot(force, after_version, wait_s)
 
 
 def api_log_tail(instance=None, lines=300):
@@ -2391,12 +2776,11 @@ _V3_REGISTRY = [
     _k("Autopilot & Timing","min_secs_remaining_15m","strategy.hot","15m Min Secs Left","s",lo=0,hi=900,step=5,hint="15m window entry floor."),
     _k("Autopilot & Timing","max_secs_remaining_15m","strategy.hot","15m Max Secs Left","s",lo=10,hi=900,step=5,hint="15m window entry ceiling."),
     # Order Execution
-    _k("Order Execution","entry_order_mode","strategy.hot","Entry Order Mode","",typ="enum",enum=["taker","maker","hybrid"],hint="taker=cross now; maker=post-only; hybrid=maker then FAK."),
-    _k("Order Execution","entry_cross_ticks","strategy.hot","Entry Cross Ticks","ticks",lo=0,hi=10,step=1,hint="Ticks paid through the ask on taker fills."),
+    _k("Order Execution","entry_order_mode","strategy.hot","Entry Order Mode","",typ="enum",enum=["maker"],hint="Fixed policy: every order is a post-only LIMIT-MAKER quote."),
     _k("Order Execution","order_cooldown_ms","strategy.hot","Order Cooldown (ms)","ms",lo=0,hi=60000,step=100,hint="Per-market cooldown between orders."),
     _k("Order Execution","maker_improve_ticks","strategy.hot","Maker Improve Ticks","ticks",lo=0,hi=10,step=1,hint="Ticks above best bid for post-only quotes."),
     _k("Order Execution","maker_reprice_ms","strategy.hot","Maker Reprice (ms)","ms",lo=100,hi=10000,step=50,hint="Quote refresh cadence."),
-    _k("Order Execution","maker_max_age_ms","strategy.hot","Maker Max Age (ms)","ms",lo=0,hi=60000,step=50,hint="Time before maker quote falls back (hybrid)."),
+    _k("Order Execution","maker_max_age_ms","strategy.hot","Maker Max Age (ms)","ms",lo=0,hi=60000,step=50,hint="Entry quote lifetime; expiry cancels without taker fallback."),
     _k("Order Execution","maker_cancel_before_close_ms","strategy.hot","Maker Cancel Before Close (ms)","ms",lo=0,hi=60000,step=250,hint="Pull quotes this long before window close."),
     # Predictor & Digital FV
     _k("Predictor & Digital Fair Value","predictor_mode","strategy.hot","Predictor Mode","",typ="bool",hint="Main prediction-model entry path."),
@@ -2508,7 +2892,7 @@ def _v3_group_for(key):
         return "Adaptive Entry"
     if key.startswith("digital_fv_") or key.startswith("predictor_") or key in ("min_predictor_edge","min_predictor_conf"):
         return "Predictor & Digital Fair Value"
-    if key.startswith("maker_") or key in ("entry_order_mode","entry_cross_ticks","manual_buy_slippage_pct","manual_buy_slippage_extra","token_quarantine_payload_ms","token_quarantine_no_match_ms","min_position_shares","dust_position_shares","price_history_max_points","price_velocity_lookback_ms","sparkline_points","tick_buffer_max_age_us","tick_buffer_max_entries","max_book_age_ms"):
+    if key.startswith("maker_") or key in ("entry_order_mode","manual_buy_slippage_pct","manual_buy_slippage_extra","token_quarantine_payload_ms","token_quarantine_no_match_ms","min_position_shares","dust_position_shares","price_history_max_points","price_velocity_lookback_ms","sparkline_points","tick_buffer_max_age_us","tick_buffer_max_entries","max_book_age_ms"):
         return "Order Execution"
     if key.startswith("min_secs_remaining") or key.startswith("max_secs_remaining") or key.startswith("autopilot_") or key in ("max_entries_per_window","max_same_side_positions","consecutive_loss_pause","consecutive_pause_secs","order_cooldown_ms","reversal_cooldown_secs","max_reversals_per_window","entry_persist_gate","entry_persist_ms"):
         return "Autopilot & Timing"
@@ -2585,7 +2969,7 @@ def _v3_knobs_impl(instance):
             "value": val, "unit": curated.get("unit", ""), "type": typ,
             "lo": lo, "hi": hi, "enum": spec[1] if spec and raw_typ == "enum" else curated.get("enum"),
             "step": curated.get("step") or (1 if typ == "int" else None),
-            "hint": ("PAPER-only BTC 15m cycle strategy. Entry also requires a fresh settlement-reference estimate with the configured minimum edge. All non-target exits are restricted to the final six minutes; late taker exits are explicit and may be partial." if key.startswith("recycler_") else curated.get("hint", "")), "section": sec, "set": True,
+            "hint": ("BTC 15m cycle strategy. Entry also requires a fresh settlement-reference estimate with the configured minimum edge. Late exits post maker-only limit orders and may remain unfilled until settlement." if key.startswith("recycler_") else curated.get("hint", "")), "section": sec, "set": True,
             "source": "instance config" if key in parsed.get("strategy",{}).get("hot",{}) or key in parsed.get("risk",{}) else "engine default", "active": True,
         })
     ordered = [{"group": g, "desc": _V3_GROUP_HINTS[g], "controls": len(groups[g]), "rows": groups[g]}
@@ -3988,7 +4372,7 @@ def api_execution(instance=None):
             hot = ((cfg.get("strategy") or {}).get("hot") or {})
             for key in ("entry_order_mode", "maker_improve_ticks", "maker_reprice_ms",
                         "maker_poll_ms", "maker_max_age_ms",
-                        "maker_cancel_before_close_ms", "entry_cross_ticks"):
+                        "maker_cancel_before_close_ms"):
                 policy[key] = hot.get(key)
         except Exception:
             pass
@@ -4644,6 +5028,176 @@ def api_fleet_detail():
         })
     result = {"fleet": out, "available_configs": avail_configs}
     _fleet_cache[0], _fleet_cache[1] = time.monotonic(), result
+    return result
+
+
+_window_bot_desk_cache = {}
+_WINDOW_BOT_IDS = {
+    "btc-5m-lead-scalper",
+    "btc-15m-lead-scalper",
+    "btc-late-settlement-sniper",
+}
+_WINDOW_BOT_ASSETS = ("BTC", "ETH", "SOL", "XRP")
+
+
+def api_window_bot_desk(allowed_instances=None):
+    """Live operational view for the three multi-asset window-bot profiles."""
+    scope = None if allowed_instances is None else tuple(sorted(allowed_instances))
+    cache_key = ("admin",) if scope is None else ("user", *scope)
+    now = time.monotonic()
+    hit = _window_bot_desk_cache.get(cache_key)
+    if hit and now - hit[0] < 1.5:
+        return hit[1]
+
+    fleet_rows = {x["instance"]: x for x in api_fleet_detail().get("fleet", [])}
+    names = sorted((_WINDOW_BOT_IDS & set(fleet_rows)) if scope is None
+                   else (_WINDOW_BOT_IDS & set(fleet_rows) & set(scope)))
+    bots = []
+    for inst in names:
+        path = os.path.join(CONFIG_DIR, f"polypulse-{inst}.toml")
+        try:
+            with open(path, "rb") as stream:
+                cfg = tomllib.load(stream)
+        except Exception:
+            continue
+        hot = cfg.get("strategy", {}).get("hot", {})
+        blocked_assets = {str(asset).upper() for asset in hot.get("blocked_assets", [])}
+        bot_assets = [asset for asset in _WINDOW_BOT_ASSETS if asset not in blocked_assets]
+        mode = str(cfg.get("runtime", {}).get("mode", "unknown")).lower()
+        horizons = cfg.get("polymarket", {}).get("universe_horizons_seconds", [])
+        fleet_row = fleet_rows[inst]
+        since = accounting_since(inst, mode)
+        positions = reconstructed_positions(mode, since, inst)
+        accounting = ledger_accounting(mode, positions, since, inst)
+        execution = api_execution(inst)
+        recent = api_orders(12, inst, all_modes=True).get("orders", [])
+        if scope is not None:
+            for order in recent:
+                order.pop("exchange_order_id", None)
+        log_lines = tail(instance_log(inst), 240)
+        engine_line = next((line for line in reversed(log_lines) if "WINDOW_BOT " in line), "")
+        engine_state = None
+        match = re.search(r"WINDOW_BOT .*state=([^ ]+)", engine_line)
+        if match:
+            engine_state = match.group(1)
+        market_feed_state = "unknown"
+        market_feed_frames = None
+        discovered_markets = None
+        for line in reversed(log_lines):
+            if market_feed_frames is None and "pm-md frames:" in line:
+                frames_match = re.search(r"pm-md frames: total=(\d+).*connected=(true|false)", line)
+                if frames_match:
+                    market_feed_frames = int(frames_match.group(1))
+                    market_feed_state = "connected" if frames_match.group(2) == "true" else "disconnected"
+            if discovered_markets is None and "gamma discovered " in line:
+                markets_match = re.search(r"gamma discovered (\d+) up-down markets", line)
+                if markets_match:
+                    discovered_markets = int(markets_match.group(1))
+            if market_feed_frames is not None and discovered_markets is not None:
+                break
+        if market_feed_state == "unknown":
+            for line in reversed(log_lines):
+                state_match = re.search(r"pm-md ws state: (connected|disconnected)", line)
+                if state_match:
+                    market_feed_state = state_match.group(1)
+                    break
+        open_orders = execution.get("open_orders", [])
+        if scope is not None:
+            for order in open_orders:
+                order.pop("exchange_order_id", None)
+        is_scalper = bool(hot.get("lead_lag_scalp_enabled"))
+        horizon = int(hot.get("lead_lag_scalp_horizon_s") or 0)
+        sniper = bool(hot.get("late_window_sniper_enabled"))
+        settlement_only = sniper and not is_scalper
+        if is_scalper:
+            scalp_horizon_label = f"{horizon // 60}m" if horizon else "5m+15m"
+            strategy_name = f"Coinbase Lead Scalper · {scalp_horizon_label} · {len(bot_assets)} assets"
+            entry_usd = float(hot.get("lead_lag_scalp_order_usd") or 0)
+            entry_min = float(hot.get("lead_lag_scalp_min_price") or 0)
+            entry_max = float(hot.get("lead_lag_scalp_max_price") or 0)
+            entry_window_secs = int(hot.get("lead_lag_scalp_stop_entry_secs") or 0)
+            target_pct = float(hot.get("lead_lag_scalp_profit_target_pct") or 0)
+            hard_stop_pct = float(hot.get("lead_lag_scalp_hard_stop_pct") or 0)
+            hard_stop_ticks = int(hot.get("lead_lag_scalp_hard_stop_ticks") or 0)
+            reversal_exit_enabled = bool(hot.get("lead_lag_scalp_reversal_exit_enabled", True))
+            flatten_secs = int(hot.get("lead_lag_scalp_flatten_secs") or 0)
+            flatten_secs_5m = int(hot.get("lead_lag_scalp_flatten_5m_secs") or flatten_secs)
+            flatten_secs_15m = int(hot.get("lead_lag_scalp_flatten_15m_secs") or flatten_secs)
+            if target_pct > 0:
+                entry_max = min(entry_max, 0.99 / (1.0 + target_pct / 100.0))
+            strategy_horizons = [horizon] if horizon else [int(x) for x in horizons if str(x).isdigit()]
+        elif sniper:
+            strategy_name = f"Late Settlement Sniper · {len(bot_assets)} assets · 5m/15m"
+            entry_usd = float(hot.get("late_window_sniper_order_usd") or 0)
+            entry_min = float(hot.get("late_window_sniper_min_price") or 0)
+            entry_max = float(hot.get("late_window_sniper_max_price") or 0)
+            entry_window_secs = int(hot.get("late_window_sniper_max_secs") or 0)
+            target_pct = hard_stop_pct = hard_stop_ticks = flatten_secs = 0
+            flatten_secs_5m = flatten_secs_15m = 0
+            reversal_exit_enabled = False
+            strategy_horizons = [int(x) for x in horizons
+                                 if str(x).isdigit() and int(x) in (300, 900)]
+        else:
+            strategy_name = "Unconfigured multi-asset window bot"
+            entry_usd = entry_min = entry_max = target_pct = hard_stop_pct = hard_stop_ticks = 0
+            entry_window_secs = flatten_secs = 0
+            flatten_secs_5m = flatten_secs_15m = 0
+            reversal_exit_enabled = False
+            strategy_horizons = [int(x) for x in horizons if str(x).isdigit()]
+        bots.append({
+            "instance": inst,
+            "name": fleet_row.get("name") or inst,
+            "running": bool(fleet_row.get("running")),
+            "mode": mode,
+            "strategy": strategy_name,
+            "assets": bot_assets,
+            "settlement_only": settlement_only,
+            "horizons": strategy_horizons,
+            "entry_order_mode": hot.get("entry_order_mode", "maker"),
+            "entry_usd": entry_usd,
+            "entry_min_price": entry_min,
+            "entry_max_price": entry_max,
+            "entry_window_secs": entry_window_secs,
+            "entry_window_secs_5m": int(hot.get("lead_lag_scalp_stop_entry_5m_secs") or 90)
+                if is_scalper else 0,
+            "entry_window_secs_15m": int(hot.get("lead_lag_scalp_stop_entry_15m_secs") or 270)
+                if is_scalper else 0,
+            "entry_min_secs": int(hot.get("late_window_sniper_min_secs") or 0) if settlement_only else 0,
+            "settlement_edge_pct": float(hot.get("late_window_sniper_min_net_edge_pct") or 0),
+            "target_pct": target_pct,
+            "hard_stop_pct": hard_stop_pct,
+            "hard_stop_ticks": hard_stop_ticks,
+            "reversal_exit_enabled": reversal_exit_enabled,
+            "flatten_secs": flatten_secs,
+            "flatten_secs_5m": flatten_secs_5m,
+            "flatten_secs_15m": flatten_secs_15m,
+            "max_entries_per_window": int(hot.get("lead_lag_scalp_max_entries_per_window") or 0) if is_scalper
+                else int(hot.get("late_window_sniper_max_entries_per_window") or 0),
+            "cb_move_bps": float(hot.get("lead_lag_scalp_min_cb_move_bps") or 0),
+            "cb_lead_bps": float(hot.get("lead_lag_scalp_min_cb_lead_bps") or 0),
+            "max_window_age_ms": int(hot.get("lead_lag_scalp_max_book_age_ms") or 0),
+            "max_window_usd": float(cfg.get("risk", {}).get("max_per_window_usd") or 0),
+            "max_deployed_usd": float(cfg.get("risk", {}).get("max_deployed_usd") or 0),
+            "session_net": float(accounting.get("net_pnl") or 0),
+            "realized_pnl": float(accounting.get("realized_pnl") or 0),
+            "unrealized_pnl": float(accounting.get("unrealized_pnl") or 0),
+            "deployed_usd": float(accounting.get("deployed_usd") or 0),
+            "positions": positions.get("positions", []),
+            "open_orders": open_orders,
+            "order_stats": execution.get("stats", []),
+            "recent_orders": recent,
+            "engine_state": engine_state,
+            "market_feed_state": market_feed_state,
+            "market_feed_frames": market_feed_frames,
+            "discovered_markets": discovered_markets,
+        })
+    result = {"bots": bots,
+              "server_ts": int(time.time() * 1000),
+              "refresh_ms": 1500,
+              "mode_policy": "Dedicated multi-asset strategy view. Profiles default to PAPER."}
+    if len(_window_bot_desk_cache) > 32:
+        _window_bot_desk_cache.clear()
+    _window_bot_desk_cache[cache_key] = (time.monotonic(), result)
     return result
 
 
@@ -6104,7 +6658,7 @@ def api_v3_fleet():
                       "configured_mode": configured_mode,
                       "runtime_updated_ms": observed["ts_ms"] if observed else None,
                       "entry_order_mode": observed["execution_mode"] if observed else
-                      load_config(inst).get("strategy", {}).get("entry_order_mode", "taker")})
+                      load_config(inst).get("strategy", {}).get("entry_order_mode", "maker")})
     return {"fleet": fleet, "server_ts": int(time.time() * 1000)}
 
 
@@ -6465,6 +7019,11 @@ ROUTES = {
     "/api/fills": lambda qs: api_fills(int(qs.get("limit", ["60"])[0])),
     "/api/settles": lambda qs: api_settles(int(qs.get("limit", ["40"])[0]),
                                            qs.get("instance", [""])[0] or None),
+    "/api/settlement_history": lambda qs: api_settlement_history(
+        qs.get("instance", [""])[0] or None,
+        {key: values[0] for key, values in qs.items() if values}),
+    "/api/settlement_detail": lambda qs: api_settlement_detail(
+        qs.get("order_id", [""])[0], qs.get("instance", [""])[0] or None),
     "/api/predictor": lambda qs: api_predictor(qs.get("instance", [""])[0] or None,
                                                 int(qs.get("limit", ["150"])[0])),
     "/api/predictor_trajectory": lambda qs: api_predictor_trajectory(
@@ -6472,7 +7031,8 @@ ROUTES = {
                                                 int(qs.get("limit", ["200"])[0])),
     "/api/manual_predictions": lambda qs: api_manual_predictions(
                                                 qs.get("force", ["0"])[0] == "1",
-                                                qs.get("interval", [None])[0]),
+                                                qs.get("after_version", [None])[0],
+                                                qs.get("wait", [0])[0]),
     "/api/pnl_history": lambda qs: api_pnl_history(int(qs.get("hours", ["24"])[0])),
     "/api/pnl_today": lambda qs: api_pnl_today(),
     "/api/v3/knobs": lambda qs: api_v3_knobs(qs.get("instance", ["cb"])[0]),
@@ -7492,6 +8052,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/live", "/api/live_lite", "/api/activity",
         "/api/orders", "/api/fills", "/api/log_tail",
         "/api/source_pnl", "/api/strategy_history", "/api/settles",
+        "/api/settlement_history", "/api/settlement_detail",
         "/api/predictor",
         "/api/execution",
     }
@@ -7619,6 +8180,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/fleet":
             return self._send(200, self._api_fleet_for_user())
 
+        if path in ("/api/window_bots", "/api/scalper_desk"):
+            allowed = None if self._is_admin() else self._user_instances()
+            return self._send(200, api_window_bot_desk(allowed))
+
         if path == "/api/pnl_by_instance":
             return self._send(200, self._api_pnl_by_instance_for_user())
 
@@ -7675,6 +8240,12 @@ class Handler(BaseHTTPRequestHandler):
                     for row in order_rows:
                         if isinstance(row, dict):
                             row.pop("exchange_order_id", None)
+                if path == "/api/settlement_detail" and not self._is_admin() and isinstance(result, dict):
+                    for row in result.get("fills", []):
+                        if isinstance(row, dict):
+                            row.pop("exchange_order_id", None)
+                    if isinstance(result.get("trade"), dict):
+                        result["trade"].pop("exchange_order_id", None)
                 if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], int):
                     return self._send(result[0], result[1])
                 return self._send(200, result)

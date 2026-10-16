@@ -36,6 +36,7 @@
 #include "engine/pm_flow_buffer.hpp"
 #include "engine/tick_buffer.hpp"
 #include "engine/scalp_manager.hpp"
+#include "engine/window_bots.hpp"
 #include "exec/live.hpp"
 #include "exec/paper.hpp"
 #include "exec/positions.hpp"
@@ -65,6 +66,7 @@
 #include <cctype>
 #include <condition_variable>
 #include <csignal>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -87,6 +89,24 @@
 namespace {
 std::atomic<bool> g_stop{false};
 std::atomic<vp::Tui*> g_tui{nullptr};
+bool lead_scalp_horizon_allowed(int configured_horizon_s, int market_horizon_s) {
+    return (market_horizon_s == 300 || market_horizon_s == 900) &&
+        (configured_horizon_s == 0 || configured_horizon_s == market_horizon_s);
+}
+int lead_scalp_entry_cutoff_secs(int horizon_s, int cutoff_5m, int cutoff_15m) {
+    return horizon_s == 300 ? cutoff_5m : cutoff_15m;
+}
+int lead_scalp_flatten_secs(int horizon_s, int flatten_5m, int flatten_15m) {
+    return horizon_s == 300 ? flatten_5m : flatten_15m;
+}
+int late_sniper_min_secs(const vp::StrategyHot& strategy, int horizon_s) {
+    return horizon_s == 300 ? strategy.late_window_sniper_min_secs_5m
+        : strategy.late_window_sniper_min_secs_15m;
+}
+int late_sniper_max_secs(const vp::StrategyHot& strategy, int horizon_s) {
+    return horizon_s == 300 ? strategy.late_window_sniper_max_secs_5m
+        : strategy.late_window_sniper_max_secs_15m;
+}
 void write_runtime_status(const std::string& instance, const std::string& session,
                           vp::TradeMode mode, const std::string& execution_mode,
                           bool uncertain_order_halt, bool autopilot, bool daily_kill, int64_t now_ms) noexcept {
@@ -557,8 +577,9 @@ static void rebuild_snapshot(SharedState& st,
         // since the 5/15-min window opened? The CLOB takes ~55s to reprice; we front-run it.
         {
             double window_open_ts_s = (double)m.window_open_ms / 1000.0;
-            double oracle_now      = oracle_buf.latest(m.reference_key());
-            double oracle_at_open  = oracle_buf.lookup_at_or_before(m.reference_key(), window_open_ts_s);
+            const auto strike_key = m.reference_price_key();
+            double oracle_now      = oracle_buf.latest(strike_key);
+            double oracle_at_open  = oracle_buf.lookup_at_or_before(strike_key, window_open_ts_s);
             // Fallback: if no tick before window open, use the earliest tick available.
             // This handles the common case where the RTDS connects after the window opened.
             if (oracle_at_open <= 0)
@@ -1261,6 +1282,38 @@ int main(int argc, char** argv) {
     vp::engine::TickBuffer tick_buffer(cfg.strategy.tick_buffer_max_age_us,
                                        cfg.strategy.tick_buffer_max_entries);
     vp::engine::ScalpManager scalp_manager(tick_buffer);
+    vp::engine::WindowBots window_bots;
+    if (cfg.strategy.lead_lag_scalp_enabled) {
+        const std::string horizon_label = cfg.strategy.lead_lag_scalp_horizon_s == 0
+            ? "5m+15m"
+            : fmt::format("{}m", cfg.strategy.lead_lag_scalp_horizon_s / 60);
+        const std::string hard_stop_label = cfg.strategy.lead_lag_scalp_hard_stop_ticks > 0
+            ? fmt::format("-{} ticks", cfg.strategy.lead_lag_scalp_hard_stop_ticks)
+            : cfg.strategy.lead_lag_scalp_hard_stop_pct > 0.0
+                ? fmt::format("-{:.1f}%", cfg.strategy.lead_lag_scalp_hard_stop_pct)
+                : "OFF";
+        spdlog::info("WINDOW_BOT profile=MULTI_ASSET_LEAD_SCALPER horizons={} state=monitoring "
+                     "maker=true target=+{:.1f}% flatten=5m/{}s,15m/{}s hard_stop={} reversal_exit={}",
+            horizon_label,
+            cfg.strategy.lead_lag_scalp_profit_target_pct,
+            cfg.strategy.lead_lag_scalp_flatten_5m_secs,
+            cfg.strategy.lead_lag_scalp_flatten_15m_secs,
+            hard_stop_label,
+            cfg.strategy.lead_lag_scalp_reversal_exit_enabled ? "ON" : "OFF");
+    }
+    if (cfg.strategy.late_window_sniper_enabled)
+        spdlog::info("WINDOW_BOT profile=MULTI_ASSET_LATE_SETTLEMENT state=monitoring "
+                     "entry=5m:{}..{}s,15m:{}..{}s maker_limit=[{:.2f},{:.2f}] "
+                     "min_edge={:.1f}pt stop=-{} ticks route=POST_ONLY order=${:.2f} hold=settlement",
+            cfg.strategy.late_window_sniper_min_secs_5m,
+            cfg.strategy.late_window_sniper_max_secs_5m,
+            cfg.strategy.late_window_sniper_min_secs_15m,
+            cfg.strategy.late_window_sniper_max_secs_15m,
+            cfg.strategy.late_window_sniper_min_price,
+            cfg.strategy.late_window_sniper_max_price,
+            cfg.strategy.late_window_sniper_min_net_edge_pct,
+            cfg.strategy.late_window_sniper_hard_stop_ticks,
+            cfg.strategy.late_window_sniper_order_usd);
 
     // Tracks which {asset, window_open_ms} pairs have been seeded into the oracle buffer.
     // Updated on each oracle tick; new windows that open after startup are also seeded here.
@@ -1388,7 +1441,7 @@ int main(int argc, char** argv) {
                     res.order_shares, res.order_price,
                     res.exchange_order_id.empty() ? res.client_order_id : res.exchange_order_id);
             }
-        }
+        }, {}, {}
     };
 
     journal.before_submit = [&](const vp::OrderRequest& req, const std::string& intent_id) {
@@ -1396,6 +1449,15 @@ int main(int argc, char** argv) {
             req.execution_mode == vp::ExecutionMode::Hybrid ? "hybrid" : "taker";
         return pg->create_order_intent(intent_id,state.mode_label,req.condition_id,req.token_id,
             req.side,req.dir,execution,req.size_usd,req.size_shares,req.limit_price,req.source);
+    };
+    journal.on_reprice = [&](const vp::OrderRequest& req, const std::string& client_order_id,
+                             double price, double remaining_shares) {
+        const std::string execution = req.execution_mode == vp::ExecutionMode::Maker ? "maker" :
+            req.execution_mode == vp::ExecutionMode::Hybrid ? "hybrid" : "taker";
+        persist_q.push_wait([pg=pg.get(), client_order_id, execution, price,
+                             remaining_shares]() noexcept {
+            pg->insert_order_reprice(client_order_id, execution, price, remaining_shares);
+        });
     };
 
     auto paper = std::make_unique<vp::PaperExecutor>(
@@ -1450,8 +1512,7 @@ int main(int argc, char** argv) {
                 req.limit_price = o.price;
                 req.window_close_ms = o.window_close_ms;
                 req.neg_risk = cfg.wallet.neg_risk;
-                req.execution_mode = cfg.strategy.entry_order_mode == "hybrid"
-                    ? vp::ExecutionMode::Hybrid : vp::ExecutionMode::Maker;
+                req.execution_mode = vp::ExecutionMode::Maker;
                 req.maker_improve_ticks = std::max(0, cfg.strategy.maker_improve_ticks);
                 req.maker_reprice_ms = std::max(100, cfg.strategy.maker_reprice_ms);
                 req.maker_poll_ms = std::max(100, cfg.strategy.maker_poll_ms);
@@ -1560,6 +1621,8 @@ int main(int argc, char** argv) {
     // so only one order per position is outstanding at a time. HUMAN_* / DAILY_KILL
     // are exempt (manual override / emergency must always go through).
     std::unordered_map<std::string, int64_t> last_submit_ms;
+    std::unordered_map<std::string, int64_t> last_lead_flatten_attempt_ms;
+    std::unordered_map<std::string, int64_t> last_sniper_stop_attempt_ms;
     // Per-token quarantine: a token that returns "Invalid order payload" (opaque
     // CLOB-side rejection) or "no match" (no liquidity) is skipped for a while so
     // the bot stops hammering it and focuses on markets that actually fill — this
@@ -1586,6 +1649,11 @@ int main(int argc, char** argv) {
         }
         auto autonomous_sell_enabled = [&]() {
             if (manual_order(req.source)) return true;
+            if (req.source.rfind("CB_LEAD_SCALP_", 0) == 0)
+                return cfg.strategy.lead_lag_scalp_enabled;
+            if (req.source == "LATE_SETTLEMENT_HARD_STOP")
+                return cfg.strategy.late_window_sniper_enabled &&
+                       cfg.strategy.late_window_sniper_hard_stop_ticks > 0;
             if (req.source == "DAILY_KILL") return cfg.risk.daily_loss_kill_pct > 0.0;
             if (req.source == "ORACLE_REVERSAL") return cfg.strategy.oracle_reversal_exit;
             if (req.source == "ORACLE_PANIC") return cfg.strategy.oracle_panic_exit;
@@ -1625,7 +1693,11 @@ int main(int argc, char** argv) {
         // WPRED checkpoints are exempt from cooldown/quarantine: one deliberate
         // buy per window+fraction, and a cooldown keyed cid:B (shared with rule
         // entries) would silently drop the dataset order.
-        const bool exempt = req.source.rfind("RECYCLER_",0)==0 || manual_order(req.source) || req.source == "DAILY_KILL" ||
+        const bool exempt = req.source.rfind("RECYCLER_",0)==0 ||
+                            req.source.rfind("CB_LEAD_SCALP_",0)==0 ||
+                            req.source == "LATE_SETTLEMENT_ENTRY" ||
+                            req.source == "LATE_SETTLEMENT_HARD_STOP" ||
+                            manual_order(req.source) || req.source == "DAILY_KILL" ||
                             (!cfg.strategy.window_predictor_source.empty() &&
                              req.source == cfg.strategy.window_predictor_source);
         int64_t nowm = vp::Clock::wall_ns() / 1'000'000LL;
@@ -1646,31 +1718,48 @@ int main(int argc, char** argv) {
         req.fee_rate     = cfg.strategy.taker_fee_rate;
         req.fee_exponent = cfg.strategy.fee_exponent;
         req.entry_cross_ticks = cfg.strategy.entry_cross_ticks;
-        // Maker policy is opt-in and applies only to autonomous entries. Manual
-        // buys and every sell/exit preserve immediate taker semantics.
-        if (req.dir == vp::OrderDir::Buy && !manual_order(req.source) && req.source.rfind("RECYCLER_",0)!=0) {
-            if (cfg.strategy.entry_order_mode == "maker")
-                req.execution_mode = vp::ExecutionMode::Maker;
-            else if (cfg.strategy.entry_order_mode == "hybrid")
-                req.execution_mode = vp::ExecutionMode::Hybrid;
-            else
-                req.execution_mode = vp::ExecutionMode::Taker;
-            req.maker_improve_ticks = std::max(0, cfg.strategy.maker_improve_ticks);
-            req.maker_reprice_ms = std::max(100, cfg.strategy.maker_reprice_ms);
-            req.maker_poll_ms = std::max(100, cfg.strategy.maker_poll_ms);
+        // Keep orders post-only except for the two fixed-source, explicitly
+        // authorized emergency stops. The sniper stop is enabled only by its
+        // own tick threshold; the execution adapters independently verify both.
+        const bool lead_stop_fak = req.source == "CB_LEAD_SCALP_HARD_STOP" &&
+                                   cfg.strategy.lead_lag_scalp_hard_stop_ticks > 0;
+        const bool sniper_stop_fak = req.source == "LATE_SETTLEMENT_HARD_STOP" &&
+                                    cfg.strategy.late_window_sniper_hard_stop_ticks > 0;
+        const bool stop_loss_fak = req.stop_loss_fak_authorized &&
+                                   (lead_stop_fak || sniper_stop_fak) &&
+                                   req.dir == vp::OrderDir::Sell;
+        req.execution_mode = stop_loss_fak
+            ? vp::ExecutionMode::Taker : vp::ExecutionMode::Maker;
+        req.maker_improve_ticks = std::max(0, cfg.strategy.maker_improve_ticks);
+        req.maker_reprice_ms = std::max(100, cfg.strategy.maker_reprice_ms);
+        req.maker_poll_ms = std::max(100, cfg.strategy.maker_poll_ms);
+        req.maker_max_age_ms = req.dir == vp::OrderDir::Sell
+            ? 0 : std::max(0, cfg.strategy.maker_max_age_ms);
+        req.maker_cancel_before_close_ms = req.dir == vp::OrderDir::Sell
+            ? 0 : std::max(0, cfg.strategy.maker_cancel_before_close_ms);
+
+        if (req.source == "LATE_SETTLEMENT_ENTRY") {
+            // Keep the sniper quote inside its validated price band and do not
+            // chase/reprice it or let it rest through the settlement boundary.
+            req.maker_reprice_ms = 0;
             req.maker_max_age_ms = std::max(0, cfg.strategy.maker_max_age_ms);
             req.maker_cancel_before_close_ms =
                 std::max(0, cfg.strategy.maker_cancel_before_close_ms);
-        }
-
-        if (!live_exec && req.dir==vp::OrderDir::Sell && req.execution_mode==vp::ExecutionMode::Taker) {
-            for (const auto& q:paper->open_orders())
-                if(q.req.condition_id==req.condition_id && q.req.side==req.side)
-                    paper->cancel_order(q.client_order_id);
+        } else if (req.source == "CB_LEAD_SCALP_ENTRY") {
+            req.maker_cancel_before_close_ms =
+                lead_scalp_entry_cutoff_secs(
+                    req.horizon_s,
+                    cfg.strategy.lead_lag_scalp_stop_entry_5m_secs,
+                    cfg.strategy.lead_lag_scalp_stop_entry_15m_secs) * 1000;
+        } else if (req.source == "CB_LEAD_SCALP_TP" && req.maker_fixed_price) {
+            // A target-price quote stays at its strategy-owned limit until it
+            // fills or the market closes. It never converts to a crossing sell.
+            req.maker_reprice_ms = 0;
         }
 
         if (req.dir==vp::OrderDir::Buy &&
-            (req.source=="RECYCLER_SNIPER_ENTRY" || req.source=="RECYCLER_RANGE_ENTRY")) {
+            (req.source=="RECYCLER_SNIPER_ENTRY" || req.source=="RECYCLER_RANGE_ENTRY" ||
+             req.source=="RECYCLER_SETTLEMENT_ENTRY")) {
             const std::string trace=fmt::format(
                 R"({{"model":"reference-v3","midpoint":{:.8f},"limit_price":{:.8f},"reference_price":{:.8f},"strike":{:.8f},"vol_per_sec":{:.12f},"fair_probability_side":{:.8f},"probability_up":{:.8f},"probability_up_sensitivity_low":{:.8f},"probability_up_sensitivity_high":{:.8f},"estimated_net_edge":{:.8f},"reference_age_ms":{}}})",
                 req.decision_midpoint,req.limit_price,req.decision_reference_price,
@@ -2080,7 +2169,11 @@ int main(int argc, char** argv) {
 
     std::thread bootstrap_th([&] {
         // Market discovery
-        auto markets = rest.discover_updown_markets();
+        auto markets = rest.discover_updown_markets(
+            cfg.polymarket.universe_horizons_seconds,
+            cfg.strategy.blocked_assets,
+            cfg.polymarket.universe_prewarm_ahead_minutes,
+            cfg.polymarket.universe_max_windows_per_series);
         spdlog::info("discovered {} UP/DOWN markets", markets.size());
         // Bound the universe to the nearest few 5m/15m windows per series so the
         // pm-md subscription set never grows large enough for Polymarket to drop
@@ -2356,11 +2449,27 @@ int main(int argc, char** argv) {
                 }
 
                 // Log first oracle tick for unseeded windows (research tracking).
-                // DO NOT artificially seed — ticks keep their natural timestamps;
-                // lookup_at_or_before finds the first real tick after window open.
+                // When this process restarted mid-window, recover the actual
+                // opening tick from persisted Chainlink history. Never use the
+                // first post-open quote as a synthetic strike.
                 for (const auto& target : windows_to_seed) {
-                    spdlog::info("oracle window opened: {} @{} (first tick at ${:.2f}, src={})",
-                                 t.asset, target.open_ms, t.price, source);
+                    const std::string spot_key = t.asset + ":SPOT";
+                    const double open_ts_s = target.open_ms / 1000.0;
+                    double opening_ref = oracle_buf.lookup_at_or_before(spot_key, open_ts_s);
+                    const char* ref_source = "live_buffer";
+                    if (opening_ref <= 0.0) {
+                        opening_ref = pg->oracle_price_at_or_before(spot_key, target.open_ms);
+                        if (opening_ref > 0.0) {
+                            oracle_buf.add_historical(spot_key, open_ts_s, opening_ref);
+                            ref_source = "postgres_history";
+                        } else {
+                            ref_source = "missing";
+                        }
+                    }
+                    spdlog::info(
+                        "oracle window opened: {} @{} (first tick at ${:.2f}, "
+                        "opening_ref=${:.2f} ref_source={} src={})",
+                        t.asset, target.open_ms, t.price, opening_ref, ref_source, source);
                     if (cfg.data_collection.window_events_enabled) {
                         std::string seed_payload = fmt::format(
                             R"({{"price":{},"ts_ms":{},"source":"{}"}})",
@@ -2384,10 +2493,18 @@ int main(int argc, char** argv) {
             };
 
         // Binance trade stream
+        auto binance_streams = cfg.binance.streams;
+        if (binance_streams.empty()) {
+            // Preserve the historical broad feed only for configs that do not
+            // specify streams. Window-bot profiles explicitly subscribe to all
+            // supported asset pairs used by their configured market universe.
+            binance_streams = {
+                "btcusdt@trade", "ethusdt@trade", "solusdt@trade", "xrpusdt@trade",
+                "btcusdt@bookTicker", "ethusdt@bookTicker",
+                "solusdt@bookTicker", "xrpusdt@bookTicker"};
+        }
         binance = std::make_unique<vp::BinanceFeed>(
-            cfg.binance.ws_url,
-            std::vector<std::string>{"btcusdt@trade", "ethusdt@trade", "solusdt@trade", "xrpusdt@trade",
-                                     "btcusdt@bookTicker", "ethusdt@bookTicker"},
+            cfg.binance.ws_url, std::move(binance_streams),
             [&state, &tui, &candle_store, &trade_flow, &cfg, &persist_q,
              pg=pg.get()](const vp::AssetTick& t) {
                 std::string asset = vp::engine::symbol_to_asset(t.symbol);
@@ -2665,6 +2782,12 @@ int main(int argc, char** argv) {
                             try {
                                 double px = std::stod(r.body.substr(p, q - p));
                                 int64_t ts_ms = vp::Clock::wall_ns() / 1'000'000LL;
+                                // The REST poll is only a recovery path, but it
+                                // must feed the same calculation buffer as WS.
+                                // Previously it refreshed the TUI and DB only,
+                                // leaving Coinbase-dependent strategies stale.
+                                cb_buf.add(std::string(sym),
+                                    static_cast<double>(ts_ms) / 1000.0, px);
                                 {
                                     std::lock_guard<std::mutex> lk(state.mu);
                                     state.cb_asset_price(std::string(sym)) = px;
@@ -3377,6 +3500,7 @@ int main(int argc, char** argv) {
                         vp::OrderRequest req;
                         vp::SignalOut sig;
                         bool from_scalp = false;
+                        bool from_window_bot = false;
                         double rank_score = 0.0;
                     };
                     std::vector<DeferredTrade> deferred_trades;
@@ -3405,6 +3529,20 @@ int main(int argc, char** argv) {
                     int sweep_rows = 0, sweep_skip_open = 0, sweep_skip_ref = 0, sweep_skip_twap = 0;  // prefilter funnel
                     // Snapshot current positions to avoid doubling up in same market
                     auto open_pos = positions.snapshot();
+                    std::unordered_set<std::string> pending_window_bot_entries;
+                    auto record_pending_bot_entry = [&](const vp::OrderRequest& req) {
+                        if (req.dir == vp::OrderDir::Buy &&
+                            (req.source == "CB_LEAD_SCALP_ENTRY" ||
+                             req.source == "LATE_SETTLEMENT_ENTRY"))
+                            pending_window_bot_entries.insert(req.condition_id);
+                    };
+                    if (live_exec) {
+                        for (const auto& order : live_exec->open_orders())
+                            record_pending_bot_entry(order.req);
+                    } else {
+                        for (const auto& order : paper->open_orders())
+                            record_pending_bot_entry(order.req);
+                    }
                     int64_t lk_t0 = vp::Clock::wall_ns() / 1'000'000LL;  // diag: lock-hold timer
                     // Per-sweep predict() budget — hard-bounds how long state.mu is
                     // held (each predict() copies a year of candles + runs the full
@@ -3415,12 +3553,32 @@ int main(int argc, char** argv) {
                         for (const auto& m : state.markets) {
                             // Skip markets that haven't opened yet — oracle delta is meaningless
                             if (m.window_open_ms <= 0 || m.window_open_ms > now_ms) { ++sweep_skip_open; continue; }
-                            const auto reference_key = m.reference_key();
+                            // The opening strike and live direction are the official
+                            // Chainlink spot stream. A market's TWAP stream is only
+                            // the settlement observation and may not have a sample
+                            // at the window opening timestamp.
+                            const auto reference_key = m.reference_price_key();
+                            const int secs_left = static_cast<int>(
+                                (m.window_close_ms - now_ms) / 1000LL);
+                            const int64_t late_sniper_remaining_ms =
+                                m.window_close_ms - now_ms;
+                            const int late_sniper_secs_left =
+                                late_sniper_remaining_ms > 0
+                                    ? static_cast<int>((late_sniper_remaining_ms + 999LL) / 1000LL)
+                                    : 0;
+                            const bool late_sniper_candidate_window =
+                                cfg.strategy.late_window_sniper_enabled &&
+                                (m.horizon_seconds == 300 || m.horizon_seconds == 900) &&
+                                late_sniper_secs_left >= late_sniper_min_secs(
+                                    cfg.strategy, m.horizon_seconds) &&
+                                late_sniper_secs_left <= late_sniper_max_secs(
+                                    cfg.strategy, m.horizon_seconds);
                             const double reference_age = now_ms / 1000.0 - oracle_buf.latest_timestamp(reference_key);
                             const double open_ref =
                                 oracle_buf.lookup_at_or_before(reference_key, m.window_open_ms / 1000.0);
-                            if (m.settlement_window_s < 0 || reference_age < -1 || reference_age > 10 ||
-                                open_ref <= 0) {
+                            if (m.settlement_window_s < 0 ||
+                                (!late_sniper_candidate_window &&
+                                 (reference_age < -1 || reference_age > 10 || open_ref <= 0))) {
                                 // Once per (market, window): these sweep-level
                                 // skips are otherwise completely invisible —
                                 // this is how the whole fleet went silent on
@@ -3441,10 +3599,30 @@ int main(int argc, char** argv) {
                                 ++sweep_skip_ref;
                                 continue;
                             }
-                            // The final averaging interval requires a conditional
-                            // TWAP model; do not reuse the spot endgame formula.
-                            if (m.settlement_window_s > 0 &&
-                                m.window_close_ms - now_ms <= m.settlement_window_s * 1000LL) {
+                            // The final averaging interval has its own conditional
+                            // TWAP probability path. Keep it out of generic strategies,
+                            // while allowing the explicitly enabled multi-asset window bots to
+                            // evaluate their specialized models there.
+                            const bool in_final_twap = m.settlement_window_s > 0 &&
+                                m.window_close_ms - now_ms <=
+                                    m.settlement_window_s * 1000LL;
+                            const bool lead_bot_twap =
+                                cfg.strategy.lead_lag_scalp_enabled &&
+                                lead_scalp_horizon_allowed(
+                                    cfg.strategy.lead_lag_scalp_horizon_s,
+                                    m.horizon_seconds) &&
+                                secs_left > lead_scalp_flatten_secs(
+                                    m.horizon_seconds,
+                                    cfg.strategy.lead_lag_scalp_flatten_5m_secs,
+                                    cfg.strategy.lead_lag_scalp_flatten_15m_secs);
+                            const bool sniper_twap =
+                                cfg.strategy.late_window_sniper_enabled &&
+                                (m.horizon_seconds == 300 || m.horizon_seconds == 900) &&
+                                late_sniper_secs_left >= late_sniper_min_secs(
+                                    cfg.strategy, m.horizon_seconds) &&
+                                late_sniper_secs_left <= late_sniper_max_secs(
+                                    cfg.strategy, m.horizon_seconds);
+                            if (in_final_twap && !lead_bot_twap && !sniper_twap) {
                                 ++sweep_skip_twap;
                                 continue;
                             }
@@ -3493,8 +3671,9 @@ int main(int argc, char** argv) {
                             // oracle_delta_pct = (oracle_now - oracle_at_window_open) / oracle_at_window_open
                             {
                                 double window_open_ts_s = (double)m.window_open_ms / 1000.0;
-                                double oracle_now     = oracle_buf.latest(m.reference_key());
-                                double oracle_at_open = oracle_buf.lookup_at_or_before(m.reference_key(), window_open_ts_s);
+                                const auto strike_key = m.reference_price_key();
+                                double oracle_now     = oracle_buf.latest(strike_key);
+                                double oracle_at_open = oracle_buf.lookup_at_or_before(strike_key, window_open_ts_s);
                                 if (oracle_at_open <= 0)
                                     oracle_at_open = 0; // wait for the actual opening reference
                                 if (oracle_at_open > 0 && oracle_now > 0)
@@ -3622,7 +3801,8 @@ int main(int argc, char** argv) {
                                 pin.fee_exponent = cfg.strategy.fee_exponent;
                                 // Use the real oracle price at window open as the strike
                                 double window_open_ts_s = (double)m.window_open_ms / 1000.0;
-                                pin.strike      = oracle_buf.lookup_at_or_before(m.reference_key(), window_open_ts_s);
+                                pin.strike      = oracle_buf.lookup_at_or_before(
+                                    m.reference_price_key(), window_open_ts_s);
                                 if (pin.strike <= 0) pin.strike = m.target_price;  // fallback
                                 pin.coinbase_price = state.cb_asset_price(m.asset);
                                 pin.up_mid    = row.up_price;
@@ -3639,9 +3819,12 @@ int main(int argc, char** argv) {
                                     pin.down_bid    = bb.price; pin.down_bid_sz = bb.size;
                                     pin.down_ask    = ba.price; pin.down_ask_sz = ba.size;
                                 }
-                                pin.oracle_vel_1m_pct = oracle_buf.velocity_roc_pct(m.reference_key(), 60);
-                                pin.oracle_vel_5m_pct = oracle_buf.velocity_roc_pct(m.reference_key(), 300);
-                                pin.oracle_accel_pct  = oracle_buf.acceleration_pct(m.reference_key(), 60);
+                                pin.oracle_vel_1m_pct = oracle_buf.velocity_roc_pct(
+                                    m.reference_price_key(), 60);
+                                pin.oracle_vel_5m_pct = oracle_buf.velocity_roc_pct(
+                                    m.reference_price_key(), 300);
+                                pin.oracle_accel_pct  = oracle_buf.acceleration_pct(
+                                    m.reference_price_key(), 60);
                                 std::string flow_sym = vp::engine::asset_to_symbol(m.asset);
                                 pin.trade_flow_bias = trade_flow.buy_sell_imbalance(flow_sym, 5);
                                 pin.pm_flow_bias    = pm_flow.imbalance_secs(m.condition_id, 10);
@@ -4067,6 +4250,17 @@ int main(int argc, char** argv) {
                             vp::rules::EvaluationDiagnostics rule_diag;
                             auto sig = vp::rules::evaluate(row, cfg.strategy, now_ms, &rule_diag);
                             bool from_scalp = false;
+                            const bool window_bot_profile =
+                                cfg.strategy.lead_lag_scalp_enabled ||
+                                cfg.strategy.late_window_sniper_enabled;
+                            const bool window_bot_asset_blocked =
+                                std::find(cfg.strategy.blocked_assets.begin(),
+                                          cfg.strategy.blocked_assets.end(), m.asset) !=
+                                cfg.strategy.blocked_assets.end();
+                            bool from_window_bot = false;
+                            bool from_late_sniper = false;
+                            double window_bot_price_cap = 0.0;
+                            if (window_bot_profile) sig.reset();
 
                             // Fix #1: block entry if the OPPOSITE side of this market is
                             // already open.  Buying both UP and DOWN on the same condition_id
@@ -4092,7 +4286,7 @@ int main(int argc, char** argv) {
                             // Only checked when the rule engine passed (no signals from
                             // predictor/oracle-lag/endgame). This prevents micro-scalp noise
                             // from consuming entry slots and blocking real alpha.
-                            if (!sig && scalp_active) {
+                            if (!sig && scalp_active && !window_bot_profile) {
                                 bool scalp_asset_blocked = false;
                                 if (cfg.strategy.scalp_v3_enabled) {
                                     scalp_asset_blocked = std::find(
@@ -4108,10 +4302,10 @@ int main(int argc, char** argv) {
                                 double down_mid = row.down_price;
                                 double up_vel = tick_buffer.velocity_us(m.condition_id, "UP");
                                 double down_vel = tick_buffer.velocity_us(m.condition_id, "DOWN");
-                                int secs_left = (m.window_close_ms - now_ms) / 1000;
+                                int scalp_secs_left = (m.window_close_ms - now_ms) / 1000;
                                 if (auto scalp_sig = scalp_manager.check_entry(
                                         m, up_mid, down_mid, up_vel, down_vel,
-                                        now_ms * 1000LL, secs_left, counter)) {
+                                        now_ms * 1000LL, scalp_secs_left, counter)) {
                                     // Oracle-agreement gate: book velocity alone is noise
                                     // (settlement replay 2026-06-09: oracle-flat scalps =
                                     // 53% coin flip; oracle-confirmed ones won). The scalp
@@ -4140,6 +4334,336 @@ int main(int argc, char** argv) {
                                             scalp_sig->reason,
                                             scalp_sig->side == vp::ShareSide::UP ? '+' : 'v'};
                                         from_scalp = true;
+                                    }
+                                }
+                            }
+
+                            // New standalone BTC bots use the established fast
+                            // predictor and live Coinbase/Chainlink/Binance feeds.
+                            // A position or unfilled entry already in this market
+                            // blocks another buy until the cycle has actually closed.
+                            if (window_bot_profile && !window_bot_asset_blocked &&
+                                !pending_window_bot_entries.contains(m.condition_id)) {
+                                static std::unordered_map<std::string, int64_t>
+                                    window_bot_diag_last_ms;
+                                auto bot_diag_due = [&] {
+                                    auto& last = window_bot_diag_last_ms[m.condition_id];
+                                    if (now_ms - last < 5000) return false;
+                                    last = now_ms;
+                                    return true;
+                                };
+                                const bool sniper_in_window =
+                                    cfg.strategy.late_window_sniper_enabled &&
+                                    (m.horizon_seconds == 300 ||
+                                     m.horizon_seconds == 900) &&
+                                    late_sniper_secs_left >= late_sniper_min_secs(
+                                        cfg.strategy, m.horizon_seconds) &&
+                                    late_sniper_secs_left <= late_sniper_max_secs(
+                                        cfg.strategy, m.horizon_seconds);
+                                const bool position_open = std::any_of(
+                                    open_pos.begin(), open_pos.end(), [&](const auto& p) {
+                                        return p.condition_id == m.condition_id &&
+                                            p.shares > cfg.strategy.dust_position_shares;
+                                    });
+                                // The settlement sniper may add another small
+                                // same-side maker clip during its late window.
+                                // Other window strategies still wait for the
+                                // prior position cycle to close before re-entry.
+                                if (!position_open || sniper_in_window) {
+                                    const double now_s = now_ms / 1000.0;
+                                    const std::string spot_key = m.reference_price_key();
+                                    const double cb_now = cb_buf.latest(m.asset);
+                                    const double cb_ts = cb_buf.latest_timestamp(m.asset);
+                                    const double cb_age = now_s - cb_ts;
+                                    const double oracle_now = oracle_buf.latest(spot_key);
+                                    const double oracle_ts = oracle_buf.latest_timestamp(spot_key);
+                                    const double settlement_age = now_s -
+                                        oracle_buf.latest_timestamp(m.reference_key());
+                                    const double cb_at_oracle = oracle_ts > 0.0
+                                        ? cb_buf.lookup_at_or_before(m.asset, oracle_ts) : 0.0;
+                                    const double cb_2s = cb_buf.lookup_at_or_before(
+                                        m.asset, now_s - 2.0);
+                                    const double cb_5s = cb_buf.lookup_at_or_before(
+                                        m.asset, now_s - 5.0);
+                                    const double oracle_2s = oracle_buf.lookup_at_or_before(
+                                        spot_key, now_s - 2.0);
+                                    auto move_bps = [](double current, double prior) {
+                                        return current > 0.0 && prior > 0.0
+                                            ? 10000.0 * (current / prior - 1.0) : 0.0;
+                                    };
+                                    const bool cb_fresh = cb_now > 0.0 && cb_age >= -1.0 &&
+                                        cb_age <= 2.0;
+                                    const bool oracle_fresh = oracle_now > 0.0 &&
+                                        oracle_ts > 0.0 && now_s - oracle_ts >= -1.0 &&
+                                        now_s - oracle_ts <= 10.0 &&
+                                        settlement_age >= -1.0 && settlement_age <= 10.0;
+
+                                    const double up_spr = row.up_ask > 0.0 && row.up_bid > 0.0
+                                        ? 100.0 * (row.up_ask - row.up_bid) / row.up_ask : 999.0;
+                                    const double down_spr = row.down_ask > 0.0 && row.down_bid > 0.0
+                                        ? 100.0 * (row.down_ask - row.down_bid) / row.down_ask : 999.0;
+                                    auto book_age = [&](const std::string& token) {
+                                        auto it = state.last_book_update_ms.find(token);
+                                        return it == state.last_book_update_ms.end()
+                                            ? std::numeric_limits<int>::max()
+                                            : static_cast<int>(std::max<int64_t>(
+                                                0, now_ms - it->second));
+                                    };
+                                    const int up_book_age = book_age(m.yes_token_id);
+                                    const int down_book_age = book_age(m.no_token_id);
+                                    const double model_up = row.pred_up;
+                                    const double model_conf = row.pred_conf;
+                                    const bool fast_ready = row.fast_forecast.ready;
+                                    const bool lead_needs_twap =
+                                        cfg.strategy.lead_lag_scalp_enabled &&
+                                        lead_scalp_horizon_allowed(
+                                            cfg.strategy.lead_lag_scalp_horizon_s,
+                                            m.horizon_seconds) &&
+                                        m.settlement_window_s > 0 &&
+                                        m.window_close_ms - now_ms <=
+                                            m.settlement_window_s * 1000LL &&
+                                        secs_left >
+                                            lead_scalp_flatten_secs(
+                                                m.horizon_seconds,
+                                                cfg.strategy.lead_lag_scalp_flatten_5m_secs,
+                                                cfg.strategy.lead_lag_scalp_flatten_15m_secs) &&
+                                        !fast_ready;
+                                    vp::engine::ConditionalTwapProbability conditional;
+                                    if (lead_needs_twap || (sniper_in_window && !fast_ready))
+                                        conditional =
+                                            vp::engine::conditional_twap_probability(
+                                                m, oracle_buf, cb_buf, now_ms,
+                                                row.coin_open_price,
+                                                row.oracle_vol_per_sec);
+                                    const double physical_up_low = fast_ready
+                                        ? row.fast_forecast.low : conditional.low_up;
+                                    const double physical_up_high = fast_ready
+                                        ? row.fast_forecast.high : conditional.high_up;
+                                    const bool physical_ready = fast_ready || conditional.ready;
+
+                                    const double bt_age = [&] {
+                                        auto it = state.book_ticker.find(m.asset);
+                                        return it == state.book_ticker.end() ||
+                                            it->second.ts_ms <= 0
+                                            ? 1e9 : now_ms - it->second.ts_ms;
+                                    }();
+                                    vp::engine::LeadLagConfig lead_cfg;
+                                    lead_cfg.enabled = cfg.strategy.lead_lag_scalp_enabled;
+                                    lead_cfg.horizon_s = cfg.strategy.lead_lag_scalp_horizon_s;
+                                    lead_cfg.min_signal_confidence =
+                                        cfg.strategy.lead_lag_scalp_min_signal_confidence;
+                                    lead_cfg.min_cb_move_bps =
+                                        cfg.strategy.lead_lag_scalp_min_cb_move_bps;
+                                    lead_cfg.min_cb_lead_bps =
+                                        cfg.strategy.lead_lag_scalp_min_cb_lead_bps;
+                                    lead_cfg.max_oracle_counter_bps =
+                                        cfg.strategy.lead_lag_scalp_max_oracle_counter_bps;
+                                    lead_cfg.min_net_edge_pct =
+                                        cfg.strategy.lead_lag_scalp_min_net_edge_pct;
+                                    lead_cfg.profit_target_pct =
+                                        cfg.strategy.lead_lag_scalp_profit_target_pct;
+                                    lead_cfg.min_price = cfg.strategy.lead_lag_scalp_min_price;
+                                    const double attainable_entry_cap =
+                                        (1.0 - std::max(0.001, m.tick_size)) /
+                                        (1.0 + cfg.strategy.lead_lag_scalp_profit_target_pct / 100.0);
+                                    lead_cfg.max_price = std::min(
+                                        cfg.strategy.lead_lag_scalp_max_price,
+                                        attainable_entry_cap);
+                                    lead_cfg.max_spread_pct =
+                                        cfg.strategy.lead_lag_scalp_max_spread_pct;
+                                    lead_cfg.max_book_age_ms =
+                                        cfg.strategy.lead_lag_scalp_max_book_age_ms;
+                                    lead_cfg.stop_entry_secs =
+                                        cfg.strategy.lead_lag_scalp_stop_entry_secs;
+                                    lead_cfg.stop_entry_5m_secs =
+                                        cfg.strategy.lead_lag_scalp_stop_entry_5m_secs;
+                                    lead_cfg.stop_entry_15m_secs =
+                                        cfg.strategy.lead_lag_scalp_stop_entry_15m_secs;
+                                    lead_cfg.max_entries_per_window =
+                                        cfg.strategy.lead_lag_scalp_max_entries_per_window;
+                                    lead_cfg.rearm_bps = cfg.strategy.lead_lag_scalp_rearm_bps;
+
+                                    std::optional<vp::engine::WindowBotSignal> bot_signal;
+                                    bool bot_is_late = false;
+                                    const int entries_this_window =
+                                        state.entries_per_window[m.condition_id];
+                                    if (lead_cfg.enabled) {
+                                      if (physical_ready) {
+                                        vp::engine::LeadLagInput input;
+                                        input.condition_id = m.condition_id;
+                                        input.asset = m.asset;
+                                        input.horizon_s = m.horizon_seconds;
+                                        input.window_close_ms = m.window_close_ms;
+                                        input.now_ms = now_ms;
+                                        input.secs_left = secs_left;
+                                        input.cb_move_2s_bps = move_bps(cb_now, cb_2s);
+                                        input.cb_move_5s_bps = move_bps(cb_now, cb_5s);
+                                        input.cb_chainlink_lead_bps = move_bps(
+                                            cb_now, cb_at_oracle);
+                                        input.oracle_move_2s_bps = move_bps(
+                                            oracle_now, oracle_2s);
+                                        input.binance_move_2s_bps = row.bt_mid_delta_pct * 100.0;
+                                        input.cb_fresh = cb_fresh && cb_at_oracle > 0.0;
+                                        input.oracle_fresh = oracle_fresh;
+                                        input.binance_fresh = bt_age >= -1000 && bt_age <= 2000;
+                                        input.up_ask = row.up_ask;
+                                        input.down_ask = row.down_ask;
+                                        input.up_spread_pct = up_spr;
+                                        input.down_spread_pct = down_spr;
+                                        input.up_book_age_ms = up_book_age;
+                                        input.down_book_age_ms = down_book_age;
+                                        input.ensemble_up_probability = model_up;
+                                        input.ensemble_confidence = model_conf;
+                                        input.conservative_up_probability =
+                                            std::min(physical_up_low, model_up);
+                                        input.conservative_down_probability =
+                                            std::min(1.0 - physical_up_high, 1.0 - model_up);
+                                        input.fee_rate = cfg.strategy.taker_fee_rate;
+                                        input.fee_exponent = cfg.strategy.fee_exponent;
+                                        const bool log_reject = bot_diag_due();
+                                        std::string reject_reason;
+                                        bot_signal = window_bots.lead_lag_entry(
+                                            input, lead_cfg, entries_this_window,
+                                            log_reject ? &reject_reason : nullptr);
+                                        if (!bot_signal && log_reject) {
+                                            spdlog::info(
+                                                "WINDOW_BOT asset={} horizon={} state=no_entry source=lead_lag "
+                                                "reason={} t={}s cb_fresh={} oracle_fresh={} "
+                                                "cb2={:+.2f}bp cb5={:+.2f}bp lead={:+.2f}bp "
+                                                "oracle2={:+.2f}bp binance2={:+.2f}bp binance_fresh={} "
+                                                "model={:.3f}/{:.3f} physical={:.3f}..{:.3f} "
+                                                "up={:.3f}@{}ms/{:.1f}% down={:.3f}@{}ms/{:.1f}%",
+                                                m.asset, m.horizon_seconds, reject_reason,
+                                                secs_left, input.cb_fresh, input.oracle_fresh,
+                                                input.cb_move_2s_bps, input.cb_move_5s_bps,
+                                                input.cb_chainlink_lead_bps, input.oracle_move_2s_bps,
+                                                input.binance_move_2s_bps, input.binance_fresh,
+                                                input.ensemble_up_probability,
+                                                input.ensemble_confidence,
+                                                physical_up_low, physical_up_high,
+                                                input.up_ask, input.up_book_age_ms,
+                                                input.up_spread_pct, input.down_ask,
+                                                input.down_book_age_ms, input.down_spread_pct);
+                                        }
+                                      } else if (bot_diag_due()) {
+                                        spdlog::info(
+                                            "WINDOW_BOT asset={} horizon={} state=no_entry source=lead_lag "
+                                            "reason=physical_forecast_not_ready fast_ready={} twap_ready={} "
+                                            "t={}s model={:.3f}/{:.3f}",
+                                            m.asset, m.horizon_seconds, fast_ready,
+                                            conditional.ready, secs_left, model_up, model_conf);
+                                      }
+                                    }
+                                    if (!bot_signal &&
+                                        cfg.strategy.late_window_sniper_enabled &&
+                                        sniper_in_window) {
+                                        vp::engine::LateSniperInput input;
+                                        input.condition_id = m.condition_id;
+                                        input.asset = m.asset;
+                                        input.horizon_s = m.horizon_seconds;
+                                        input.window_close_ms = m.window_close_ms;
+                                        input.now_ms = now_ms;
+                                        input.secs_left = late_sniper_secs_left;
+                                        input.up_bid = row.up_bid;
+                                        input.up_ask = row.up_ask;
+                                        input.down_bid = row.down_bid;
+                                        input.down_ask = row.down_ask;
+                                        input.tick_size = m.tick_size;
+                                        input.ensemble_up_probability = model_up;
+                                        input.conditional_up_low = physical_up_low;
+                                        input.conditional_up_high = physical_up_high;
+                                        input.forecast_ready = physical_ready;
+                                        input.cb_fresh = cb_fresh;
+                                        input.oracle_fresh = oracle_fresh;
+                                        input.fee_rate = 0.0; // maker entry and settlement carry no taker fee
+                                        input.fee_exponent = cfg.strategy.fee_exponent;
+                                        vp::engine::LateSniperConfig sniper_cfg;
+                                        sniper_cfg.enabled = true;
+                                        sniper_cfg.min_secs_5m =
+                                            cfg.strategy.late_window_sniper_min_secs_5m;
+                                        sniper_cfg.max_secs_5m =
+                                            cfg.strategy.late_window_sniper_max_secs_5m;
+                                        sniper_cfg.min_secs_15m =
+                                            cfg.strategy.late_window_sniper_min_secs_15m;
+                                        sniper_cfg.max_secs_15m =
+                                            cfg.strategy.late_window_sniper_max_secs_15m;
+                                        sniper_cfg.max_entries_per_window =
+                                            cfg.strategy.late_window_sniper_max_entries_per_window;
+                                        sniper_cfg.maker_improve_ticks =
+                                            std::max(0, cfg.strategy.maker_improve_ticks);
+                                        sniper_cfg.min_price =
+                                            cfg.strategy.late_window_sniper_min_price;
+                                        sniper_cfg.max_price =
+                                            cfg.strategy.late_window_sniper_max_price;
+                                        sniper_cfg.min_net_edge_pct =
+                                            cfg.strategy.late_window_sniper_min_net_edge_pct;
+                                        const bool log_reject = bot_diag_due();
+                                        std::string reject_reason;
+                                        bot_signal = window_bots.late_sniper_entry(
+                                            input, sniper_cfg, entries_this_window,
+                                            log_reject ? &reject_reason : nullptr);
+                                        bot_is_late = bot_signal.has_value();
+                                        if (!bot_signal && log_reject)
+                                            spdlog::info(
+                                                "WINDOW_BOT asset={} horizon={} state=no_entry source=late_sniper "
+                                                "reason={} t={}s maker_band=[{:.2f},{:.2f}] "
+                                                "up={:.3f}/{:.3f} down={:.3f}/{:.3f}",
+                                                m.asset, m.horizon_seconds, reject_reason,
+                                                secs_left, sniper_cfg.min_price,
+                                                sniper_cfg.max_price,
+                                                row.up_bid, row.up_ask,
+                                                row.down_bid, row.down_ask);
+                                    }
+                                    if (bot_signal && bot_is_late) {
+                                        const bool opposite_position = std::any_of(
+                                            open_pos.begin(), open_pos.end(),
+                                            [&](const auto& p) {
+                                                return p.condition_id == m.condition_id &&
+                                                    p.shares > cfg.strategy.dust_position_shares &&
+                                                    p.side != bot_signal->side;
+                                            });
+                                        if (opposite_position) {
+                                            if (bot_diag_due())
+                                                spdlog::info(
+                                                    "WINDOW_BOT asset={} horizon={} state=no_entry "
+                                                    "source=late_sniper reason=opposite_open_position t={}s",
+                                                    m.asset, m.horizon_seconds, secs_left);
+                                            bot_signal.reset();
+                                            bot_is_late = false;
+                                        }
+                                    }
+                                    if (bot_signal) {
+                                        spdlog::info("WINDOW_BOT asset={} horizon={} state=entry_signal "
+                                            "side={} t={}s confidence={:.3f} edge={:+.2f}% {}",
+                                            m.asset, m.horizon_seconds,
+                                            vp::to_string(bot_signal->side), secs_left,
+                                            bot_signal->confidence, bot_signal->edge * 100.0,
+                                            bot_signal->reason);
+                                        sig = vp::SignalOut{
+                                            bot_signal->side, vp::OrderDir::Buy,
+                                            bot_signal->confidence, bot_signal->ask,
+                                            bot_is_late
+                                                ? cfg.strategy.late_window_sniper_order_usd
+                                                : cfg.strategy.lead_lag_scalp_order_usd,
+                                            bot_signal->reason,
+                                            bot_signal->side == vp::ShareSide::UP ? '+' : 'v'};
+                                        from_window_bot = true;
+                                        from_late_sniper = bot_is_late;
+                                        if (bot_is_late) {
+                                            const double tick = m.tick_size > 0.0
+                                                ? m.tick_size : 0.01;
+                                            const double configured_cap = std::floor(
+                                                cfg.strategy.late_window_sniper_max_price /
+                                                    tick + 1e-9) * tick;
+                                            // Preserve the edge-approved passive quote as
+                                            // the executor's hard upper limit. A generic
+                                            // 0.97 cap could reprice above the probability
+                                            // used to admit this signal.
+                                            window_bot_price_cap = std::min(
+                                                configured_cap, bot_signal->ask);
+                                        } else {
+                                            window_bot_price_cap = lead_cfg.max_price;
+                                        }
                                     }
                                 }
                             }
@@ -4179,9 +4703,12 @@ int main(int argc, char** argv) {
                             // window slots of the rule engine (and vice versa). Before
                             // this fix, enabling scalp v3 capped ALL paths at the scalp
                             // limit, so one noise scalp blocked the real oracle-lag entry.
-                            const int entry_limit = from_scalp
-                                ? scalp_entry_limit
-                                : cfg.strategy.max_entries_per_window;
+                            const int entry_limit = from_window_bot
+                                ? (from_late_sniper
+                                    ? cfg.strategy.late_window_sniper_max_entries_per_window
+                                    : cfg.strategy.lead_lag_scalp_max_entries_per_window)
+                                : (from_scalp ? scalp_entry_limit
+                                              : cfg.strategy.max_entries_per_window);
                             vp::gates::GatePipeline gp;
                             gp.add(0, "entry_limit", [&]() -> vp::gates::GateResult {
                                 if (counter < entry_limit) return {};
@@ -4201,7 +4728,7 @@ int main(int argc, char** argv) {
                                 // Early windows demand a stronger signal than late
                                 // ones (time-decay makes late moves more reliable,
                                 // early moves are noise-prone).
-                                if (from_scalp) return {};   // scalps use velocity, not edge
+                                if (from_scalp || from_window_bot) return {};
                                 const int64_t horizon_s =
                                     (m.horizon_seconds > 0) ? m.horizon_seconds : 300;
                                 const double frac_left =
@@ -4235,7 +4762,7 @@ int main(int argc, char** argv) {
                                 // Signal must have persisted entry_persist_ms before
                                 // firing. Bookkeeping above ran unconditionally, so
                                 // a fresh first_seen < now-persist_ms means flicker.
-                                if (!cfg.strategy.entry_persist_gate) return {};
+                                if (!cfg.strategy.entry_persist_gate || from_window_bot) return {};
                                 const std::string pk = m.condition_id +
                                     (sig->side == vp::ShareSide::UP ? "|U" : "|D");
                                 auto it = state.signal_persist.find(pk);
@@ -4261,7 +4788,7 @@ int main(int argc, char** argv) {
                                 // window requires a meaningfully stronger signal.
                                 // Marginal-delta double-downs amplify losses without
                                 // proportionally improving expected value.
-                                if (from_scalp || counter <= 0 ||
+                                if (from_scalp || from_window_bot || counter <= 0 ||
                                     std::abs(row.oracle_delta_pct) >=
                                         cfg.strategy.min_oracle_delta_pct * 1.5) return {};
                                 return {.passed = false,
@@ -4286,6 +4813,8 @@ int main(int argc, char** argv) {
                                     cfg.strategy.scalp_v3_enabled
                                         ? cfg.strategy.scalp_v3_max_price
                                         : cfg.strategy.scalp_v2_max_price);
+                            } else if (from_window_bot) {
+                                signal_cap = window_bot_price_cap;
                             }
                             gp.add(0, "price_band", [&]() -> vp::gates::GateResult {
                                 if (live_ask <= 0)
@@ -4293,7 +4822,7 @@ int main(int argc, char** argv) {
                                             .code = vp::gates::code::kPriceNoBook,
                                             .detail = fmt::format("ask<=0 on {}",
                                                 sig->side == vp::ShareSide::UP ? "UP" : "DOWN")};
-                                if (live_ask > signal_cap)
+                                if (!from_late_sniper && live_ask > signal_cap)
                                     return {.passed = false,
                                             .code = vp::gates::code::kPriceAboveCap,
                                             .detail = fmt::format("ask={:.3f} > cap={:.3f}",
@@ -4310,7 +4839,7 @@ int main(int argc, char** argv) {
                             req.side           = sig->side;
                             req.dir            = vp::OrderDir::Buy;
                             double desired_size = sig->rec_size_usd;
-                            if (!from_scalp &&
+                            if (!from_scalp && !from_window_bot &&
                                 cfg.strategy.equity_sizing_enabled &&
                                 cfg.strategy.equity_order_pct > 0.0) {
                                 double equity_for_sizing =
@@ -4326,10 +4855,10 @@ int main(int argc, char** argv) {
                                 desired_size =
                                     equity_for_sizing * cfg.strategy.equity_order_pct;
                             }
-                            const double size_floor = from_scalp
+                            const double size_floor = (from_scalp || from_window_bot)
                                 ? std::max(0.0, cfg.risk.min_order_usd)
                                 : std::max(0.0, cfg.strategy.min_size_usd);
-                            const double size_ceil = from_scalp
+                            const double size_ceil = (from_scalp || from_window_bot)
                                 ? std::max(size_floor, desired_size)
                                 : std::max(size_floor, cfg.strategy.max_size_usd);
                             req.size_usd = std::clamp(desired_size,
@@ -4350,19 +4879,28 @@ int main(int argc, char** argv) {
                                 const double ts = m.tick_size > 0 ? m.tick_size : 0.01;
                                 const double cross_ticks =
                                     std::max(0.0, cfg.strategy.entry_cross_ticks);
-                                req.limit_price = std::min(signal_cap, live_ask + cross_ticks * ts);
+                                req.limit_price = from_late_sniper
+                                    ? std::min(signal_cap, sig->rec_limit_price)
+                                    : from_window_bot
+                                        ? std::min(signal_cap, live_ask)
+                                        : std::min(signal_cap, live_ask + cross_ticks * ts);
                                 // The model approved the observed ask after costs.
                                 // Crossing two extra ticks can consume its entire
                                 // margin before the order reaches the venue.
-                                if (!from_scalp)
+                                if (!from_scalp && !from_window_bot)
                                     req.limit_price = std::min(req.limit_price,sig->rec_limit_price);
                             }
-                            req.source         = from_scalp
-                                ? (cfg.strategy.scalp_v3_enabled ? "SCALP_V3_ENTRY" : "SCALP_V2_ENTRY")
-                                : "RULE";
+                            req.source         = from_window_bot
+                                ? (from_late_sniper ? "LATE_SETTLEMENT_ENTRY" : "CB_LEAD_SCALP_ENTRY")
+                                : (from_scalp
+                                    ? (cfg.strategy.scalp_v3_enabled ? "SCALP_V3_ENTRY" : "SCALP_V2_ENTRY")
+                                    : "RULE");
                             req.window_close_ms= m.window_close_ms;
                             req.neg_risk       = m.neg_risk;
                             req.tick_size      = m.tick_size;
+                            if (from_late_sniper)
+                                req.maker_min_price =
+                                    cfg.strategy.late_window_sniper_min_price;
 
                             // ── L1 gates: cached-state book checks ──
                             gp.add(1, "book_stale", [&]() -> vp::gates::GateResult {
@@ -4375,7 +4913,9 @@ int main(int argc, char** argv) {
                                 int64_t book_age = (bit == state.last_book_update_ms.end())
                                     ? INT64_MAX : (now_ms - bit->second);
                                 int max_book_age_ms = cfg.strategy.max_book_age_ms;
-                                if (from_scalp && cfg.strategy.scalp_v3_enabled &&
+                                if (from_window_bot && !from_late_sniper)
+                                    max_book_age_ms = cfg.strategy.lead_lag_scalp_max_book_age_ms;
+                                else if (from_scalp && cfg.strategy.scalp_v3_enabled &&
                                     cfg.strategy.scalp_v3_max_book_age_ms > 0) {
                                     max_book_age_ms = std::min(max_book_age_ms,
                                         cfg.strategy.scalp_v3_max_book_age_ms);
@@ -4403,7 +4943,11 @@ int main(int argc, char** argv) {
                                     }
                                 }
                                 double max_spread_pct = cfg.strategy.max_entry_spread_pct;
-                                if (from_scalp && cfg.strategy.scalp_v3_enabled &&
+                                if (from_late_sniper)
+                                    max_spread_pct = 0.0;
+                                else if (from_window_bot)
+                                    max_spread_pct = cfg.strategy.lead_lag_scalp_max_spread_pct;
+                                else if (from_scalp && cfg.strategy.scalp_v3_enabled &&
                                     cfg.strategy.scalp_v3_max_spread_pct > 0) {
                                     max_spread_pct = (max_spread_pct > 0)
                                         ? std::min(max_spread_pct, cfg.strategy.scalp_v3_max_spread_pct)
@@ -4443,7 +4987,7 @@ int main(int argc, char** argv) {
                                     cfg.strategy.taker_fee_rate,
                                     cfg.strategy.fee_exponent);
                             deferred_trades.push_back(
-                                {req, sized_sig, from_scalp, rank_score});
+                                {req, sized_sig, from_scalp, from_window_bot, rank_score});
                         }
                     } // mu released here
                     // ── WPRED checkpoint submissions ────────────────────────
@@ -4565,10 +5109,21 @@ int main(int argc, char** argv) {
                         }
                         // (A3) Dollar form of the same cap.
                         double& side_nt = (dt_req.side == vp::ShareSide::UP) ? notional_up : notional_down;
-                        if (kMaxSameSideUsd > 0 &&
-                            side_nt + dt_req.size_usd > kMaxSameSideUsd + 1e-6) {
+                        // Lead scalpers have their own configured clip size. Keep
+                        // generic rule sizing on max_size_usd, but size this path's
+                        // side cap from the lead-scalp clip so a valid $25 entry is
+                        // not vetoed by the generic $5 cap. The independent global
+                        // max_deployed and risk per-window limits still apply.
+                        const double side_cap_usd =
+                            dt_req.source == "CB_LEAD_SCALP_ENTRY"
+                                ? std::max(kMaxSameSideUsd,
+                                    double(kMaxSameSide) * std::max(0.0,
+                                        cfg.strategy.lead_lag_scalp_order_usd))
+                                : kMaxSameSideUsd;
+                        if (side_cap_usd > 0 &&
+                            side_nt + dt_req.size_usd > side_cap_usd + 1e-6) {
                             spdlog::info("autopilot skip: same-side $ cap — ${:.2f} deployed + ${:.2f} > ${:.2f} ({} {})",
-                                         side_nt, dt_req.size_usd, kMaxSameSideUsd,
+                                         side_nt, dt_req.size_usd, side_cap_usd,
                                          dt_req.asset, vp::to_string(dt_req.side));
                             continue;
                         }
@@ -4584,7 +5139,7 @@ int main(int argc, char** argv) {
                             }
                         }
                         // (B) Trend guard: don't buy a side counter to the 3-min oracle trend.
-                        {
+                        if (!dt.from_window_bot) {
                             double now_s  = now_ms / 1000.0;
                             double p_now  = oracle_buf.latest(dt_req.asset);
                             double p_then = oracle_buf.lookup_at_or_before(dt_req.asset, now_s - kTrendLookbackSec);
@@ -4607,6 +5162,16 @@ int main(int argc, char** argv) {
                         vp::SignalOut sig_copy = dt_sig;
                         ++submitted;
                         auto res = do_submit(dt_req);
+                        if (dt.from_window_bot) {
+                            const char* state_name = !res.accepted ? "order_rejected"
+                                : (res.resting ? "maker_order_resting" : "entry_filled");
+                            spdlog::info("WINDOW_BOT asset={} horizon={} state={} source={} "
+                                "side={} order_price={:.3f} shares={:.2f} detail={}",
+                                dt_req.asset, dt_req.horizon_s, state_name,
+                                dt_req.source, vp::to_string(dt_req.side),
+                                res.order_price, res.fill_shares,
+                                res.accepted ? res.status : res.reject_reason);
+                        }
                         persist_q.push([pg=pg.get(), cid=std::move(cid_copy),
                                         sig=std::move(sig_copy), rec,
                                         coid=res.client_order_id]() noexcept {
@@ -5416,6 +5981,392 @@ int main(int argc, char** argv) {
                 state.net_pnl_usd = positions.net_pnl_usd();
             }
 
+            // Late-settlement sniper protection: once the live bid is at least
+            // N market ticks below the average entry, cancel any residual maker
+            // entry and submit the narrowly authorized FAK emergency exit.
+            // This runs only in the dedicated sniper profile; all ordinary
+            // entries and exits continue through the maker route.
+            if (cfg.strategy.late_window_sniper_enabled &&
+                cfg.strategy.late_window_sniper_hard_stop_ticks > 0) {
+                struct ManagedSniperOrder {
+                    vp::OrderRequest req;
+                    std::string client_id;
+                    std::string exchange_id;
+                };
+                std::vector<ManagedSniperOrder> sniper_orders;
+                if (live_exec) {
+                    for (const auto& o : live_exec->open_orders())
+                        sniper_orders.push_back({o.req, o.client_order_id,
+                            o.exchange_order_id});
+                } else {
+                    for (const auto& o : paper->open_orders())
+                        sniper_orders.push_back({o.req, o.client_order_id,
+                            o.client_order_id});
+                }
+                const auto sniper_positions = positions.snapshot();
+                for (const auto& p : sniper_positions) {
+                    if ((p.horizon_s != 300 && p.horizon_s != 900) ||
+                        p.shares < std::max(cfg.strategy.dust_position_shares,
+                                            cfg.risk.clob_min_shares_fallback) ||
+                        !(p.avg_price > 0.0) || p.token_id.empty()) continue;
+
+                    const std::string stop_key = p.condition_id + ":" +
+                        vp::to_string(p.side);
+                    auto last = last_sniper_stop_attempt_ms.find(stop_key);
+                    if (last != last_sniper_stop_attempt_ms.end() &&
+                        now_ms - last->second < 250) continue;
+
+                    bool residual_entry = false;
+                    bool cancel_failed = false;
+                    for (const auto& o : sniper_orders) {
+                        if (o.req.condition_id != p.condition_id ||
+                            o.req.side != p.side ||
+                            o.req.source != "LATE_SETTLEMENT_ENTRY") continue;
+                        residual_entry = true;
+                        const bool cancelled = live_exec
+                            ? live_exec->cancel_open_order(o.exchange_id, o.client_id)
+                            : paper->cancel_order(o.client_id);
+                        cancel_failed = cancel_failed || !cancelled;
+                    }
+                    if (residual_entry) {
+                        if (cancel_failed)
+                            spdlog::warn("late sniper stop waiting for residual entry cancellation {}",
+                                p.condition_id.substr(0, 12));
+                        continue;
+                    }
+
+                    if (!book_fresh(p.token_id, now_ms)) continue;
+                    double bid = 0.0;
+                    double tick = 0.01;
+                    bool neg_risk = true;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mu);
+                        auto& books = p.side == vp::ShareSide::UP
+                            ? state.book_up : state.book_down;
+                        auto it = books.find(p.condition_id);
+                        if (it != books.end() && it->second)
+                            bid = it->second->best_bid().price;
+                        auto mit = std::find_if(state.markets.begin(), state.markets.end(),
+                            [&](const vp::PmMarket& m) {
+                                return m.condition_id == p.condition_id;
+                            });
+                        if (mit != state.markets.end()) {
+                            if (mit->tick_size > 0.0) tick = mit->tick_size;
+                            neg_risk = mit->neg_risk;
+                        }
+                    }
+                    const double stop_bid = p.avg_price -
+                        cfg.strategy.late_window_sniper_hard_stop_ticks * tick;
+                    if (!(bid > 0.0) || !(stop_bid > 0.0) || bid > stop_bid)
+                        continue;
+
+                    const bool first_attempt = last == last_sniper_stop_attempt_ms.end();
+                    last_sniper_stop_attempt_ms[stop_key] = now_ms;
+                    vp::OrderRequest exit;
+                    exit.condition_id = p.condition_id;
+                    exit.asset = p.asset;
+                    exit.horizon_s = p.horizon_s;
+                    exit.token_id = p.token_id;
+                    exit.side = p.side;
+                    exit.dir = vp::OrderDir::Sell;
+                    exit.size_shares = p.shares;
+                    exit.limit_price = 0.0;
+                    exit.window_close_ms = p.window_close_ms;
+                    exit.source = "LATE_SETTLEMENT_HARD_STOP";
+                    exit.stop_loss_fak_authorized = true;
+                    exit.tick_size = tick;
+                    exit.neg_risk = neg_risk;
+                    if (first_attempt)
+                        spdlog::warn("LATE SETTLEMENT HARD STOP {} {} bid={:.3f} "
+                                     "avg={:.3f} threshold={:.3f} ticks={} shares={:.2f}",
+                            p.asset, vp::to_string(p.side), bid, p.avg_price,
+                            stop_bid, cfg.strategy.late_window_sniper_hard_stop_ticks,
+                            p.shares);
+                    do_submit(exit);
+                }
+            }
+
+            // Coinbase-lead scalp lifecycle. After every maker fill, immediately
+            // publish one fixed maker take-profit quote; cancel it before an
+            // maker-only emergency exit or the per-horizon pre-close quote.
+            if (cfg.strategy.lead_lag_scalp_enabled) {
+                struct ManagedWindowOrder {
+                    vp::OrderRequest req;
+                    std::string client_id;
+                    std::string exchange_id;
+                    double remaining_shares = 0.0;
+                };
+                std::vector<ManagedWindowOrder> managed_orders;
+                if (live_exec) {
+                    for (const auto& o : live_exec->open_orders())
+                        managed_orders.push_back({o.req, o.client_order_id,
+                            o.exchange_order_id, o.remaining_shares});
+                } else {
+                    for (const auto& o : paper->open_orders())
+                        managed_orders.push_back({o.req, o.client_order_id,
+                            o.client_order_id, o.remaining_shares});
+                }
+                const auto managed_positions = positions.snapshot();
+                for (const auto& p : managed_positions) {
+                    if (!lead_scalp_horizon_allowed(
+                            cfg.strategy.lead_lag_scalp_horizon_s, p.horizon_s) ||
+                        p.shares < cfg.strategy.dust_position_shares ||
+                        !(p.avg_price > 0.0)) continue;
+
+                    std::vector<const ManagedWindowOrder*> related_orders;
+                    for (const auto& o : managed_orders)
+                        if (o.req.condition_id == p.condition_id &&
+                            o.req.side == p.side &&
+                            (o.req.source == "CB_LEAD_SCALP_ENTRY" ||
+                             o.req.source == "CB_LEAD_SCALP_TP"))
+                            related_orders.push_back(&o);
+
+                    bool entry_cancel_pending = false;
+                    for (const auto* o : related_orders) {
+                        if (o->req.source != "CB_LEAD_SCALP_ENTRY") continue;
+                        const bool cancelled = live_exec
+                            ? live_exec->cancel_open_order(o->exchange_id, o->client_id)
+                            : paper->cancel_order(o->client_id);
+                        entry_cancel_pending = true;
+                        if (!cancelled)
+                            spdlog::warn("CB lead scalp: could not cancel residual entry {}",
+                                o->client_id.substr(0, 12));
+                    }
+                    if (entry_cancel_pending) continue;
+
+                    const int64_t secs_left =
+                        (p.window_close_ms - now_ms) / 1000LL;
+                    const int flatten_secs = lead_scalp_flatten_secs(
+                        p.horizon_s,
+                        cfg.strategy.lead_lag_scalp_flatten_5m_secs,
+                        cfg.strategy.lead_lag_scalp_flatten_15m_secs);
+                    const bool flatten = secs_left <= flatten_secs;
+                    const bool fresh_book = book_fresh(p.token_id, now_ms);
+                    double bid = 0.0;
+                    double stop_tick_size = 0.01;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mu);
+                        auto& books = p.side == vp::ShareSide::UP
+                            ? state.book_up : state.book_down;
+                        auto it = books.find(p.condition_id);
+                        if (it != books.end() && it->second)
+                            bid = it->second->best_bid().price;
+                        auto mit = std::find_if(state.markets.begin(), state.markets.end(),
+                            [&](const vp::PmMarket& m) {
+                                return m.condition_id == p.condition_id;
+                            });
+                        if (mit != state.markets.end() && mit->tick_size > 0.0)
+                            stop_tick_size = mit->tick_size;
+                    }
+                    const int stop_ticks = cfg.strategy.lead_lag_scalp_hard_stop_ticks;
+                    const double stop_tick_price = p.avg_price - stop_ticks * stop_tick_size;
+                    const bool hard_stop_ticks = fresh_book && bid > 0.0 &&
+                        stop_ticks > 0 && bid <= stop_tick_price;
+                    if (flatten && !hard_stop_ticks) {
+                        bool cancellations_ok = true;
+                        for (const auto* o : related_orders) {
+                            if (o->req.source != "CB_LEAD_SCALP_TP") continue;
+                            const bool cancelled = live_exec
+                                ? live_exec->cancel_open_order(o->exchange_id, o->client_id)
+                                : paper->cancel_order(o->client_id);
+                            cancellations_ok = cancellations_ok && cancelled;
+                        }
+                        if (!cancellations_ok) continue;
+                        if (!fresh_book || !(bid > 0.0)) {
+                            spdlog::debug("CB lead scalp timed flatten waiting for fresh bid {} {} t={}s",
+                                p.asset, vp::to_string(p.side), secs_left);
+                            continue;
+                        }
+                        const std::string flatten_key = p.condition_id + ":" +
+                            vp::to_string(p.side);
+                        const auto last_flatten =
+                            last_lead_flatten_attempt_ms.find(flatten_key);
+                        if (last_flatten != last_lead_flatten_attempt_ms.end() &&
+                            now_ms - last_flatten->second < 250)
+                            continue;
+                        const bool first_flatten_attempt =
+                            last_flatten == last_lead_flatten_attempt_ms.end();
+                        last_lead_flatten_attempt_ms[flatten_key] = now_ms;
+
+                        vp::OrderRequest exit;
+                        exit.condition_id = p.condition_id;
+                        exit.asset = p.asset;
+                        exit.horizon_s = p.horizon_s;
+                        exit.token_id = p.token_id;
+                        exit.side = p.side;
+                        exit.dir = vp::OrderDir::Sell;
+                        exit.size_shares = p.shares;
+                        exit.limit_price = 0.0;
+                        exit.window_close_ms = p.window_close_ms;
+                        exit.source = "CB_LEAD_SCALP_FLAT";
+                        {
+                            std::lock_guard<std::mutex> lk(state.mu);
+                            auto mit = std::find_if(state.markets.begin(), state.markets.end(),
+                                [&](const vp::PmMarket& m) {
+                                    return m.condition_id == p.condition_id;
+                                });
+                            if (mit != state.markets.end()) {
+                                exit.neg_risk = mit->neg_risk;
+                                exit.tick_size = mit->tick_size;
+                            }
+                        }
+                        if (first_flatten_attempt)
+                            spdlog::warn("CB lead scalp timed market flatten {} {} bid={:.3f} "
+                                         "avg={:.3f} shares={:.2f} t={}s",
+                                p.asset, vp::to_string(p.side), bid, p.avg_price,
+                                p.shares, secs_left);
+                        do_submit(exit);
+                        continue;
+                    }
+
+                    if (!fresh_book || !(bid > 0.0)) continue;
+
+                    const bool hard_stop_pct = fresh_book && bid > 0.0 &&
+                        cfg.strategy.lead_lag_scalp_hard_stop_pct > 0.0 &&
+                        bid <= p.avg_price *
+                            (1.0 - cfg.strategy.lead_lag_scalp_hard_stop_pct / 100.0);
+                    const bool hard_stop = hard_stop_ticks || hard_stop_pct;
+
+                    bool adverse_reversal = false;
+                    if (cfg.strategy.lead_lag_scalp_reversal_exit_enabled) {
+                        std::string settlement_key = p.asset + ":TWAP60";
+                        {
+                            std::lock_guard<std::mutex> lk(state.mu);
+                            auto mit = std::find_if(state.markets.begin(), state.markets.end(),
+                                [&](const vp::PmMarket& m) {
+                                    return m.condition_id == p.condition_id;
+                                });
+                            if (mit != state.markets.end())
+                                settlement_key = mit->reference_key();
+                        }
+                        const double now_s = now_ms / 1000.0;
+                        const std::string spot_key = p.asset + ":SPOT";
+                        const double cb_now = cb_buf.latest(p.asset);
+                        const double cb_age = now_s - cb_buf.latest_timestamp(p.asset);
+                        const double oracle_now = oracle_buf.latest(spot_key);
+                        const double oracle_age = now_s - oracle_buf.latest_timestamp(spot_key);
+                        const double settlement_age = now_s -
+                            oracle_buf.latest_timestamp(settlement_key);
+                        const double cb_at_oracle = cb_buf.lookup_at_or_before(
+                            p.asset, oracle_buf.latest_timestamp(spot_key));
+                        const double cb_2s = cb_buf.lookup_at_or_before(p.asset, now_s - 2.0);
+                        const double oracle_2s = oracle_buf.lookup_at_or_before(
+                            spot_key, now_s - 2.0);
+                        const double cb_move_2s = cb_now > 0.0 && cb_2s > 0.0
+                            ? 10000.0 * (cb_now / cb_2s - 1.0) : 0.0;
+                        const double lead_bps = cb_now > 0.0 && cb_at_oracle > 0.0
+                            ? 10000.0 * (cb_now / cb_at_oracle - 1.0) : 0.0;
+                        const bool feeds_fresh = cb_age >= -1.0 && cb_age <= 2.0 &&
+                            oracle_age >= -1.0 && oracle_age <= 10.0 &&
+                            settlement_age >= -1.0 && settlement_age <= 10.0 &&
+                            oracle_now > 0.0;
+                        if (feeds_fresh && cb_at_oracle > 0.0) {
+                            const double pos_dir = p.side == vp::ShareSide::UP ? 1.0 : -1.0;
+                            adverse_reversal = pos_dir * cb_move_2s <=
+                                    -cfg.strategy.lead_lag_scalp_min_cb_move_bps &&
+                                pos_dir * lead_bps <=
+                                    -cfg.strategy.lead_lag_scalp_min_cb_lead_bps;
+                        }
+                    }
+
+                    const bool emergency = hard_stop || adverse_reversal;
+                    if (emergency) {
+                        bool cancellations_ok = true;
+                        for (const auto* o : related_orders) {
+                            if (o->req.source != "CB_LEAD_SCALP_TP") continue;
+                            const bool cancelled = live_exec
+                                ? live_exec->cancel_open_order(o->exchange_id, o->client_id)
+                                : paper->cancel_order(o->client_id);
+                            cancellations_ok = cancellations_ok && cancelled;
+                        }
+                        if (!cancellations_ok) continue;
+
+                        vp::OrderRequest exit;
+                        exit.condition_id = p.condition_id;
+                        exit.asset = p.asset;
+                        exit.horizon_s = p.horizon_s;
+                        exit.token_id = p.token_id;
+                        exit.side = p.side;
+                        exit.dir = vp::OrderDir::Sell;
+                        exit.size_shares = p.shares;
+                        exit.limit_price = 0.0;
+                        exit.window_close_ms = p.window_close_ms;
+                        exit.source = hard_stop ? "CB_LEAD_SCALP_HARD_STOP"
+                                                : "CB_LEAD_SCALP_REVERSAL";
+                        exit.stop_loss_fak_authorized = hard_stop_ticks;
+                        {
+                            std::lock_guard<std::mutex> lk(state.mu);
+                            auto mit = std::find_if(state.markets.begin(), state.markets.end(),
+                                [&](const vp::PmMarket& m) {
+                                    return m.condition_id == p.condition_id;
+                                });
+                            if (mit != state.markets.end()) {
+                                exit.neg_risk = mit->neg_risk;
+                                exit.tick_size = mit->tick_size;
+                            }
+                        }
+                        spdlog::warn("CB lead scalp exit {} {} bid={:.3f} avg={:.3f} "
+                                     "hard={} tick_stop={} stop_at={:.3f} tick_size={:.4f} "
+                                     "reversal={} t={}s",
+                            p.asset, vp::to_string(p.side), bid, p.avg_price,
+                            hard_stop, hard_stop_ticks, stop_tick_price, stop_tick_size,
+                            adverse_reversal, secs_left);
+                        do_submit(exit);
+                        continue;
+                    }
+
+                    const bool target_exists = std::any_of(
+                        related_orders.begin(), related_orders.end(), [](const auto* o) {
+                            return o->req.source == "CB_LEAD_SCALP_TP";
+                        });
+                    if (target_exists) continue;
+
+                    double tick = 0.01;
+                    bool neg_risk = true;
+                    {
+                        std::lock_guard<std::mutex> lk(state.mu);
+                        auto mit = std::find_if(state.markets.begin(), state.markets.end(),
+                            [&](const vp::PmMarket& m) {
+                                return m.condition_id == p.condition_id;
+                            });
+                        if (mit != state.markets.end()) {
+                            tick = mit->tick_size > 0.0 ? mit->tick_size : tick;
+                            neg_risk = mit->neg_risk;
+                        }
+                    }
+                    const double target = std::ceil(
+                        p.avg_price * (1.0 + cfg.strategy.lead_lag_scalp_profit_target_pct / 100.0)
+                        / tick - 1e-9) * tick;
+                    if (!(target > p.avg_price) || target >= 1.0 - 1e-9) continue;
+
+                    vp::OrderRequest take_profit;
+                    take_profit.condition_id = p.condition_id;
+                    take_profit.asset = p.asset;
+                    take_profit.horizon_s = p.horizon_s;
+                    take_profit.token_id = p.token_id;
+                    take_profit.side = p.side;
+                    take_profit.dir = vp::OrderDir::Sell;
+                    take_profit.size_shares = p.shares;
+                    take_profit.limit_price = target;
+                    take_profit.window_close_ms = p.window_close_ms;
+                    take_profit.neg_risk = neg_risk;
+                    take_profit.tick_size = tick;
+                    take_profit.maker_fixed_price = true;
+                    take_profit.execution_mode = vp::ExecutionMode::Maker;
+                    take_profit.maker_reprice_ms = 0;
+                    take_profit.maker_poll_ms = std::max(100, cfg.strategy.maker_poll_ms);
+                    take_profit.maker_max_age_ms = 0;
+                    take_profit.maker_cancel_before_close_ms =
+                        flatten_secs * 1000;
+                    if (bid >= target) {
+                        take_profit.maker_fixed_price = false;
+                        take_profit.limit_price = 0.0;
+                    }
+                    take_profit.source = "CB_LEAD_SCALP_TP";
+                    do_submit(take_profit);
+                }
+            }
+
             // Dedicated PAPER strategy controller, after maker fill reconciliation.
             // It continues managing held inventory while entry autopilot is paused.
             if (!live_exec && (cfg.strategy.recycler_mode!="off" || recycler.engaged())) {
@@ -5871,7 +6822,11 @@ int main(int argc, char** argv) {
                 last_rest_discover_ms = now_ms;
                 std::vector<vp::PmMarket> new_markets;
                 try {
-                    new_markets = rest.discover_updown_markets();
+                    new_markets = rest.discover_updown_markets(
+                        cfg.polymarket.universe_horizons_seconds,
+                        cfg.strategy.blocked_assets,
+                        cfg.polymarket.universe_prewarm_ahead_minutes,
+                        cfg.polymarket.universe_max_windows_per_series);
                 } catch (const std::exception& e) {
                     // A silent discovery failure during a venue incident looks
                     // exactly like "the fleet quietly stopped trading" — make
@@ -6158,16 +7113,26 @@ int main(int argc, char** argv) {
                 }
             }
 
-            std::filesystem::create_directories("session_reports");
+            std::filesystem::path report_dir = "session_reports";
+            if (const char* configured_dir = std::getenv("POLYSPARQ_SESSION_REPORT_DIR");
+                configured_dir && *configured_dir) {
+                const std::filesystem::path candidate(configured_dir);
+                if (candidate.is_absolute()) {
+                    report_dir = candidate;
+                } else {
+                    spdlog::warn("session report directory override must be absolute; using default");
+                }
+            }
+            std::filesystem::create_directories(report_dir);
             const std::string mode = state.mode_label;
             const std::string safe_mode = (mode == "LIVE") ? "live" : "paper";
-            const std::string report_path = fmt::format(
-                "session_reports/polypulse_{}{}_{}_{}.md",
+            const auto report_path = report_dir / fmt::format(
+                "polypulse_{}{}_{}_{}.md",
                 instance_label.empty() ? "" : (instance_label + "_"),
                 wall_ts_compact(session_start_ms), safe_mode, session_id.substr(0, 8));
             std::ofstream out(report_path);
             if (!out) {
-                spdlog::warn("session report: cannot write {}", report_path);
+                spdlog::warn("session report: cannot write {}", report_path.string());
                 return;
             }
 
@@ -6274,7 +7239,7 @@ int main(int argc, char** argv) {
                 }
             }
             out.flush();
-            spdlog::info("session report written: {}", report_path);
+            spdlog::info("session report written: {}", report_path.string());
         } catch (const std::exception& e) {
             spdlog::warn("session report failed: {}", e.what());
         } catch (...) {

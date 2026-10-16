@@ -518,16 +518,20 @@ OrderResult LiveExecutor::submit(
     // Authoritative tick size (filled from the CLOB inside the build block below;
     // declared here so it is in scope for the whole function despite the gotos).
     double real_tick = req.tick_size > 0 ? req.tick_size : 0.01;
-    const bool maker_order = req.dir == OrderDir::Buy &&
-                             req.execution_mode != ExecutionMode::Taker;
+    const bool maker_order = req.execution_mode != ExecutionMode::Taker;
 
     // Phase 1.7: set true when a BUY reservation is placed (released at done:).
     bool reserved = false;
     int reject_http_status = 0;
 
-    if (req.dir == OrderDir::Sell && req.execution_mode != ExecutionMode::Taker) {
-        r.reject_class = OrderResult::RejectClass::InvalidPayload;
-        r.reject_reason = "LIVE passive sells are not implemented; explicit taker policy required";
+    const bool authorized_stop_fak =
+        req.stop_loss_fak_authorized &&
+        (req.source == "CB_LEAD_SCALP_HARD_STOP" ||
+         req.source == "LATE_SETTLEMENT_HARD_STOP") &&
+        req.dir == OrderDir::Sell;
+    if (req.execution_mode == ExecutionMode::Taker && !authorized_stop_fak) {
+        r.reject_class = OrderResult::RejectClass::RiskCap;
+        r.reject_reason = "taker execution disabled except for an authorized tick hard stop";
         goto done;
     }
 
@@ -656,6 +660,13 @@ OrderResult LiveExecutor::submit(
                     r.reject_reason = "no passive maker price available";
                     goto done;
                 }
+                if (req.maker_min_price > 0.0 &&
+                    exec_price + 1e-9 < req.maker_min_price) {
+                    r.reject_reason = fmt::format(
+                        "maker quote {:.3f} below required minimum {:.3f}",
+                        exec_price, req.maker_min_price);
+                    goto done;
+                }
             } else {
             // Marketable FAK: price a couple ticks THROUGH the best ask so the
             // order actually crosses if the book moved a tick since the signal.
@@ -710,29 +721,68 @@ OrderResult LiveExecutor::submit(
             }
             double want = req.size_shares > 0 ? req.size_shares : held;
             exec_shares = std::min(want, held);
+            if (maker_order) {
+                double already_reserved = 0.0;
+                std::lock_guard<std::mutex> lk(open_mu_);
+                for (const auto& [_, order] : open_orders_) {
+                    if (order.req.dir == OrderDir::Sell &&
+                        order.req.condition_id == req.condition_id &&
+                        order.req.side == req.side) {
+                        already_reserved += std::max(
+                            0.0, order.original_shares - order.matched_shares);
+                    }
+                }
+                exec_shares = std::min(exec_shares,
+                    std::max(0.0, held - already_reserved));
+            }
             if (exec_shares <= 0) {
                 r.reject_class = OrderResult::RejectClass::BalanceAllowance;
                 r.reject_reason = "no shares held (reconciled to 0)";
                 goto done;
             }
-            // Now price against the book.
-            auto b = book->best_bid();
-            if (b.price <= 0) {
+            // A maker sell joins the ask side and must remain strictly above
+            // the bid. A taker sell instead crosses the best bid immediately.
+            const auto b = book->best_bid();
+            const auto a = book->best_ask();
+            if (b.price <= 0 || (maker_order && a.price <= 0)) {
                 r.reject_class = OrderResult::RejectClass::NoBook;
-                r.reject_reason = "no bids on book";
+                r.reject_reason = maker_order ? "no two-sided book for maker sell"
+                                              : "no bids on book";
                 goto done;
             }
-            // Clamp to the highest valid tick below 1.0: CLOB rejects prices that
-            // round up to 1.0 (e.g. bid=0.995 with tick=0.01 → raw_price=1.00).
             double ts = real_tick;
-            exec_price = std::min(b.price, 1.0 - ts);
-            // Snap DOWN to the tick grid so we never quote above the live bid.
-            exec_price = std::floor(exec_price / ts + 1e-9) * ts;
-            if (req.limit_price > 0 && exec_price + 1e-9 < req.limit_price) {
-                r.reject_class = OrderResult::RejectClass::PostOnlyCross;
-                r.reject_reason = fmt::format("bid {:.3f} < sell minimum {:.3f}",
-                                              exec_price, req.limit_price);
-                goto done;
+            if (maker_order) {
+                if (req.maker_fixed_price && req.limit_price > 0) {
+                    exec_price = req.limit_price;
+                } else {
+                    exec_price = a.price -
+                        std::max(0, req.maker_improve_ticks) * ts;
+                    exec_price = std::max(exec_price, b.price + ts);
+                    if (req.limit_price > 0)
+                        exec_price = std::max(exec_price, req.limit_price);
+                }
+                exec_price = std::ceil(exec_price / ts - 1e-9) * ts;
+                exec_price = std::min(exec_price, 1.0 - ts);
+                if (exec_price <= b.price + 1e-9) {
+                    r.reject_class = OrderResult::RejectClass::PostOnlyCross;
+                    r.reject_reason = "maker sell price is not above the best bid";
+                    goto done;
+                }
+            } else {
+                // Price the FAK a few ticks through the bid so a one-tick book
+                // move between the local read and POST does not strand an exit.
+                // A caller's limit_price remains a hard minimum sale price.
+                const double cross_ticks = std::isfinite(req.entry_cross_ticks)
+                    ? std::max(0.0, req.entry_cross_ticks) : 0.0;
+                exec_price = std::min(b.price, 1.0 - ts) - cross_ticks * ts;
+                exec_price = std::max(ts, exec_price);
+                exec_price = std::floor(exec_price / ts + 1e-9) * ts;
+                if (req.limit_price > 0 && exec_price + 1e-9 < req.limit_price) {
+                    r.reject_class = OrderResult::RejectClass::PostOnlyCross;
+                    r.reject_reason = fmt::format("bid {:.3f} < sell minimum {:.3f}",
+                                                  exec_price, req.limit_price);
+                    goto done;
+                }
             }
         }
 
@@ -748,7 +798,10 @@ OrderResult LiveExecutor::submit(
             ? (maker_order
                 ? eip712::calc_amounts(0, exec_price, maker_requested_shares, real_tick)
                 : eip712::calc_buy_market_amounts(exec_price, req.size_usd, real_tick))
-            : eip712::calc_sell_market_amounts(exec_price, exec_shares, real_tick);
+            : (maker_order
+                ? eip712::calc_amounts(1, exec_price,
+                    std::floor(exec_shares * 100.0) / 100.0, real_tick)
+                : eip712::calc_sell_market_amounts(exec_price, exec_shares, real_tick));
         if (amts.maker_amount == 0 || amts.taker_amount == 0) {
             r.reject_class = OrderResult::RejectClass::InvalidPayload;
             r.reject_reason = "rounded order amount is zero";
@@ -1296,6 +1349,17 @@ std::size_t LiveExecutor::open_order_count() const {
     return open_orders_.size();
 }
 
+std::vector<LiveExecutor::OpenOrderView> LiveExecutor::open_orders() const {
+    std::lock_guard<std::mutex> lk(open_mu_);
+    std::vector<OpenOrderView> out;
+    out.reserve(open_orders_.size());
+    for (const auto& [_, order] : open_orders_) {
+        out.push_back({order.req, order.client_order_id, order.exchange_order_id,
+            order.price, std::max(0.0, order.original_shares - order.matched_shares)});
+    }
+    return out;
+}
+
 std::size_t LiveExecutor::maintain_open_orders(
     const std::function<const OrderBook*(const std::string&, ShareSide)>& book_lookup,
     std::int64_t now_ms, const std::function<bool()>& may_replace) {
@@ -1441,13 +1505,25 @@ std::size_t LiveExecutor::maintain_open_orders(
                 }
                 if (!(tick > 0))
                     tick = snapshot.req.tick_size > 0 ? snapshot.req.tick_size : 0.01;
-                double target = bid.price > 0
-                    ? bid.price + std::max(0, snapshot.req.maker_improve_ticks) * tick
-                    : ask.price - tick;
-                if (ask.price > 0) target = std::min(target, ask.price - tick);
-                if (snapshot.req.limit_price > 0)
-                    target = std::min(target, snapshot.req.limit_price);
-                target = std::floor(target / tick + 1e-9) * tick;
+                double target = 0.0;
+                if (snapshot.req.dir == OrderDir::Buy) {
+                    target = bid.price > 0
+                        ? bid.price + std::max(0, snapshot.req.maker_improve_ticks) * tick
+                        : ask.price - tick;
+                    if (ask.price > 0) target = std::min(target, ask.price - tick);
+                    if (snapshot.req.limit_price > 0)
+                        target = std::min(target, snapshot.req.limit_price);
+                    target = std::floor(target / tick + 1e-9) * tick;
+                } else {
+                    target = ask.price > 0
+                        ? ask.price - std::max(0, snapshot.req.maker_improve_ticks) * tick
+                        : bid.price + tick;
+                    target = std::max(target, bid.price + tick);
+                    if (snapshot.req.limit_price > 0)
+                        target = std::max(target, snapshot.req.limit_price);
+                    target = std::ceil(target / tick - 1e-9) * tick;
+                    target = std::min(target, 1.0 - tick);
+                }
                 reprice = target > 0 && std::fabs(target - price) >= tick * 0.5;
             }
         }

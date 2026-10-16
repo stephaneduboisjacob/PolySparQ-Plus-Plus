@@ -32,13 +32,15 @@ struct OrderRequest {
     bool        neg_risk = true;    // per-market signing domain
     double      tick_size = 0.01;   // price tick for CLOB amount rounding
     double      entry_cross_ticks = 2.0; // buy FAK crosses best ask by this many ticks
-    ExecutionMode execution_mode = ExecutionMode::Taker;
+    ExecutionMode execution_mode = ExecutionMode::Maker;
     int         maker_improve_ticks = 0; // improve best bid, while remaining passive
     int         maker_reprice_ms = 750;
     int         maker_poll_ms = 500;
     int         maker_max_age_ms = 5000;
     int         maker_cancel_before_close_ms = 3000;
     bool        maker_fixed_price = false; // strategy-owned target; never chase the touch
+    double      maker_min_price = 0.0; // optional floor for a passive BUY quote
+    bool        stop_loss_fak_authorized = false; // fixed-source hard stops only; executors re-check the source
     std::int64_t maker_root_deadline_ms = 0; // internal: preserved across replacements
     // Fee model (Polymarket taker fee)
     double      fee_rate = 0.07;    // from strategy.hot.taker_fee_rate
@@ -96,6 +98,10 @@ struct Journal {
     // Must durably reserve a new intent before the executor can affect positions
     // or contact a venue. False means duplicate ID or persistence unavailable.
     std::function<bool(const OrderRequest&, const std::string&)> before_submit;
+    // Record each changed resting price so paper fills can be replayed against
+    // the quote that was active when the simulated fill occurred.
+    std::function<void(const OrderRequest&, const std::string&, double, double)>
+        on_reprice;
 };
 class PaperExecutor {
 public:

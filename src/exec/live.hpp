@@ -50,6 +50,14 @@ public:
         const std::function<const OrderBook*(const std::string&, ShareSide)>& book_lookup,
         std::int64_t now_ms, const std::function<bool()>& may_replace);
     std::size_t open_order_count() const;
+    struct OpenOrderView {
+        OrderRequest req;
+        std::string client_order_id;
+        std::string exchange_order_id;
+        double price = 0;
+        double remaining_shares = 0;
+    };
+    std::vector<OpenOrderView> open_orders() const;
     void cancel_open_orders();
     // Cancel one locally tracked venue order and journal the acknowledged result.
     bool cancel_open_order(const std::string& exchange_order_id,

@@ -1,4 +1,4 @@
-"""Reference-aware board with a shared C++ baseline and a bounded ensemble.
+"""Reference-aware board with a shared settlement kernel and scored models.
 
 Network metadata is cached across visitors. Candle queries use the existing
 (symbol, ts) index; the five-year archive is never scanned by an HTTP request.
@@ -16,13 +16,49 @@ from urllib.parse import urlencode
 
 _cache = {}
 _cache_lock = threading.Lock()
+_quality_cache = {}
+_quality_cache_lock = threading.Lock()
+QUALITY_SUMMARY_REFRESH_SECONDS = 30.0
 ASSETS = ('BTC', 'ETH', 'SOL', 'XRP')
-MODEL_VERSION = 'market-benchmark-v5'
+INDEPENDENT_MODEL_VERSION = 'vantagepulse-independent-v1'
+MODEL_VERSION = INDEPENDENT_MODEL_VERSION
+MARKET_BENCHMARK_VERSION = 'market-benchmark-v5'
+TICK_MODEL_VERSION = 'vantagepulse-tick-5m-v1'
 SHADOW_CALIBRATION_VERSION = 'multisource-v4'
-REFRESH_RATES = (2, 5, 10, 15)
+SERVER_REFRESH_SECONDS = 1.0
+SNAPSHOT_STALE_SECONDS = 3.0
+MIN_REFRESH_GAP_SECONDS = 0.05
+
+# Fixed, CLOB-free 5-minute cross-feed correction. Fit on resolved
+# reference-v3 checkpoints through 2026-10-01, then scored on the later
+# market-benchmark-v5 checkpoint set (2026-10-05..09). The 15-minute and
+# provisional forecasts stay on the settlement kernel; their tick correction
+# did not survive the same chronological holdout.
+_TICK_5M_INTERCEPT = -0.02298204813944169
+_TICK_5M_KERNEL_LOGIT = 0.8895640438993003
+_TICK_5M_MEANS = (-0.08534611608413564, -0.11399369884483057,
+                  3.6612572379982042, 0.14935617321322972,
+                  0.9914938304016803, 0.9489104751903387,
+                  0.9904961932265687, 0.9508532423208191)
+_TICK_5M_SCALES = (3.0430929665938433, 3.1021673522994617,
+                   2.6683539205081916, 1.0228320507307487,
+                   0.0918358028063144, 0.22018034713472265,
+                   0.09702311286619156, 0.21617435992454478)
+_TICK_5M_WEIGHTS = (0.07423895323941519, 0.019974643436103598,
+                    0.03700499510676714, -0.011664737155675366,
+                    0.007560988398551871, 0.015020063289023845,
+                    -0.032033292240092257, -0.005424155529094445)
+_TICK_5M_TRAINED_THROUGH = 1790836323  # 2026-10-01 06:32:03 UTC
+_TICK_5M_TRAIN_N = 19045
+_TICK_5M_HOLDOUT_N = 3438
+_TICK_5M_HOLDOUT_START = 1791158400  # 2026-10-05 00:00:00 UTC
+_TICK_5M_HOLDOUT_END = 1791590400    # 2026-10-10 00:00:00 UTC
+_TICK_5M_HOLDOUT_BRIER = 0.168435
+_TICK_5M_KERNEL_BRIER = 0.169288
+_TICK_5M_CLOB_BRIER = 0.164335
 
 
-def age_board(board, now_ms=None, stale_after_s=10):
+def age_board(board, now_ms=None, stale_after_s=SNAPSHOT_STALE_SECONDS):
     """Invalidate old recommendations even when refresh fails or a window rolls."""
     out = copy.deepcopy(board)
     now_ms = int(time.time()*1000) if now_ms is None else now_ms
@@ -46,45 +82,47 @@ def age_board(board, now_ms=None, stale_after_s=10):
                 status = 'closed'
             elif not card.get('provisional') and 0 < card['seconds_left'] <= card.get('settlement_window_s',0):
                 status = 'averaging_window'
-            elif (age > stale_after_s or card.get('reference_age_s', 0) > 10 or
+            elif (age > stale_after_s or card.get('reference_age_s', 0) > 5 or
                   card.get('candle_age_s', -1) < 0 or card.get('candle_age_s', 0) > 120):
                 status = 'stale_data'
             if status:
                 card.update(model_status=status, direction='WAIT', opportunity=None,
                             model_edge=None, conservative_edge=None, model_market_gap=None,
+                            independent_direction='WAIT', independent_model_edge=None,
+                            independent_conservative_edge=None, independent_market_gap=None,
                             alert_candidate=None,
                             manual_note='Waiting for a fresh forecast for this window.')
-            if age > stale_after_s or card.get('book_age_s', 0) > 15:
+                for field in ('up_probability', 'up_probability_raw', 'probability_low',
+                              'probability_high', 'settlement_model_probability',
+                              'settlement_model_low', 'settlement_model_high',
+                              'independent_up_probability', 'independent_up_probability_raw',
+                              'independent_probability_low', 'independent_probability_high'):
+                    card[field] = None
+            if age > stale_after_s or card.get('book_age_s', 0) > 3:
                 for field in ('polymarket_up','polymarket_up_price','polymarket_down_price','polymarket_up_bid','polymarket_down_bid','execution_hurdle',
-                              'model_edge','conservative_edge','predicted_ask_depth','opportunity','alert_candidate'):
+                              'model_edge','conservative_edge','independent_model_edge',
+                              'independent_conservative_edge','independent_market_gap',
+                              'predicted_ask_depth','opportunity','alert_candidate'):
                     card[field] = None
     return out
 
 
 class PredictionService:
     """One producer for the whole cockpit; readers never wait for network I/O."""
-    def __init__(self, query, public_json, root, news_fn, interval=2):
+    def __init__(self, query, public_json, root, news_fn, interval=SERVER_REFRESH_SECONDS):
         self.query, self.public_json, self.root, self.news_fn = query, public_json, root, news_fn
-        self.interval = interval
-        self._lock = threading.Lock()
+        self.interval = max(MIN_REFRESH_GAP_SECONDS, float(interval))
+        self._lock = threading.Condition()
         self._stop = threading.Event()
         self._board = None
         self._news = {'stories': [], 'sources': []}
         self._error = None
         self._threads = []
         self._refresh_now = threading.Event()
-
-    def set_interval(self, interval):
-        try:
-            interval = int(interval)
-        except (TypeError, ValueError):
-            return
-        with self._lock:
-            changed = interval in REFRESH_RATES and interval != self.interval
-            if changed:
-                self.interval = interval
-        if changed:
-            self._refresh_now.set()
+        self._building = False
+        self._version = 0
+        self._last_attempt_ms = None
+        self._last_success_ms = None
 
     def start(self):
         with self._lock:
@@ -96,16 +134,37 @@ class PredictionService:
                 self._threads.append(thread)
                 thread.start()
 
-    def snapshot(self, force=False):
+    def snapshot(self, force=False, after_version=None, wait_s=0.0):
         if force:
-            self._refresh_now.set()
+            with self._lock:
+                # Coalesce a manual refresh with a build already in progress.
+                if not self._building:
+                    self._refresh_now.set()
+        if after_version is not None and wait_s > 0:
+            deadline = time.monotonic() + min(3.0, max(0.0, float(wait_s)))
+            with self._lock:
+                while self._version <= after_version and not self._stop.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._lock.wait(remaining)
         with self._lock:
             board, error, interval = self._board, self._error, self.interval
+            version = self._version
+            last_attempt_ms = self._last_attempt_ms
+            last_success_ms = self._last_success_ms
         if board is None:
             return {'cards': [], 'generated_at': int(time.time()*1000), 'model_version':MODEL_VERSION,
-                    'warming_up':True, 'errors':[error] if error else [], 'refresh_interval_s':interval}
-        result = age_board(board, stale_after_s=max(10, interval * 2))
+                    'warming_up':True, 'errors':[error] if error else [],
+                    'refresh_interval_s':interval, 'producer_version':version,
+                    'snapshot_stale_after_s':SNAPSHOT_STALE_SECONDS,
+                    'last_attempt_at_ms':last_attempt_ms, 'last_success_at_ms':last_success_ms}
+        result = age_board(board, stale_after_s=SNAPSHOT_STALE_SECONDS)
         result['refresh_interval_s'] = interval
+        result['snapshot_stale_after_s'] = SNAPSHOT_STALE_SECONDS
+        result['producer_version'] = version
+        result['last_attempt_at_ms'] = last_attempt_ms
+        result['last_success_at_ms'] = last_success_ms
         if error:
             result['errors'].append(error)
         return result
@@ -113,19 +172,29 @@ class PredictionService:
     def _run(self):
         while not self._stop.is_set():
             started = time.monotonic()
+            with self._lock:
+                self._building = True
+                self._last_attempt_ms = int(time.time()*1000)
             try:
                 board = build_board(self.query, self.public_json, self.root,
                                     lambda: self._news, resolve=False)
                 with self._lock:
                     self._board, self._error = board, None
+                    self._last_success_ms = int(time.time()*1000)
+                    self._version += 1
             except Exception as exc:
                 with self._lock:
                     self._error = 'Prediction refresh failed: '+type(exc).__name__
-            # Force requests coalesce; page refresh preferences control the
-            # shared producer cadence without making readers wait for I/O.
+                    self._version += 1
+            finally:
+                with self._lock:
+                    self._building = False
+                    self._lock.notify_all()
             with self._lock:
                 interval = self.interval
             wait_s = max(0, interval-(time.monotonic()-started))
+            if wait_s == 0:
+                wait_s = MIN_REFRESH_GAP_SECONDS
             if self._refresh_now.wait(wait_s):
                 self._refresh_now.clear()
             if self._stop.is_set():
@@ -156,7 +225,15 @@ def cached(key, seconds, fetch):
         old = _cache.get(key)
     if old and time.monotonic() - old[0] < seconds:
         return old[1]
-    value = fetch()
+    try:
+        value = fetch()
+    except Exception:
+        # Market metadata and historical candles remain useful during brief
+        # upstream failures. Their own timestamps/window keys still determine
+        # whether a forecast is usable; live quotes are never served here.
+        if old:
+            return old[1]
+        raise
     with _cache_lock:
         _cache[key] = (time.monotonic(), value)
         if len(_cache) > 256:
@@ -253,8 +330,15 @@ def recent_candles(query, public_json, asset, now):
 
 def _journal(root, cards, markets, public_json, resolve=True):
     path = os.path.join(root, 'logs', 'prediction_quality.sqlite3')
+    with _quality_cache_lock:
+        previous_quality = _quality_cache.get(path)
+        cached_quality = (copy.deepcopy(previous_quality[1])
+                          if previous_quality and
+                          time.monotonic()-previous_quality[0] < QUALITY_SUMMARY_REFRESH_SECONDS
+                          else None)
     with sqlite3.connect(path, timeout=2) as db:
-        db.execute('PRAGMA journal_mode=WAL')
+        if db.execute('PRAGMA journal_mode').fetchone()[0].lower() != 'wal':
+            db.execute('PRAGMA journal_mode=WAL')
         db.execute('''CREATE TABLE IF NOT EXISTS forecasts (
             cid TEXT, slug TEXT, bucket INTEGER, captured INTEGER, closes INTEGER,
             p REAL, market_p REAL, outcome INTEGER, version TEXT,
@@ -262,11 +346,19 @@ def _journal(root, cards, markets, public_json, resolve=True):
         columns = {row[1] for row in db.execute("PRAGMA table_info(forecasts)")}
         if 'shadow_p' not in columns:
             db.execute('ALTER TABLE forecasts ADD COLUMN shadow_p REAL')
+            # Populate the legacy series only during the one-time schema upgrade.
+            db.execute('UPDATE forecasts SET shadow_p=p')
         if 'diagnostics_json' not in columns:
             db.execute('ALTER TABLE forecasts ADD COLUMN diagnostics_json TEXT')
-        # Historical p values were the experimental board output. Keep them as
-        # its shadow series when adding the new market-anchored primary output.
-        db.execute('UPDATE forecasts SET shadow_p=p WHERE shadow_p IS NULL')
+        # Indexes keep the occasional historical score refresh bounded.
+        db.execute('''CREATE INDEX IF NOT EXISTS forecasts_quality_lookup
+            ON forecasts(version,bucket) WHERE outcome IS NOT NULL''')
+        db.execute('CREATE INDEX IF NOT EXISTS forecasts_captured_lookup ON forecasts(captured)')
+        db.execute('''CREATE INDEX IF NOT EXISTS forecasts_pending_resolution
+            ON forecasts(closes) WHERE outcome IS NULL''')
+        db.execute('''CREATE TABLE IF NOT EXISTS prediction_model_backfills (
+            version TEXT PRIMARY KEY, applied INTEGER NOT NULL, rows_inserted INTEGER NOT NULL,
+            applied_at INTEGER NOT NULL)''')
         now = int(time.time())
         insert = '''INSERT OR IGNORE INTO forecasts
             (cid,slug,bucket,captured,closes,p,market_p,outcome,version,shadow_p,diagnostics_json)
@@ -279,6 +371,12 @@ def _journal(root, cards, markets, public_json, resolve=True):
                     (c['condition_id'],c['slug'],c['seconds_left']//60,now,c['window_close']//1000,
                      c['up_probability'],c['polymarket_up'],MODEL_VERSION,
                      c.get('experimental_up_probability', c['up_probability']),diagnostics))
+                if (INDEPENDENT_MODEL_VERSION != MODEL_VERSION and
+                        c.get('independent_up_probability') is not None):
+                    db.execute(insert,
+                        (c['condition_id'],c['slug'],bucket,now,c['window_close']//1000,
+                         c['independent_up_probability'],c['polymarket_up'],
+                         INDEPENDENT_MODEL_VERSION,c['independent_up_probability'],diagnostics))
             n = c.get('next_window') or {}
             if n.get('model_status') == 'provisional' and n.get('condition_id'):
                 bucket = n['seconds_until_open']//60
@@ -288,10 +386,96 @@ def _journal(root, cards, markets, public_json, resolve=True):
                      n['window_close']//1000,n['up_probability'],n.get('polymarket_up'),
                      MODEL_VERSION+'-next',n.get('experimental_up_probability',n['up_probability']),
                      diagnostics))
+                if (INDEPENDENT_MODEL_VERSION != MODEL_VERSION and
+                        n.get('independent_up_probability') is not None):
+                    db.execute(insert,
+                        (n['condition_id'],n['slug'],bucket,now,n['window_close']//1000,
+                         n['independent_up_probability'],n.get('polymarket_up'),
+                         INDEPENDENT_MODEL_VERSION+'-next',n['independent_up_probability'],
+                         diagnostics))
+        # Seed the model's live score from the strictly later v5 holdout. The
+        # source rows retain the settlement-kernel probability and live feed
+        # features, so the CLOB-free 5m estimate can be reconstructed without
+        # training on (or reading) the Polymarket price. 15m remains kernel-only.
+        backfill_done = db.execute(
+            'SELECT 1 FROM prediction_model_backfills WHERE version=?',
+            (INDEPENDENT_MODEL_VERSION,)).fetchone()
+        if not backfill_done:
+            source_rows = db.execute('''SELECT cid,slug,bucket,captured,closes,market_p,
+                    outcome,diagnostics_json
+                FROM forecasts WHERE version=? AND bucket=2 AND captured>?
+                    AND captured>=? AND captured<?
+                    AND market_p IS NOT NULL AND outcome IS NOT NULL
+                    AND diagnostics_json IS NOT NULL ORDER BY captured''',
+                (MARKET_BENCHMARK_VERSION, _TICK_5M_TRAINED_THROUGH,
+                 _TICK_5M_HOLDOUT_START, _TICK_5M_HOLDOUT_END)).fetchall()
+            rows_inserted = 0
+            for cid,slug,bucket,captured,closes,market_p,outcome,raw in source_rows:
+                try:
+                    diagnostic = json.loads(raw)
+                    kernel_p = float(diagnostic['settlement_model_probability'])
+                    if '-5m-' in str(slug):
+                        model_p = _tick_corrected_probability(
+                            kernel_p, diagnostic.get('binance_momentum_bps'),
+                            diagnostic.get('coinbase_momentum_bps'),
+                            diagnostic.get('binance_basis_bps'),
+                            diagnostic.get('coinbase_basis_bps'))[0]
+                    elif '-15m-' in str(slug):
+                        model_p = kernel_p
+                    else:
+                        continue
+                    if not (math.isfinite(model_p) and 0.0 <= model_p <= 1.0):
+                        continue
+                    cursor = db.execute('''INSERT OR IGNORE INTO forecasts
+                        (cid,slug,bucket,captured,closes,p,market_p,outcome,version,
+                         shadow_p,diagnostics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                        (cid,slug,bucket,captured,closes,model_p,market_p,outcome,
+                         INDEPENDENT_MODEL_VERSION,model_p,raw))
+                    rows_inserted += cursor.rowcount
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            db.execute('INSERT INTO prediction_model_backfills VALUES (?,?,?,?)',
+                (INDEPENDENT_MODEL_VERSION,1,rows_inserted,now))
+        # Seed the provisional next-window score from the already resolved
+        # v5 snapshots. Their stored settlement probability is exactly the
+        # CLOB-free Chainlink kernel used by the current pre-open forecast.
+        # Keep this separate from the current-window bootstrap: the opening
+        # reference is unknown at these checkpoints, so the two populations
+        # must never be mixed.
+        next_backfill_version = INDEPENDENT_MODEL_VERSION+'-next-checkpoint-v1'
+        next_backfill_done = db.execute(
+            'SELECT 1 FROM prediction_model_backfills WHERE version=?',
+            (next_backfill_version,)).fetchone()
+        if not next_backfill_done:
+            source_rows = db.execute('''SELECT cid,slug,bucket,captured,closes,market_p,
+                    outcome,diagnostics_json
+                FROM forecasts WHERE version=? AND bucket=2
+                    AND market_p IS NOT NULL AND outcome IS NOT NULL
+                    AND diagnostics_json IS NOT NULL ORDER BY captured''',
+                (MARKET_BENCHMARK_VERSION+'-next',)).fetchall()
+            rows_inserted = 0
+            for cid,slug,bucket,captured,closes,market_p,outcome,raw in source_rows:
+                try:
+                    diagnostic = json.loads(raw)
+                    model_p = float(diagnostic['settlement_model_probability'])
+                    if not (math.isfinite(model_p) and 0.0 <= model_p <= 1.0):
+                        continue
+                    cursor = db.execute('''INSERT OR IGNORE INTO forecasts
+                        (cid,slug,bucket,captured,closes,p,market_p,outcome,version,
+                         shadow_p,diagnostics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                        (cid,slug,bucket,captured,closes,model_p,market_p,outcome,
+                         INDEPENDENT_MODEL_VERSION+'-next',model_p,raw))
+                    rows_inserted += cursor.rowcount
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            db.execute('INSERT INTO prediction_model_backfills VALUES (?,?,?,?)',
+                (next_backfill_version,1,rows_inserted,now))
         db.commit()
         if resolve:
             resolve_pending(root, public_json)
         db.execute('DELETE FROM forecasts WHERE captured<?',(now-90*86400,))
+        if cached_quality is not None:
+            return cached_quality
         # One comparable checkpoint per market avoids pretending correlated
         # repeated refreshes are independent observations.
         rows = db.execute('''SELECT f.p,f.shadow_p,f.market_p,f.outcome FROM forecasts f
@@ -305,12 +489,18 @@ def _journal(root, cards, markets, public_json, resolve=True):
         legacy_next_rows = db.execute('''SELECT p,market_p,outcome FROM forecasts
             WHERE outcome IS NOT NULL AND market_p IS NOT NULL AND bucket=2 AND version=?''',
             (SHADOW_CALIBRATION_VERSION+'-next',)).fetchall()
+        independent_rows = db.execute('''SELECT p,market_p,outcome FROM forecasts
+            WHERE outcome IS NOT NULL AND market_p IS NOT NULL AND bucket=2 AND version=?''',
+            (INDEPENDENT_MODEL_VERSION,)).fetchall()
+        independent_next_rows = db.execute('''SELECT p,market_p,outcome FROM forecasts
+            WHERE outcome IS NOT NULL AND market_p IS NOT NULL AND bucket=2 AND version=?''',
+            (INDEPENDENT_MODEL_VERSION+'-next',)).fetchall()
         total = db.execute('SELECT count(DISTINCT cid) FROM forecasts').fetchone()[0]
         n = len(rows)
         paired = [r for r in rows if r[2] is not None]
         next_paired = [r for r in next_rows if r[2] is not None]
         nn = len(next_rows)
-        return {'markets_tracked':total,'resolved_markets':n,
+        quality = {'markets_tracked':total,'resolved_markets':n,
                 'brier':sum((r[0]-r[3])**2 for r in rows)/n if n else None,
                 'shadow_brier':sum((r[1]-r[3])**2 for r in rows if r[1] is not None) /
                     sum(1 for r in rows if r[1] is not None) if any(r[1] is not None for r in rows) else None,
@@ -321,6 +511,9 @@ def _journal(root, cards, markets, public_json, resolve=True):
                 'legacy_shadow_brier':sum((r[0]-r[2])**2 for r in legacy_rows)/len(legacy_rows) if legacy_rows else None,
                 'legacy_market_brier':sum((r[1]-r[2])**2 for r in legacy_rows)/len(legacy_rows) if legacy_rows else None,
                 'legacy_paired_markets':len(legacy_rows),
+                'independent_brier':sum((r[0]-r[2])**2 for r in independent_rows)/len(independent_rows) if independent_rows else None,
+                'independent_market_brier':sum((r[1]-r[2])**2 for r in independent_rows)/len(independent_rows) if independent_rows else None,
+                'independent_paired_markets':len(independent_rows),
                 'accuracy':sum((r[0]>=0.5)==bool(r[3]) for r in rows)/n if n else None,
                 'next_resolved_markets':nn,
                 'next_brier':sum((r[0]-r[3])**2 for r in next_rows)/nn if nn else None,
@@ -329,8 +522,14 @@ def _journal(root, cards, markets, public_json, resolve=True):
                 'next_market_brier':sum((r[2]-r[3])**2 for r in next_paired)/len(next_paired) if next_paired else None,
                 'legacy_next_shadow_brier':sum((r[0]-r[2])**2 for r in legacy_next_rows)/len(legacy_next_rows) if legacy_next_rows else None,
                 'legacy_next_market_brier':sum((r[1]-r[2])**2 for r in legacy_next_rows)/len(legacy_next_rows) if legacy_next_rows else None,
+                'independent_next_brier':sum((r[0]-r[2])**2 for r in independent_next_rows)/len(independent_next_rows) if independent_next_rows else None,
+                'independent_next_market_brier':sum((r[1]-r[2])**2 for r in independent_next_rows)/len(independent_next_rows) if independent_next_rows else None,
+                'independent_next_paired_markets':len(independent_next_rows),
                 'next_accuracy':sum((r[0]>=0.5)==bool(r[3]) for r in next_rows)/nn if nn else None,
                 'checkpoint':'120–179 seconds remaining', 'status':'collecting' if n<100 else 'experimental'}
+        with _quality_cache_lock:
+            _quality_cache[path] = (time.monotonic(), copy.deepcopy(quality))
+        return quality
 
 
 def _diagnostic_snapshot(card):
@@ -339,7 +538,12 @@ def _diagnostic_snapshot(card):
         'prediction_basis', 'model_status', 'reference', 'reference_age_s',
         'reference_price_ts', 'reference_strike_ts', 'settlement_source', 'spot', 'strike',
         'settlement_model_probability', 'settlement_model_low',
-        'settlement_model_high', 'experimental_up_probability',
+        'settlement_model_high', 'independent_up_probability',
+        'independent_up_probability_raw', 'independent_probability_low',
+        'independent_probability_high', 'independent_direction',
+        'independent_model_edge', 'independent_conservative_edge',
+        'independent_market_gap', 'independent_calibration',
+        'independent_components', 'experimental_up_probability',
         'experimental_up_probability_raw', 'experimental_probability_low',
         'experimental_probability_high', 'up_probability', 'probability_low',
         'probability_high', 'polymarket_up', 'market_quote_low', 'market_quote_high', 'polymarket_up_bid',
@@ -406,21 +610,21 @@ def resolve_pending(root, public_json):
 
 def journal_calibration(root, min_n=20, prior=15.0,
                         version=SHADOW_CALIBRATION_VERSION):
-    '''Historical reliability adjustment for the legacy experimental ensemble.
+    '''Historical reliability adjustment at the board's scored checkpoint.
 
-    Resolved current-window forecasts (the supplied version) are grouped by
-    predicted-probability decile. The board shrinks each card's probability
+    Resolved forecasts in bucket 2 (the 120–179 second checkpoint) are grouped
+    by predicted-probability decile. The board shrinks each card's probability
     toward the decile's realized win rate (Beta-style, `prior` pseudo-
-    observations) once the decile holds min_n settled samples. This calibration
-    is shown on the shadow forecast only; it does not alter the market primary.'''
+    observations) once the decile holds min_n settled samples. Version suffixes
+    keep current-window and provisional next-window calibration separate.'''
     path = os.path.join(root, 'logs', 'prediction_quality.sqlite3')
     try:
         with sqlite3.connect(path, timeout=2) as db:
             rows = db.execute('''SELECT CAST(p*10 AS INTEGER), COUNT(*), SUM(outcome), AVG(p)
-                FROM forecasts WHERE outcome IS NOT NULL AND version=?
+                FROM forecasts WHERE outcome IS NOT NULL AND bucket=2 AND version=?
                 GROUP BY 1''', (version,)).fetchall()
             total, wins = db.execute("""SELECT COUNT(*), COALESCE(SUM(outcome),0) FROM forecasts
-                WHERE outcome IS NOT NULL AND version=?""", (version,)).fetchone()
+                WHERE outcome IS NOT NULL AND bucket=2 AND version=?""", (version,)).fetchone()
     except Exception:
         return {}
     deciles = {}
@@ -463,6 +667,56 @@ def _logit(p):
 def _sigmoid(z):
     z = max(-12.0, min(12.0, z))
     return 1.0/(1.0+math.exp(-z))
+
+
+def _tick_corrected_probability(base, binance_move, coinbase_move,
+                                binance_basis, coinbase_basis, impacts=False):
+    """Apply the fitted 5m correction without reading any Polymarket price."""
+    availability = (binance_move is not None, coinbase_move is not None,
+                    binance_basis is not None, coinbase_basis is not None)
+    feature_values = (
+        _number(binance_move), _number(coinbase_move),
+        _number(binance_basis), _number(coinbase_basis),
+        float(availability[0]), float(availability[1]),
+        float(availability[2]), float(availability[3]),
+    )
+    base_logit = _logit(base)
+    z = base_logit
+    rows = []
+
+    def apply(name, adjustment, available, detail):
+        nonlocal z
+        before = _sigmoid(z)
+        z += adjustment
+        after = _sigmoid(z)
+        rows.append({'name': name, 'available': bool(available),
+                     'logit_adjustment': round(adjustment, 6),
+                     'probability_before': round(before, 6),
+                     'probability_after': round(after, 6),
+                     'delta_pp': round((after-before)*100, 2),
+                     'detail': detail})
+
+    apply('5m kernel calibration',
+          _TICK_5M_INTERCEPT+(_TICK_5M_KERNEL_LOGIT-1.0)*base_logit,
+          True, 'Fit on 19,045 earlier resolved 5m forecasts')
+    labels = (
+        ('Binance 10s momentum', 'fresh' if binance_move is not None else 'stale'),
+        ('Coinbase 10s momentum', 'fresh' if coinbase_move is not None else 'stale'),
+        ('Binance vs Chainlink basis', 'fresh' if binance_basis is not None else 'stale'),
+        ('Coinbase vs Chainlink basis', 'fresh' if coinbase_basis is not None else 'stale'),
+        ('Binance momentum availability', 'source coverage'),
+        ('Coinbase momentum availability', 'source coverage'),
+        ('Binance basis availability', 'source coverage'),
+        ('Coinbase basis availability', 'source coverage'),
+    )
+    for i, (name, detail) in enumerate(labels):
+        adjustment = _TICK_5M_WEIGHTS[i] * (
+            feature_values[i]-_TICK_5M_MEANS[i])/_TICK_5M_SCALES[i]
+        value_feature = i < 4
+        available = availability[i] if value_feature else True
+        apply(name, adjustment, available,
+              f'{feature_values[i]:+.2f} bp · {detail}' if value_feature else detail)
+    return _sigmoid(z), rows if impacts else []
 
 
 def _technical_features(rows, sigma_minute):
@@ -523,8 +777,7 @@ def _asset_tape(query, asset):
     rows = query("""SELECT o.price AS spot,o.ts_s AS spot_ts,
         cb.price AS coinbase,cb.ts_s AS coinbase_ts,cb10.price AS coinbase_10,
         cb10.ts_s AS coinbase_10_ts,bn.price AS binance,bn.ts_s AS binance_ts,
-        bn10.price AS binance_10,bn10.ts_s AS binance_10_ts,
-        flow.buy_usd,flow.sell_usd
+        bn10.price AS binance_10,bn10.ts_s AS binance_10_ts
         FROM (SELECT %s::text AS asset) x
         LEFT JOIN LATERAL (SELECT price,EXTRACT(EPOCH FROM ts) AS ts_s
           FROM vp.oracle_ticks WHERE asset=x.asset||':SPOT' ORDER BY ts DESC LIMIT 1) o ON TRUE
@@ -537,14 +790,7 @@ def _asset_tape(query, asset):
           FROM vp.binance_ticks WHERE symbol=x.asset||'USDT' ORDER BY ts DESC LIMIT 1) bn ON TRUE
         LEFT JOIN LATERAL (SELECT price,EXTRACT(EPOCH FROM ts) AS ts_s
           FROM vp.binance_ticks WHERE symbol=x.asset||'USDT' AND ts<=now()-interval '10 seconds'
-          ORDER BY ts DESC LIMIT 1) bn10 ON TRUE
-        LEFT JOIN LATERAL (SELECT
-          COALESCE(SUM(price*qty) FILTER (WHERE COALESCE(aggressor_side::text,
-            CASE WHEN buyer_is_maker THEN 'sell' ELSE 'buy' END)='buy'),0) AS buy_usd,
-          COALESCE(SUM(price*qty) FILTER (WHERE COALESCE(aggressor_side::text,
-            CASE WHEN buyer_is_maker THEN 'sell' ELSE 'buy' END)='sell'),0) AS sell_usd
-          FROM vp.binance_ticks WHERE symbol=x.asset||'USDT'
-            AND ts>now()-interval '60 seconds') flow ON TRUE""", (asset,))
+          ORDER BY ts DESC LIMIT 1) bn10 ON TRUE""", (asset,))
     return rows[0] if rows else {}
 
 
@@ -640,12 +886,9 @@ def _market_probability_range(req):
     return (min(low, high), max(low, high))
 
 
-def _primary_probability(shadow, shadow_low, shadow_high, market, market_range):
-    """Prefer the observed market benchmark; retain the model as shadow data."""
-    if market is not None:
-        low, high = market_range or (market, market)
-        return market, low, high, 'polymarket_midpoint'
-    return shadow, shadow_low, shadow_high, 'experimental_settlement_ensemble'
+def _primary_probability(model, model_low, model_high):
+    """Return the CLOB-free forecast; quotes are execution benchmarks only."""
+    return model, model_low, model_high, 'independent_model'
 
 
 def _lead_lag_alert_candidate(condition_id, ready, market_probability, shadow_probability,
@@ -688,7 +931,7 @@ def build_board(query, public_json, root, news_fn, resolve=True):
     def market(a,h,o):
         slug = f'{a.lower()}-updown-{"5m" if h==300 else "15m"}-{o}'
         rows = cached('market:'+slug,30,lambda:public_json(
-            'https://gamma-api.polymarket.com/markets?'+urlencode({'slug':slug})))
+            'https://gamma-api.polymarket.com/markets?'+urlencode({'slug':slug}),timeout=2.0))
         return rows[0] if rows else {'slug':slug}
     with ThreadPoolExecutor(max_workers=12) as pool:
         jobs = [(pool.submit(market,*key),'market',key) for key in windows]
@@ -703,12 +946,17 @@ def build_board(query, public_json, root, news_fn, resolve=True):
                 errors.append(f'{kind} unavailable: {key}')
     # One batched CLOB read covers both sides of every current and next market.
     tokens=list({str(t) for m in markets.values() for t in array(m.get('clobTokenIds'))})
-    books={}
+    books={};books_received_at_s=now_s
     if tokens:
         try:
             response=public_json('https://clob.polymarket.com/books',
-                                 data=[{'token_id':t} for t in tokens])
+                                 data=[{'token_id':t} for t in tokens],timeout=1.5)
             books={str(b['asset_id']):b for b in response}
+            # Book timestamps are generated during this network request. Age
+            # them from receipt time, not from the beginning of the board build;
+            # otherwise a healthy fresh book can look like a future timestamp
+            # and be discarded on a slow response.
+            books_received_at_s=time.time()
         except Exception: errors.append('CLOB books unavailable')
     news={'stories':[],'sources':[]}
     try: news=news_fn() or news
@@ -737,13 +985,14 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             book=books.get(str(sides.get(side)),{})
             bid,ask=book_top(book)
             ts=_number(book.get('timestamp'))/1000.0
-            book_age=now_s-ts if ts>0 else None
-            if book_age is None or book_age < -1 or book_age > 15: bid=ask=None
+            book_age=(max(0.0,books_received_at_s-ts)
+                      if ts>0 and books_received_at_s-ts>=-2.0 else None)
+            if book_age is None or book_age < -1 or book_age > 3: bid=ask=None
             req[side.lower()+'_bid']=bid
             req[side.lower()+'_ask']=ask
             req[side.lower()+'_ask_depth']=top_depth(book,'asks',ask)
             req[side.lower()+'_book_age_s']=book_age
-            if book_age is not None and 0 <= book_age <= 15:
+            if book_age is not None and 0 <= book_age <= 3:
                 req.setdefault('book_ages',[]).append(book_age)
         req['book_age_s']=max(req.pop('book_ages',[-1]))
         requests.append(req)
@@ -761,13 +1010,14 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             book=books.get(str(next_sides.get(side)),{})
             bid,ask=book_top(book)
             ts=_number(book.get('timestamp'))/1000.0
-            book_age=now_s-ts if ts>0 else None
-            if book_age is None or book_age < -1 or book_age > 15: bid=ask=None
+            book_age=(max(0.0,books_received_at_s-ts)
+                      if ts>0 and books_received_at_s-ts>=-2.0 else None)
+            if book_age is None or book_age < -1 or book_age > 3: bid=ask=None
             next_req[side.lower()+'_bid']=bid
             next_req[side.lower()+'_ask']=ask
             next_req[side.lower()+'_ask_depth']=top_depth(book,'asks',ask)
             next_req[side.lower()+'_book_age_s']=book_age
-            if book_age is not None and 0 <= book_age <= 15:
+            if book_age is not None and 0 <= book_age <= 3:
                 next_req.setdefault('book_ages',[]).append(book_age)
         next_req['book_age_s']=max(next_req.pop('book_ages',[-1]))
         requests.append(next_req)
@@ -782,9 +1032,6 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         current_data=metadata[(a,h,o)];next_data=metadata[(a,h,o+h)]
         current_tape=current_data['tape'];bars=current_data['bars']
         technical=_technical_features(bars,current_f['sigma_minute'])
-        flow_buy=_number(current_tape.get('buy_usd'));flow_sell=_number(current_tape.get('sell_usd'))
-        flow_total=flow_buy+flow_sell
-        flow_score=(flow_buy-flow_sell)/flow_total if flow_total>0 else 0.0
         coinbase_age=now_s-_number(current_tape.get('coinbase_ts')) if current_tape.get('coinbase_ts') else None
         binance_age=now_s-_number(current_tape.get('binance_ts')) if current_tape.get('binance_ts') else None
         sigma=current_f['sigma_minute']
@@ -795,8 +1042,10 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             _number(current_tape.get('binance_ts')),_number(current_tape.get('binance_10')),
             _number(current_tape.get('binance_10_ts')),now_s,sigma)
         spot=_number(current_req['spot'])
-        cb_basis=math.log(_number(current_tape.get('coinbase'))/spot) if spot>0 and _number(current_tape.get('coinbase'))>0 and coinbase_age is not None and coinbase_age<=5 else None
-        bn_basis=math.log(_number(current_tape.get('binance'))/spot) if spot>0 and _number(current_tape.get('binance'))>0 and binance_age is not None and binance_age<=5 else None
+        spot_age=now_s-_number(current_tape.get('spot_ts')) if current_tape.get('spot_ts') else None
+        spot_fresh=spot_age is not None and -2<=spot_age<=5
+        cb_basis=math.log(_number(current_tape.get('coinbase'))/spot) if spot>0 and _number(current_tape.get('coinbase'))>0 and coinbase_age is not None and -2<=coinbase_age<=5 and spot_fresh else None
+        bn_basis=math.log(_number(current_tape.get('binance'))/spot) if spot>0 and _number(current_tape.get('binance'))>0 and binance_age is not None and -2<=binance_age<=5 and spot_fresh else None
         news_score,news_matches=_news_signal(a,stories,now_s)
         live_signals={
             'Candle trend':(len(bars)>=31,.14*technical['trend_score'],
@@ -809,8 +1058,6 @@ def build_board(query, public_json, root, news_fn, resolve=True):
                 f"10s {bn_move if bn_move is not None else 0:+.1f} bp · basis {bn_basis*10000 if bn_basis is not None else 0:+.1f} bp"),
             'Binance basis':(bn_basis is not None,.02*math.tanh(bn_basis/.0006) if bn_basis is not None else 0.0,
                 f"fresh Chainlink-relative basis {bn_basis*10000 if bn_basis is not None else 0:+.1f} bp"),
-            'Trade flow':(flow_total>0,.06*max(-1,min(1,flow_score)),
-                f"60s taker imbalance {flow_score*100:+.0f}% · ${flow_total:,.0f} notional"),
             'News pulse':(news_matches>0,.025*news_score,
                 f"sentiment {news_score:+.2f} · {news_matches} relevant headlines"),
         }
@@ -822,12 +1069,32 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             shift=shadow_p-shadow_raw
             shadow_low=max(.01,min(.99,shadow_low+shift))
             shadow_high=max(.01,min(.99,shadow_high+shift))
+        if h == 300:
+            model_cb_basis=cb_basis*10000 if cb_basis is not None else None
+            model_bn_basis=bn_basis*10000 if bn_basis is not None else None
+            independent_raw,independent_impacts=_tick_corrected_probability(
+                current_f['probability'],bn_move,cb_move,model_bn_basis,model_cb_basis,impacts=True)
+            independent_low=_tick_corrected_probability(
+                current_f['low'],bn_move,cb_move,model_bn_basis,model_cb_basis)[0]
+            independent_high=_tick_corrected_probability(
+                current_f['high'],bn_move,cb_move,model_bn_basis,model_cb_basis)[0]
+            independent_low,independent_high=sorted((independent_low,independent_high))
+        else:
+            # The 15m tick correction did not improve the chronological
+            # holdout; use the settlement kernel without a hand-set blend.
+            independent_raw=current_f['probability']
+            independent_low=current_f['low']
+            independent_high=current_f['high']
+            independent_impacts=[]
+        independent_p=independent_raw
+        independent_cal_info=None
         market_range=_market_probability_range(current_req)
         p,low,high,prediction_basis=_primary_probability(
-            shadow_p,shadow_low,shadow_high,market_p,market_range)
+            independent_p,independent_low,independent_high)
         ready=current_f['ready'];status=current_f['status']
         direction='UP' if p>=.5 else 'DOWN';side=direction.lower()
         shadow_direction='UP' if shadow_p>=.5 else 'DOWN'
+        independent_direction='UP' if independent_p>=.5 else 'DOWN'
         up_bid,up_ask,down_bid,down_ask=(current_req[k] for k in
             ('up_bid','up_ask','down_bid','down_ask'))
         ask=up_ask if direction=='UP' else down_ask
@@ -838,6 +1105,12 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         shadow_edge,shadow_conservative=_edge(shadow_p,shadow_low,shadow_high,
             shadow_direction,shadow_bid,shadow_ask,current_req['fee_rate'],
             current_req['fee_exponent']) if ready else (None,None)
+        independent_side=independent_direction.lower()
+        independent_ask=up_ask if independent_direction=='UP' else down_ask
+        independent_bid=up_bid if independent_direction=='UP' else down_bid
+        independent_edge,independent_conservative=_edge(independent_p,independent_low,
+            independent_high,independent_direction,independent_bid,independent_ask,
+            current_req['fee_rate'],current_req['fee_exponent']) if ready else (None,None)
         aligned_leads=[]
         for name,score,age,move in (
             ('Coinbase',cb_momentum,coinbase_age,cb_move),
@@ -860,12 +1133,13 @@ def build_board(query, public_json, root, news_fn, resolve=True):
               'warming_up':'Collecting enough continuous closed candles.',
               'closed':'Window closed. Waiting for the following market.'}.get(status)
         if ready:
-            note=('Primary probability is the normalized midpoint of fresh Polymarket UP/DOWN books. '
-                  'The settlement model and signal ensemble remain visible as an unvalidated shadow forecast; '
-                  'its historical Brier score has lagged the market benchmark. Treat its gap as research, not an edge.'
-                  if market_p is not None else
-                  'Fresh two-sided Polymarket books are unavailable. Showing the experimental settlement ensemble as a fallback; '
-                  'it has not demonstrated an advantage over the market and is not an actionable signal.')
+            note=((f'The 5m estimate applies a fitted correction to the Chainlink settlement kernel using fresh Binance and '
+                   f'Coinbase 10s moves and Chainlink-relative basis. It excludes Polymarket prices. On a later paired '
+                   f'holdout it improved Brier from {_TICK_5M_KERNEL_BRIER:.4f} to {_TICK_5M_HOLDOUT_BRIER:.4f}; the CLOB '
+                   f'scored {_TICK_5M_CLOB_BRIER:.4f}. This did not establish an advantage over the market.')
+                  if h == 300 else
+                  'The 15m estimate uses the Chainlink settlement kernel. Candle-based and tick-based corrections did not '
+                  'improve the chronological holdout, so they are excluded. The CLOB midpoint remains a separate benchmark.')
         market_data=current_data['market'];window=current_data['ref']['window_s']
         ref_label=f'Chainlink {window}s TWAP' if window>0 else 'Chainlink spot' if window==0 else 'Unsupported reference'
         cb_px=_number(current_tape.get('coinbase')) or None;bn_px=_number(current_tape.get('binance')) or None
@@ -880,6 +1154,12 @@ def build_board(query, public_json, root, news_fn, resolve=True):
                         'available':x['available'],'detail':x['detail']} for x in impacts]
         components += [{'name':'Volatility envelope','score':0,'delta_pp':0,'available':ready,
                         'detail':f"EWMA {current_f['sigma_minute']*100:.4f}% / √minute · shadow sensitivity {shadow_low:.3f}–{shadow_high:.3f}"}]
+        independent_components=[{'name':'Chainlink settlement kernel','score':2*current_f['probability']-1,
+                     'delta_pp':0,'available':ready,'detail':f"spot {spot:.5f} · strike {_number(current_req['strike']):.5f} · {ref_label}"}]
+        independent_components += [{'name':x['name'],'score':0,'delta_pp':x['delta_pp'],
+                        'available':x['available'],'detail':x['detail']} for x in independent_impacts]
+        independent_components += [{'name':'Volatility sensitivity','score':0,'delta_pp':0,'available':ready,
+                        'detail':f"EWMA {current_f['sigma_minute']*100:.4f}% / √minute · range {independent_low:.3f}–{independent_high:.3f} (not a confidence interval)"}]
         slug=market_data.get('slug',f'{a.lower()}-updown-{"5m" if h==300 else "15m"}-{o}')
         event_rows=market_data.get('events') or []
         event_slug=(event_rows[0].get('slug') if event_rows and isinstance(event_rows[0],dict) else None) or slug
@@ -889,10 +1169,20 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         if 'down' in outcome_indices: trade_outcome_indices['DOWN']=outcome_indices['down']
         card={'asset':a,'period':'CURRENT','provisional':False,'horizon_seconds':h,
             'window_open':o*1000,'window_close':(o+h)*1000,'seconds_left':max(0,o+h-now),
-            'direction':direction if ready else 'WAIT','up_probability':p,'up_probability_raw':shadow_raw,
+            'direction':direction if ready else 'WAIT','up_probability':p,'up_probability_raw':independent_raw,
             'experimental_up_probability':shadow_p,'experimental_up_probability_raw':shadow_raw,
             'experimental_direction':shadow_direction,
             'experimental_probability_low':shadow_low,'experimental_probability_high':shadow_high,
+            'independent_up_probability':independent_p,
+            'independent_up_probability_raw':independent_raw,
+            'independent_probability_low':independent_low,
+            'independent_probability_high':independent_high,
+            'independent_direction':independent_direction,
+            'independent_prediction_basis':'chainlink_settlement_plus_fitted_5m_tick_correction' if h==300 else 'chainlink_settlement_kernel',
+            'independent_model_version':TICK_MODEL_VERSION if h==300 else 'chainlink-kernel-v3',
+            'independent_model_edge':independent_edge,
+            'independent_conservative_edge':independent_conservative,
+            'independent_market_gap':independent_p-market_p if market_p is not None else None,
             'settlement_model_probability':current_f['probability'],
             'settlement_model_low':current_f['low'],'settlement_model_high':current_f['high'],
             'prediction_basis':prediction_basis,
@@ -901,14 +1191,16 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             'candle_age_s':current_req['candle_age_s'],'quality':current_f['quality'],
             'polymarket_up':market_p,'polymarket_up_price':up_ask,'polymarket_down_price':down_ask,
             'calibration':cal_info,
+            'independent_calibration':independent_cal_info,
             'polymarket_up_bid':up_bid,'polymarket_down_bid':down_bid,
             'market_quote_low':market_range[0] if market_range else None,
             'market_quote_high':market_range[1] if market_range else None,
-            'model_market_gap':shadow_p-market_p if market_p is not None else None,
+            'model_market_gap':independent_p-market_p if market_p is not None else None,
+            'experimental_model_market_gap':shadow_p-market_p if market_p is not None else None,
             'spot':spot,'strike':_number(current_req['strike']),'fee_rate':current_req['fee_rate'],
             'execution_hurdle':ask+current_req['fee_rate']*(ask*(1-ask))**current_req['fee_exponent']+.005
                 if ask is not None and current_req['fee_rate']>=0 else None,
-            'predicted_ask_depth':current_req.get(side+'_ask_depth'),'book_age_s':current_req['book_age_s'],
+            'predicted_ask_depth':current_req.get(independent_side+'_ask_depth'),'book_age_s':current_req['book_age_s'],
             'experimental_model_edge':shadow_edge,
             'experimental_conservative_edge':shadow_conservative,
             'alert_candidate':alert_candidate,
@@ -916,10 +1208,7 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             'binance_price':bn_px,'binance_age_s':binance_age,'binance_basis_bps':bn_basis_bps,
             'coinbase_momentum_bps':cb_move,'binance_momentum_bps':bn_move,
             'coinbase_momentum_score':cb_momentum,'binance_momentum_score':bn_momentum,
-            'ensemble_weights':{'market_logit':.18,'candle_trend_logit':.14,
-                'coinbase_momentum_logit':.07,'coinbase_basis_logit':.025,
-                'binance_momentum_logit':.05,'binance_basis_logit':.02,
-                'trade_flow_logit':.06,'news_logit':.025},
+            'ensemble_weights':{'model':'fitted 5m cross-feed logistic correction' if h==300 else 'Chainlink settlement kernel'},
             'model_edge':edge,'conservative_edge':conservative,'manual_note':note,
             'condition_id':market_data.get('conditionId'),'slug':slug,
             'settlement_source':market_data.get('resolutionSource'),
@@ -941,11 +1230,13 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             'oracle_delta_pct':100*(_number(current_data['ref'].get('reference_now'))/
                 _number(current_req['strike'])-1) if _number(current_req['strike'])>0 else None,
             'technical':{**technical,'vol_1m_pct':current_f['sigma_minute']*100},
-            'order_flow':{'buy_usd':flow_buy,'sell_usd':flow_sell,'imbalance':flow_score},
+            'order_flow':None,
             'news_signal':{'score':news_score,'matched_headlines':news_matches},
             'candle_store':{'samples':current_f['samples'],'source':candles.get(a,{}).get('source','Unavailable'),
                 'last_closed_ms':bars[-1]['ts'] if bars else None},
             'sparkline':[x['close'] for x in bars[-60:]],'components':components,
+            'independent_components':independent_components,
+            'independent_signal_contributions':independent_impacts,
             'signal_contributions':impacts,'opportunity':opportunity}
 
         next_market=next_data['market'];next_window=next_data['ref']['window_s']
@@ -953,11 +1244,20 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         next_req_market=_market_probability(next_req)
         next_shadow_p,next_shadow_low,next_shadow_high,next_market_impact,next_impacts=_ensemble(next_f['probability'],
             next_f['low'],next_f['high'],next_req_market,live_signals,.08)
+        # Upcoming windows have no official opening reference. Keep this
+        # forecast provisional and use only the kernel's capped drift input.
+        next_independent_raw=next_f['probability']
+        next_independent_low=next_f['low']
+        next_independent_high=next_f['high']
+        next_independent_p=next_independent_raw
+        next_independent_impacts=[]
+        next_independent_cal_info=None
         next_market_range=_market_probability_range(next_req)
         next_p,next_low,next_high,next_prediction_basis=_primary_probability(
-            next_shadow_p,next_shadow_low,next_shadow_high,next_req_market,next_market_range)
+            next_independent_p,next_independent_low,next_independent_high)
         next_direction='UP' if next_p>=.5 else 'DOWN';next_side=next_direction.lower()
         next_shadow_direction='UP' if next_shadow_p>=.5 else 'DOWN'
+        next_independent_direction='UP' if next_independent_p>=.5 else 'DOWN'
         nup_bid,nup_ask,ndown_bid,ndown_ask=(next_req[k] for k in
             ('up_bid','up_ask','down_bid','down_ask'))
         next_ask=nup_ask if next_direction=='UP' else ndown_ask
@@ -969,6 +1269,13 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         next_shadow_edge,next_shadow_conservative=_edge(next_shadow_p,next_shadow_low,
             next_shadow_high,next_shadow_direction,next_shadow_bid,next_shadow_ask,
             next_req['fee_rate'],next_req['fee_exponent']) if next_f['ready'] else (None,None)
+        next_independent_side=next_independent_direction.lower()
+        next_independent_ask=nup_ask if next_independent_direction=='UP' else ndown_ask
+        next_independent_bid=nup_bid if next_independent_direction=='UP' else ndown_bid
+        next_independent_edge,next_independent_conservative=_edge(
+            next_independent_p,next_independent_low,next_independent_high,
+            next_independent_direction,next_independent_bid,next_independent_ask,
+            next_req['fee_rate'],next_req['fee_exponent']) if next_f['ready'] else (None,None)
         next_slug=next_market.get('slug',f'{a.lower()}-updown-{"5m" if h==300 else "15m"}-{o+h}')
         next_event_rows=next_market.get('events') or []
         next_event_slug=(next_event_rows[0].get('slug') if next_event_rows and isinstance(next_event_rows[0],dict) else None) or next_slug
@@ -979,9 +1286,8 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         next_ref_label=(f'Estimated next open · Chainlink {next_window}s TWAP' if next_window>0 else
                         'Estimated next open · Chainlink spot' if next_window==0 else 'Unsupported reference')
         next_status='provisional' if next_f['ready'] else next_f['status']
-        next_note=('Upcoming probability follows the fresh Polymarket midpoint; the drift-based settlement model is shown as an unvalidated shadow outlook. '
-                   'The official opening reference is not known until the window begins.' if next_f['ready'] and next_req_market is not None else
-                   'No fresh two-sided Polymarket book is available. Showing the provisional drift-based settlement model; the official opening reference is unknown.' if next_f['ready'] else
+        next_note=('Pre-open outlook from the Chainlink kernel, using the current spot as a projected opening anchor and a conservative recent-drift estimate. '
+                   'The actual opening reference is unknown until this market starts; this provisional model has not established an edge.' if next_f['ready'] else
                    'Next-window outlook is waiting for fresh supported inputs.')
         next_components=[{'name':'Estimated opening anchor','score':0,'delta_pp':0,
                           'available':next_f['ready'],'detail':f"{_number(next_req['strike']):.5f} · provisional"},
@@ -990,15 +1296,33 @@ def build_board(query, public_json, root, news_fn, resolve=True):
                           'detail':f"UP midpoint {next_req_market:.3f}" if next_req_market is not None else 'fresh two-sided books unavailable'}]
         next_components += [{'name':x['name'],'score':0,'delta_pp':x['delta_pp'],
                              'available':x['available'],'detail':x['detail']} for x in next_impacts]
+        next_independent_components=[{'name':'Estimated Chainlink opening anchor','score':0,'delta_pp':0,
+                          'available':next_f['ready'],'detail':f"{_number(next_req['strike']):.5f} · provisional"}]
+        next_independent_components += [{'name':x['name'],'score':0,'delta_pp':x['delta_pp'],
+                             'available':x['available'],'detail':x['detail']} for x in next_independent_impacts]
+        next_independent_components += [{'name':'Volatility sensitivity','score':0,'delta_pp':0,
+                          'available':next_f['ready'],
+                          'detail':f"EWMA {next_f['sigma_minute']*100:.4f}% / √minute · range {next_independent_low:.3f}–{next_independent_high:.3f} (not a confidence interval)"}]
         card['next_window']={'asset':a,'period':'NEXT','provisional':True,'horizon_seconds':h,
             'window_open':(o+h)*1000,'window_close':(o+2*h)*1000,
             'seconds_until_open':max(0,o+h-now),'seconds_left':h,
             'direction':next_direction if next_f['ready'] else 'WAIT','up_probability':next_p,
+            'up_probability_raw':next_independent_raw,
             'experimental_up_probability':next_shadow_p,
             'experimental_up_probability_raw':next_shadow_p,
             'experimental_direction':next_shadow_direction,
             'experimental_probability_low':next_shadow_low,
             'experimental_probability_high':next_shadow_high,
+            'independent_up_probability':next_independent_p,
+            'independent_up_probability_raw':next_independent_raw,
+            'independent_probability_low':next_independent_low,
+            'independent_probability_high':next_independent_high,
+            'independent_direction':next_independent_direction,
+            'independent_prediction_basis':'chainlink_settlement_kernel_provisional',
+            'independent_model_version':'chainlink-kernel-v3-provisional',
+            'independent_model_edge':next_independent_edge,
+            'independent_conservative_edge':next_independent_conservative,
+            'independent_market_gap':next_independent_p-next_req_market if next_req_market is not None else None,
             'settlement_model_probability':next_f['probability'],
             'settlement_model_low':next_f['low'],'settlement_model_high':next_f['high'],
             'prediction_basis':next_prediction_basis,
@@ -1009,13 +1333,15 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             'polymarket_up':next_req_market,'polymarket_up_price':nup_ask,
             'polymarket_down_price':ndown_ask,'polymarket_up_bid':nup_bid,
             'polymarket_down_bid':ndown_bid,
+            'independent_calibration':next_independent_cal_info,
             'market_quote_low':next_market_range[0] if next_market_range else None,
             'market_quote_high':next_market_range[1] if next_market_range else None,
-            'model_market_gap':next_shadow_p-next_req_market if next_req_market is not None else None,
+            'model_market_gap':next_independent_p-next_req_market if next_req_market is not None else None,
+            'experimental_model_market_gap':next_shadow_p-next_req_market if next_req_market is not None else None,
             'spot':spot,'strike':next_req['strike'],'fee_rate':next_req['fee_rate'],
             'execution_hurdle':next_ask+next_req['fee_rate']*(next_ask*(1-next_ask))**next_req['fee_exponent']+.005
                 if next_ask is not None and next_req['fee_rate']>=0 else None,
-            'predicted_ask_depth':next_req.get(next_side+'_ask_depth'),'book_age_s':next_req['book_age_s'],
+            'predicted_ask_depth':next_req.get(next_independent_side+'_ask_depth'),'book_age_s':next_req['book_age_s'],
             'experimental_model_edge':next_shadow_edge,
             'experimental_conservative_edge':next_shadow_conservative,
             'coinbase_price':cb_px,'coinbase_age_s':coinbase_age,'coinbase_basis_bps':cb_basis_bps,
@@ -1041,11 +1367,13 @@ def build_board(query, public_json, root, news_fn, resolve=True):
                 'down_book_age_s':next_req.get('down_book_age_s')},
             'oracle_delta_pct':None,'technical':{**next_technical,'vol_1m_pct':next_f['sigma_minute']*100,
                 'drift_1m_pct':next_f['drift_minute']*100,'drift_samples':next_f['drift_samples']},
-            'order_flow':{'buy_usd':flow_buy,'sell_usd':flow_sell,'imbalance':flow_score},
+            'order_flow':None,
             'news_signal':{'score':news_score,'matched_headlines':news_matches},
             'candle_store':{'samples':next_f['samples'],'source':candles.get(a,{}).get('source','Unavailable'),
                 'last_closed_ms':bars[-1]['ts'] if bars else None},
             'sparkline':[x['close'] for x in bars[-60:]],'components':next_components,
+            'independent_components':next_independent_components,
+            'independent_signal_contributions':next_independent_impacts,
             'signal_contributions':next_impacts,'opportunity':None}
         cards.append(card)
     try: quality=_journal(root,cards,markets,public_json,resolve=resolve)
@@ -1056,15 +1384,41 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         'settled':calibration.get('total',0),'deciles':len(calibration.get('deciles',{})),
         'min_n':calibration.get('min_n',20),
         'active':any(d['n']>=calibration.get('min_n',20) for d in calibration.get('deciles',{}).values())} if calibration else None
+    independent_model_meta={
+        'version':INDEPENDENT_MODEL_VERSION,
+        'five_minute_method':TICK_MODEL_VERSION,
+        'five_minute_training_rows':_TICK_5M_TRAIN_N,
+        'five_minute_trained_through_utc':'2026-10-01T06:32:03Z',
+        'five_minute_holdout_rows':_TICK_5M_HOLDOUT_N,
+        'five_minute_holdout_start_utc':'2026-10-05',
+        'five_minute_holdout_end_utc':'2026-10-09',
+        'five_minute_holdout_brier':_TICK_5M_HOLDOUT_BRIER,
+        'five_minute_kernel_brier':_TICK_5M_KERNEL_BRIER,
+        'five_minute_clob_brier':_TICK_5M_CLOB_BRIER,
+        'fifteen_minute_method':'chainlink-kernel-v3',
+        'fifteen_minute_holdout_rows':1058,
+        'fifteen_minute_kernel_brier':0.089542,
+        'fifteen_minute_clob_brier':0.085311,
+        'calibration_adjustment_applied':False,
+    }
+    independent_calibration_meta={
+        'version':INDEPENDENT_MODEL_VERSION,
+        'scope':'reporting only; no decile adjustment is applied',
+        'settled':quality.get('independent_paired_markets',0),
+        'active':False,
+    }
     return {'generated_at':int(time.time()*1000),'inputs_at':int(now_s*1000),'cards':cards,
-        'model_version':MODEL_VERSION,'refresh_interval_s':5,'quality':quality,'calibration':calibration_meta,
+        'model_version':MODEL_VERSION,'independent_model_version':INDEPENDENT_MODEL_VERSION,
+        'refresh_interval_s':SERVER_REFRESH_SECONDS,'quality':quality,'calibration':calibration_meta,
+        'independent_model':independent_model_meta,
+        'independent_calibration':independent_calibration_meta,
         'calibration_deciles':[{'bucket':k,'n':v['n'],'wins':v['wins'],
             'realized':round(v['wins']/v['n'],3) if v['n'] else None,'avg_p':round(v['avg_p'],3)}
             for k,v in sorted((calibration or {}).get('deciles',{}).items())],
         'compute_ms':round((time.monotonic()-started)*1000),'news':stories[:8],
         'news_sources':news.get('sources',[]),
         'sources':['Chainlink spot + official settlement TWAP','Coinbase live price and lead/lag',
-            'Binance live price, trades and closed candles','Local candle store / Binance backfill',
+            'Binance live price and closed candles','Local candle store / Binance backfill',
             'Polymarket CLOB midpoint, spread and executable depth','Asset-matched crypto headlines'],
         'errors':errors,
-        'disclaimer':'Primary probability uses the normalized midpoint of fresh Polymarket UP/DOWN books because the prior multi-source ensemble underperformed that benchmark on resolved checkpoints. The Chainlink settlement kernel and its Coinbase, Binance, candle trend, trade-flow and news adjustments remain visible as a shadow forecast until they show incremental value on held-out outcomes. For current windows, the kernel is P(UP)=Phi((ln(spot/strike)+mu*(T-W/2)/60)/(sigma_minute*sqrt((T-2W/3)/60))); live mu=0, while upcoming windows use a small capped recent drift and stay provisional. Sigma is an EWMA of completed 1-minute log returns. Market probability bands are quote ranges; shadow bands are volatility sensitivity, not confidence intervals. Any edge estimate includes the venue fee schedule and 0.5¢ slippage reserve. Lead/lag alerts are unverified model candidates and require a human to recheck the live book.'}
+        'disclaimer':'The displayed independent probability is CLOB-free. For 5m windows it is a fixed logistic correction to the Chainlink settlement kernel, fit on 19,045 earlier resolved forecasts through 2026-10-01 using fresh 10-second Binance/Coinbase momentum, each venue basis to Chainlink, and source-availability flags. Its later 5m holdout Brier was 0.168435 versus 0.169288 for the kernel and 0.164335 for the CLOB midpoint: a small improvement over the kernel, while the market still scored better. Current 15m and provisional next-window estimates use the Chainlink kernel only; candle trend and news are context and do not enter these independent probabilities. Taker flow is not sampled by the prediction refresh. No decile recalibration is applied. The normalized midpoint of fresh UP/DOWN books is displayed separately. No reliable market advantage or net trading edge has been established. For current windows, the kernel is P(UP)=Phi((ln(spot/strike)+mu*(T-W/2)/60)/(sigma_minute*sqrt((T-2W/3)/60))); live mu=0, while upcoming windows use a small capped recent drift and stay provisional. Sigma is an EWMA of completed 1-minute log returns. The displayed range is volatility sensitivity, not a confidence interval. Paired Brier scores compare forecasts and the CLOB at the 120–179 seconds remaining checkpoint; lower is better. Any edge estimate includes the venue fee schedule and 0.5¢ slippage reserve. Legacy lead/lag alerts remain unverified candidates and require a human to recheck the live book.'}

@@ -14,6 +14,10 @@ secrets/
 /config/*
 !/config/
 !/config/polypulse.toml.example
+!/config/polypulse-btc-5m-lead-scalper.toml.example
+!/config/polypulse-btc-15m-lead-scalper.toml.example
+!/config/polypulse-btc-15m-conditional-edge.toml.example
+!/config/polypulse-settlement-snipe.toml.example
 
 # Build outputs and generated data
 /build/
@@ -41,6 +45,7 @@ secrets/
 /runtime/
 /control/
 /session_reports/
+/session_reports
 /historical/
 /vantagepulse.dump
 
@@ -95,6 +100,9 @@ mobile/android/app/debug.keystore
 !/scripts/cockpit_v3.html
 !/scripts/cockpit_v5.html
 !/scripts/prediction_board.py
+!/scripts/review_flatten_boundary.py
+!/scripts/review_late_settlement.py
+!/scripts/review_interval_pnl.py
 !/scripts/requirements-cockpit.txt
 !/scripts/setup_db.sh
 !/scripts/assets_v3/

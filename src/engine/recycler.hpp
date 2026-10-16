@@ -35,7 +35,7 @@ class Recycler {
     std::map<std::string,std::deque<std::pair<int64_t,double>>> history_;
     std::map<std::string,TokenCycle> token_cycles_;
     std::map<std::string,int64_t> last_entry_attempt_ms_;
-    std::map<std::string,uint64_t> last_late_taker_generation_;
+    std::map<std::string,uint64_t> last_late_exit_generation_;
     std::map<std::string,int64_t> last_late_maker_attempt_ms_;
     std::set<std::string> late_risk_tokens_;
     std::set<std::string> settlement_entry_attempted_;
@@ -85,6 +85,11 @@ public:
             if(!reference_fresh(b) || !b.board_forecast.ready || remaining_ms<=0) return -1.0;
             return side==ShareSide::UP ? b.board_forecast.probability
                                        : 1.0-b.board_forecast.probability;
+        };
+        auto conservative_fair_side=[&](const RecyclerBook& b, ShareSide side, int64_t remaining_ms) {
+            if(!reference_fresh(b) || !b.board_forecast.ready || remaining_ms<=0) return -1.0;
+            return side==ShareSide::UP ? b.board_forecast.low
+                                       : 1.0-b.board_forecast.high;
         };
         auto supported_horizon=[&](int horizon_s) {
             if(horizon_s==300 || horizon_s==900) return true;
@@ -213,20 +218,20 @@ public:
                (c.recycler_late_taker_min_bid<=0.0 || b->bid>=c.recycler_late_taker_min_bid)) {
                 if(sell_quote) {
                     for(const auto& q:quotes) if(q.req.token_id==p.token_id && q.req.dir==OrderDir::Sell) cancel(q);
-                    status="LATE_TAKER_CANCEL_MAKER";
+                    status="LATE_EXIT_CANCEL_PRIOR_QUOTE";
                     continue;
                 }
-                auto last=last_late_taker_generation_.find(p.token_id);
-                if(last!=last_late_taker_generation_.end() && last->second==b->generation) {
-                    status="LATE_TAKER_WAIT_BOOK";
+                auto last=last_late_exit_generation_.find(p.token_id);
+                if(last!=last_late_exit_generation_.end() && last->second==b->generation) {
+                    status="LATE_MAKER_WAIT_BOOK";
                     continue;
                 }
                 OrderRequest req=b->market; req.dir=OrderDir::Sell; req.size_shares=p.shares;
-                req.limit_price=b->bid; req.execution_mode=ExecutionMode::Taker;
-                req.maker_fixed_price=false; req.source="RECYCLER_LATE_TAKER_EXIT";
+                req.limit_price=b->bid; req.execution_mode=ExecutionMode::Maker;
+                req.maker_fixed_price=false; req.source="RECYCLER_LATE_MAKER_EXIT";
                 out.push_back({{},req});
-                last_late_taker_generation_[p.token_id]=b->generation;
-                status="LATE_TAKER_SUBMITTING";
+                last_late_exit_generation_[p.token_id]=b->generation;
+                status="LATE_MAKER_SUBMITTING";
                 continue;
             }
 
@@ -245,12 +250,12 @@ public:
                 req.dir=OrderDir::Sell;
                 req.size_shares=p.shares;
                 req.limit_price=b->bid;
-                req.execution_mode=ExecutionMode::Taker;
+                req.execution_mode=ExecutionMode::Maker;
                 req.maker_fixed_price=false;
                 req.maker_reprice_ms=0;
                 req.maker_max_age_ms=0;
                 req.maker_cancel_before_close_ms=0;
-                req.source="RECYCLER_LATE_RISK_TAKER_EXIT";
+                req.source="RECYCLER_LATE_RISK_MAKER_EXIT";
                 out.push_back({{},req});
                 status="LATE_RISK_EXIT_SUBMITTING";
                 continue;
@@ -284,12 +289,12 @@ public:
                 req.dir=OrderDir::Sell;
                 req.size_shares=p.shares;
                 req.limit_price=minimum_bid;
-                req.execution_mode=ExecutionMode::Taker;
+                req.execution_mode=ExecutionMode::Maker;
                 req.maker_fixed_price=false;
                 req.maker_reprice_ms=0;
                 req.maker_max_age_ms=0;
                 req.maker_cancel_before_close_ms=0;
-                req.source="RECYCLER_NET_TARGET_TAKER_EXIT";
+                req.source="RECYCLER_NET_TARGET_MAKER_EXIT";
                 out.push_back({{},req});
                 status="NET_TARGET_SUBMITTING";
                 continue;
@@ -382,6 +387,11 @@ public:
                 else if(q.price<c.recycler_settlement_entry_min_price || q.price>c.recycler_settlement_entry_max_price)
                     cancel_reason="settlement_entry_price";
                 else if(opposite_position) cancel_reason="opposite_position";
+                else if(c.recycler_settlement_only &&
+                        (conservative_fair_side(*b,q.req.side,remaining)-q.price-
+                         fee_per_share(q.price)-0.005+1e-9 <
+                         std::max(0.0,c.recycler_min_settlement_edge_pct/100.0)))
+                    cancel_reason="settlement_model_edge_lost";
             } else if(remaining<=c.recycler_entry_cutoff_secs*1000LL)
                 cancel_reason="entry_cutoff";
             else if(fair<0) cancel_reason="forecast_unavailable";
@@ -446,7 +456,16 @@ public:
                    std::find(c.blocked_assets.begin(),c.blocked_assets.end(),m.asset)!=c.blocked_assets.end()) continue;
                 double price=std::floor(std::min({b.bid+m.tick_size,b.ask-m.tick_size,c.recycler_settlement_entry_max_price})/m.tick_size+1e-9)*m.tick_size;
                 if(price<c.recycler_settlement_entry_min_price || price>b.ask-m.tick_size+1e-9) continue;
-                if(c.recycler_maniac_mode) {
+                if(c.recycler_settlement_only) {
+                    const double conservative=conservative_fair_side(b,m.side,remaining);
+                    const double required=std::max(0.0,c.recycler_min_settlement_edge_pct/100.0);
+                    // Price alone is not a probability estimate. Use the lower
+                    // volatility-sensitivity bound from the CLOB-free oracle
+                    // forecast, subtract a conservative fee and 0.5c reserve,
+                    // and require the configured settlement edge.
+                    if(conservative<0 || conservative-price-fee_per_share(price)-0.005+1e-9<required)
+                        continue;
+                } else if(c.recycler_maniac_mode) {
                     const double fair=fair_side(b,m.side,remaining);
                     const double required=std::max(0.0,c.recycler_min_settlement_edge_pct/100.0);
                     // A high token price is not itself proof of a near-certain
@@ -463,6 +482,17 @@ public:
                 req.limit_price=price; req.execution_mode=ExecutionMode::Maker; req.maker_fixed_price=true;
                 req.maker_reprice_ms=0; req.maker_max_age_ms=0; req.maker_cancel_before_close_ms=0;
                 req.source="RECYCLER_SETTLEMENT_ENTRY";
+                req.decision_fair_probability=fair_side(b,m.side,remaining);
+                req.decision_edge=conservative_fair_side(b,m.side,remaining)-price-
+                    fee_per_share(price)-0.005;
+                req.decision_reference_price=b.reference_price;
+                req.decision_reference_strike=b.reference_strike;
+                req.decision_reference_vol_per_sec=b.forecast_sigma_per_sec;
+                req.decision_model_up_probability=b.board_forecast.probability;
+                req.decision_model_up_low=b.board_forecast.low;
+                req.decision_model_up_high=b.board_forecast.high;
+                req.decision_midpoint=(b.bid+b.ask)/2.0;
+                req.decision_reference_age_ms=now-b.reference_updated_ms;
                 out.push_back({{},req});
                 settlement_entry_attempted_.insert(m.condition_id);
                 settlement_hold_tokens_.insert(m.token_id);
@@ -471,6 +501,10 @@ public:
                 status="SETTLEMENT_ENTRY_SUBMITTING";
                 return out;
             }
+        }
+        if(c.recycler_settlement_only) {
+            status="SETTLEMENT_ONLY_WAITING_FOR_EDGE";
+            return out;
         }
         int market_candidates=0, time_ok=0, spread_ok=0, free_market=0;
         int midpoint_ok=0, momentum_ok=0, reference_ok=0, edge_ok=0, capacity_ok=0;

@@ -36,8 +36,7 @@ inline void populate_reference_forecasts(vp::WatchlistRow& row, const vp::PmMark
     // TWAP increments suppress volatility and falsely trip the latency floor.
     row.oracle_vol_per_sec = item.vol.sigma_minute / std::sqrt(60.0);
     row.oracle_jump_z = oracle.last_move_z(key, 60);
-    const double age = std::max(now_ms/1000.0-spot_ts,
-        now_ms/1000.0-oracle.latest_timestamp(market.reference_key()));
+    const double age = now_ms/1000.0-spot_ts;
     vp::engine::ForecastInput in{spot,row.coin_open_price,
         (market.window_close_ms-now_ms)/1000.0,item.vol.sigma_minute,age,
         ts ? (now_ms-ts-60000)/1000.0 : -1,item.vol.samples,market.settlement_window_s};
@@ -46,13 +45,20 @@ inline void populate_reference_forecasts(vp::WatchlistRow& row, const vp::PmMark
     const double cb_open = coinbase.lookup_at_or_before(market.asset,market.window_open_ms/1000.0);
     const double cb_aligned = coinbase.lookup_at_or_before(market.asset,spot_ts);
     const double cb_now = coinbase.latest(market.asset);
-    row.cb_data_ready = cb_age >= -1 && cb_age <= 3 && cb_open > 0 && cb_now > 0;
+    const bool cb_live_aligned = cb_age >= -1 && cb_age <= 3 &&
+        cb_aligned > 0 && cb_now > 0;
+    // The window-open Coinbase sample is only needed for the separate
+    // window-relative Coinbase delta. A restart can miss that in-memory
+    // sample even though current Coinbase and Chainlink are live and aligned;
+    // keep the fast lead forecast available in that case.
+    row.cb_data_ready = cb_live_aligned && cb_open > 0;
     if (!row.cb_data_ready) row.cb_delta_pct = 0;
     // Transport only the Coinbase move SINCE the latest official spot update.
     // Comparing a Coinbase window-open spot with a TWAP strike adds a false basis.
-    if (row.cb_data_ready && cb_aligned > 0) {
-        in.spot = spot*cb_now/cb_aligned;
-        row.fast_forecast = vp::engine::forecast(in);
+    if (cb_live_aligned) {
+        auto fast_in = in;
+        fast_in.spot = spot*cb_now/cb_aligned;
+        row.fast_forecast = vp::engine::forecast(fast_in);
     }
 }
 

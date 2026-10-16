@@ -1,5 +1,6 @@
 #pragma once
 #include <pqxx/pqxx>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -82,6 +83,9 @@ public:
                       double fill_price=0, double fill_shares=0, double fill_fee=0,
                       const std::string& manual_market_question="",
                       const std::string& outcome_label="") noexcept;
+    void insert_order_reprice(const std::string& client_order_id,
+                              const std::string& execution_mode,
+                              double price, double remaining_shares) noexcept;
     void insert_fill(const std::string& client_order_id,
                      double price, double size_shares,
                      double fee_usd) noexcept;
@@ -179,7 +183,12 @@ public:
     };
     std::vector<RawOpenOrderRow> load_open_orders_for_instance() noexcept;
 private:
+    void recover_disconnected(const char* operation,
+                             const std::string& reason) noexcept;
+    std::string conninfo_;
     std::unique_ptr<pqxx::connection> conn_;
+    std::chrono::steady_clock::time_point last_reconnect_attempt_{};
+    std::chrono::milliseconds reconnect_backoff_{1000};
     // A libpqxx connection permits only one active transaction. Most writes run
     // on the persistence thread, while settlement may perform synchronous
     // oracle lookups on the engine thread. Serialize both paths so a lookup

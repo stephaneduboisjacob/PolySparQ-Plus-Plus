@@ -135,7 +135,11 @@ int main(int argc, char** argv) {
 
     // Boostrap: initial market discovery + feed startup
     std::thread bootstrap_th([&] {
-        auto markets = rest.discover_updown_markets();
+        auto markets = rest.discover_updown_markets(
+            cfg.polymarket.universe_horizons_seconds,
+            cfg.strategy.blocked_assets,
+            cfg.polymarket.universe_prewarm_ahead_minutes,
+            cfg.polymarket.universe_max_windows_per_series);
         spdlog::info("discovered {} UP/DOWN markets", markets.size());
 
         {
@@ -440,7 +444,11 @@ int main(int argc, char** argv) {
             // ── Periodic market re-discovery ──
             if (now_ms - last_discover_ms >= kDiscoverIntervalMs) {
                 last_discover_ms = now_ms;
-                auto new_markets = rest.discover_updown_markets();
+                auto new_markets = rest.discover_updown_markets(
+                    cfg.polymarket.universe_horizons_seconds,
+                    cfg.strategy.blocked_assets,
+                    cfg.polymarket.universe_prewarm_ahead_minutes,
+                    cfg.polymarket.universe_max_windows_per_series);
                 std::vector<vp::PmMarket> added;
                 std::vector<std::string> new_tokens;
                 {

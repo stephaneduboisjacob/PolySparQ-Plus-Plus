@@ -20,7 +20,7 @@ std::string mode_to_pg(const std::string& m) {
 }
 } // namespace
 Pg::Pg(const std::string& conninfo)
-    : conn_(std::make_unique<pqxx::connection>(conninfo)) {
+    : conninfo_(conninfo), conn_(std::make_unique<pqxx::connection>(conninfo)) {
     spdlog::debug("postgres connected");
     try {
         pqxx::work tx{*conn_};
@@ -120,6 +120,32 @@ Pg::Pg(const std::string& conninfo)
     }
 }
 
+void Pg::recover_disconnected(const char* operation,
+                              const std::string& reason) noexcept {
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(conn_mu_);
+    if (last_reconnect_attempt_ != std::chrono::steady_clock::time_point{} &&
+        now - last_reconnect_attempt_ < reconnect_backoff_)
+        return;
+
+    last_reconnect_attempt_ = now;
+    try {
+        auto fresh = std::make_unique<pqxx::connection>(conninfo_);
+        pqxx::work tx{*fresh};
+        tx.exec("SET search_path = vp, public");
+        tx.commit();
+        conn_ = std::move(fresh);
+        reconnect_backoff_ = std::chrono::milliseconds(1000);
+        spdlog::warn("postgres connection recovered after {} failure: {}; the failed row was not retried",
+                     operation, reason);
+    } catch (const std::exception& e) {
+        reconnect_backoff_ = std::min(reconnect_backoff_ * 2,
+                                      std::chrono::milliseconds(30000));
+        spdlog::error("postgres reconnect after {} failed (next retry in {}ms): {}",
+                      operation, reconnect_backoff_.count(), e.what());
+    }
+}
+
 void Pg::set_session_context(const std::string& session_id,
                              const std::string& instance_label) {
     std::lock_guard<std::mutex> lock(conn_mu_);
@@ -137,6 +163,10 @@ bool Pg::has_uncertain_live_order_for_instance() noexcept {
             "AND state IN ('INTENT','uncertain'))", instance_label_);
         tx.commit();
         return row[0].as<bool>();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("has_uncertain_live_order_for_instance", e.what());
+        spdlog::error("pg uncertain-order startup check failed: {}", e.what());
+        return true; // fail closed for live startup if order state is unreadable
     } catch (const std::exception& e) {
         spdlog::error("pg uncertain-order startup check failed: {}", e.what());
         return true; // fail closed for live startup if order state is unreadable
@@ -159,6 +189,10 @@ bool Pg::create_order_intent(const std::string& intent_id, const std::string& mo
             side_to_pg(side),dir_to_pg(direction),execution_mode,size_usd,size_shares,limit_price,source);
         tx.commit();
         return !rows.empty();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("create_order_intent", e.what());
+        spdlog::error("pg intent reservation failed; submission blocked: {}", e.what());
+        return false;
     } catch (const std::exception& e) {
         spdlog::error("pg intent reservation failed; submission blocked: {}",e.what());
         return false;
@@ -171,6 +205,10 @@ bool Pg::ping() noexcept {
         auto r = tx.exec1("SELECT 1");
         tx.commit();
         return r[0].as<int>() == 1;
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("ping", e.what());
+        spdlog::error("pg ping failed: {}", e.what());
+        return false;
     } catch (const std::exception& e) {
         spdlog::error("pg ping failed: {}", e.what());
         return false;
@@ -215,6 +253,10 @@ double Pg::oracle_price_at_or_before(const std::string& asset,
         tx.commit();
         if (rs.empty()) return 0.0;
         return rs[0][0].as<double>(0.0);
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("oracle_price_at_or_before", e.what());
+        spdlog::warn("pg oracle_price_at_or_before({}, {}): {}", asset, ts_ms, e.what());
+        return 0.0;
     } catch (const std::exception& e) {
         spdlog::warn("pg oracle_price_at_or_before({}, {}): {}", asset, ts_ms, e.what());
         return 0.0;
@@ -246,6 +288,10 @@ std::vector<Pg::CandleRow> Pg::load_recent_candles(const std::string& symbol,
         }
         // Currently DESC; reverse to ASC so callers see chronological order.
         std::reverse(out.begin(), out.end());
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("load_recent_candles", e.what());
+        spdlog::warn("load_recent_candles({}): {}", symbol, e.what());
+        out.clear();
     } catch (const std::exception& e) {
         spdlog::warn("load_recent_candles({}): {}", symbol, e.what());
         out.clear();
@@ -314,8 +360,37 @@ void Pg::insert_order(const std::string& cid, const std::string& exchange_order_
             }
         }
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_order", e.what());
+        spdlog::warn("pg insert_order failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_order failed: {}", e.what());
+    }
+}
+void Pg::insert_order_reprice(const std::string& cid,
+                              const std::string& execution_mode,
+                              double price, double remaining_shares) noexcept {
+    if (!order_events_enabled_) return;
+    try {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        pqxx::work tx{*conn_};
+        tx.exec_params(
+            "INSERT INTO vp.order_events "
+            "(client_order_id, instance, session_id, exchange_order_id, "
+            "execution_mode, post_only, status, price, size_shares, fill_delta_shares) "
+            "VALUES ($1::uuid, NULLIF($2,''), NULLIF($3,'')::uuid, NULLIF($4,''), "
+            "$5, $6, 'repriced', $7, $8, 0)",
+            cid, instance_label_,
+            session_id_.empty() ? std::optional<std::string>{} : std::optional<std::string>{session_id_},
+            cid, execution_mode,
+            execution_mode == "maker" || execution_mode == "hybrid",
+            price, remaining_shares);
+        tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_order_reprice", e.what());
+        spdlog::warn("pg insert_order_reprice failed: {}", e.what());
+    } catch (const std::exception& e) {
+        spdlog::warn("pg insert_order_reprice failed: {}", e.what());
     }
 }
 void Pg::insert_fill(const std::string& cid, double price,
@@ -328,6 +403,9 @@ void Pg::insert_fill(const std::string& cid, double price,
             "VALUES (now(), $1::uuid, $2, $3, $4)",
             cid, price, size_shares, fee_usd);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_fill", e.what());
+        spdlog::warn("pg insert_fill failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_fill failed: {}", e.what());
     }
@@ -356,6 +434,9 @@ void Pg::insert_signal(const std::string& condition_id,
             conf, rec, rec_size, rec_limit, reason, model_version, payload_json,
             instance_label_, session_id_, client_order_id);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_signal", e.what());
+        spdlog::warn("pg insert_signal failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_signal failed: {}", e.what());
     }
@@ -399,6 +480,9 @@ void Pg::insert_book_snapshot(const std::string& cid, const std::string& token_i
             spread > 0 ? std::optional<double>(spread) : std::optional<double>{},
             std::optional<double>(imb1));
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_book_snapshot", e.what());
+        spdlog::warn("pg insert_book_snapshot failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_book_snapshot failed: {}", e.what());
     }
@@ -415,6 +499,9 @@ void Pg::insert_pm_trade(const std::string& cid, const std::string& token_id,
             "VALUES (to_timestamp($1/1000.0), $2, $3, $4::vp.share_side, $5, $6)",
             (long long)exchange_ms, cid, token_id, side_to_pg(side), price, size);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_pm_trade", e.what());
+        spdlog::warn("pg insert_pm_trade failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_pm_trade failed: {}", e.what());
     }
@@ -443,6 +530,9 @@ void Pg::upsert_market(const std::string& cid, const std::string& asset,
             yes_token, no_token, question, slug, settlement_window_s,
             reference_is_binance);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("upsert_market", e.what());
+        spdlog::warn("pg upsert_market failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg upsert_market failed: {}", e.what());
     }
@@ -460,6 +550,9 @@ void Pg::snapshot_positions(const std::string& mode, double cash_usd,
             mode_to_pg(mode), cash_usd, equity_usd, realized, unrealized, deployed, open_json,
             instance_label_,session_id_);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("snapshot_positions", e.what());
+        spdlog::warn("pg snapshot_positions failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg snapshot_positions failed: {}", e.what());
     }
@@ -487,6 +580,9 @@ void Pg::upsert_strategy_run(const std::string& instance,
             instance, session_id, fills, settles, wins, losses, closed,
             net_pnl, fees);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("upsert_strategy_run", e.what());
+        spdlog::warn("pg upsert_strategy_run failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg upsert_strategy_run failed: {}", e.what());
     }
@@ -503,6 +599,9 @@ void Pg::close_stale_strategy_runs(const std::string& instance,
             "  AND (session_id IS NULL OR session_id <> NULLIF($2,'')::uuid)",
             instance, keep_session_id);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("close_stale_strategy_runs", e.what());
+        spdlog::warn("pg close_stale_strategy_runs failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg close_stale_strategy_runs failed: {}", e.what());
     }
@@ -518,6 +617,8 @@ void Pg::insert_oracle_tick(const std::string& asset, double price,
             "VALUES (to_timestamp($1/1000.0), $2, $3, $4)",
             (long long)ts_ms, asset, price, source);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_oracle_tick", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_oracle_tick failed: {}", e.what());
     }
@@ -537,6 +638,8 @@ void Pg::insert_binance_tick(const std::string& symbol, double price,
             " $6::vp.order_side)",
             (long long)ts_ms, symbol, price, qty, buyer_is_maker, aggressor);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_binance_tick", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_binance_tick failed: {}", e.what());
     }
@@ -552,6 +655,8 @@ void Pg::insert_coinbase_tick(const std::string& asset, double price,
             "VALUES (to_timestamp($1/1000.0), $2, $3)",
             (long long)ts_ms, asset, price);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_coinbase_tick", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_coinbase_tick failed: {}", e.what());
     }
@@ -571,6 +676,9 @@ void Pg::insert_window_event(const std::string& condition_id,
                 ? std::optional<std::string>{}
                 : std::optional<std::string>{payload_json});
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_window_event", e.what());
+        spdlog::warn("pg insert_window_event failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_window_event failed: {}", e.what());
     }
@@ -587,6 +695,9 @@ void Pg::insert_feature(const std::string& condition_id,
             "VALUES (now(), $1, $2, $3::jsonb)",
             condition_id, schema_ver, payload_json);
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_feature", e.what());
+        spdlog::warn("pg insert_feature failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg insert_feature failed: {}", e.what());
     }
@@ -628,6 +739,9 @@ std::vector<Pg::RawFillRow> Pg::load_fills_for_session(const std::string& mode) 
             out.push_back(std::move(r));
         }
         tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("load_fills_for_session", e.what());
+        spdlog::warn("pg load_fills_for_session failed: {}", e.what());
     } catch (const std::exception& e) {
         spdlog::warn("pg load_fills_for_session failed: {}", e.what());
     }
@@ -672,6 +786,10 @@ std::vector<Pg::RawOpenOrderRow> Pg::load_open_orders_for_instance() noexcept {
             o.placed_ms = r[12].as<long long>(0);
             out.push_back(std::move(o));
         }
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("load_open_orders_for_instance", e.what());
+        spdlog::warn("load_open_orders_for_instance: {}", e.what());
+        out.clear();
     } catch (const std::exception& e) {
         spdlog::warn("load_open_orders_for_instance: {}", e.what());
         out.clear();
@@ -690,6 +808,10 @@ std::string vp::Pg::market_reference_key(const std::string& cid) noexcept {
         if (window < 0) return {};
         if (rs[0][2].as<bool>(false)) return rs[0][0].as<std::string>();
         return rs[0][0].as<std::string>() + (window == 0 ? ":SPOT" : ":TWAP" + std::to_string(window));
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("market_reference_key", e.what());
+        spdlog::warn("market reference lookup: {}", e.what());
+        return {};
     } catch (const std::exception& e) {
         spdlog::warn("market reference lookup: {}", e.what());
         return {};
@@ -711,6 +833,9 @@ std::vector<vp::Pg::CandleRow> vp::Pg::load_recent_hourly_candles(const std::str
             "GROUP BY date_trunc('hour',ts) HAVING count(*)=60 ORDER BY 1", symbol, hours);
         for (const auto& r : rs) out.push_back({(int64_t)r[0].as<double>(),
             r[1].as<double>(),r[2].as<double>(),r[3].as<double>(),r[4].as<double>(),r[5].as<double>()});
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("load_recent_hourly_candles", e.what());
+        spdlog::warn("hourly candles: {}", e.what());
     } catch (const std::exception& e) { spdlog::warn("hourly candles: {}",e.what()); }
     return out;
 }

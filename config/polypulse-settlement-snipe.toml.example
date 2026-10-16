@@ -1,0 +1,98 @@
+# Strategy overlay for the independent multi-asset late-window settlement sniper.
+# It places one post-only LIMIT-MAKER UP/DOWN order in the final 1–45 seconds,
+# only when a fresh conservative settlement forecast clears the passive price
+# by at least 5 points. A 25-tick entry-relative emergency stop limits reversals.
+# Merge these sections into a local full
+# config; retain that installation's database and feed settings. Paper mode.
+
+[runtime]
+mode = "paper"
+instance_label = "btc-late-settlement-sniper"
+journal_dir = "./journal/btc-late-settlement-sniper"
+
+[polymarket]
+universe_horizons_seconds = [900]
+universe_max_windows_per_series = 10
+universe_max_markets = 80
+universe_prewarm_ahead_minutes = 20
+
+[binance]
+streams = ["btcusdt@trade", "ethusdt@trade", "solusdt@trade", "xrpusdt@trade", "btcusdt@bookTicker", "ethusdt@bookTicker", "solusdt@bookTicker", "xrpusdt@bookTicker"]
+
+[strategy.hot]
+autopilot_on_start = true
+autopilot_startup_delay_secs = 30
+autopilot_throttle_ms = 250
+autopilot_max_per_sweep = 2
+blocked_assets = []
+per_click_size_usd = 5.0
+min_order_usd = 1.0
+min_size_usd = 1.0
+max_size_usd = 5.0
+max_per_window_usd = 25.0
+hard_share_price_ceil = 0.98
+max_entry_share_price = 0.98
+min_entry_share_price = 0.85
+oracle_max_token_price = 0.98
+predictor_max_token_price = 0.98
+ideal_entry_share_price = 0.50
+max_entries_per_window = 20
+autopilot_conf_floor = 0.50
+
+recycler_mode = "off"
+predictor_mode = true
+window_predictor_pm_flow = true
+trend_filter_enabled = false
+window_predictor_mode = false
+digital_fv_mode = false
+oracle_lag_mode = false
+endgame_mode = false
+coinbase_lead_mode = false
+scalp_v2_enabled = false
+scalp_v3_enabled = false
+momentum_scalp_enabled = false
+stop_loss_mode = false
+profit_take_mode = false
+oracle_reversal_exit = false
+oracle_panic_exit = false
+momentum_flip_exit = false
+entry_persist_gate = false
+max_book_age_ms = 1000
+max_entry_spread_pct = 8.0
+
+entry_order_mode = "maker"
+maker_improve_ticks = 1
+maker_reprice_ms = 250
+maker_poll_ms = 250
+maker_max_age_ms = 0
+maker_cancel_before_close_ms = 15000
+
+late_window_sniper_enabled = true
+late_window_sniper_min_secs = 1
+late_window_sniper_max_secs = 45
+late_window_sniper_min_secs_5m = 1
+late_window_sniper_max_secs_5m = 45
+late_window_sniper_min_secs_15m = 1
+late_window_sniper_max_secs_15m = 45
+late_window_sniper_min_price = 0.82
+late_window_sniper_max_price = 0.97
+late_window_sniper_min_net_edge_pct = 5.0
+late_window_sniper_order_usd = 5.0
+late_window_sniper_max_entries_per_window = 5
+late_window_sniper_hard_stop_ticks = 25
+
+[risk]
+max_order_usd = 5.0
+max_per_window_usd = 25.0
+max_deployed_usd = 25.0
+min_order_usd = 1.0
+daily_loss_kill_pct = 0.0
+
+[data_collection]
+oracle_ticks_enabled = false
+binance_ticks_enabled = false
+coinbase_ticks_enabled = false
+window_events_enabled = false
+features_enabled = false
+book_snapshots_enabled = true
+pm_trades_enabled = false

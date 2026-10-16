@@ -132,6 +132,108 @@ SlugInfo classify_slug(std::string_view slug) {
     }
     return {};
 }
+
+int append_event_page(const std::string& body, std::int64_t now_ms,
+                      std::vector<PmMarket>& out,
+                      std::unordered_set<std::string>& seen, int& diag) {
+    if (body.empty()) return -1;
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(body);
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) || !doc.is_array()) return -1;
+
+    int page_count = 0;
+    for ([[maybe_unused]] auto _ : doc.get_array()) ++page_count;
+    if (page_count == 0) return 0;
+
+    simdjson::padded_string padded2(body);
+    simdjson::dom::element doc2;
+    if (parser.parse(padded2).get(doc2) || !doc2.is_array()) return -1;
+    for (auto ev : doc2.get_array()) {
+        std::string_view ev_sv;
+        if (ev["slug"].get(ev_sv)) continue;
+        std::string slug(ev_sv);
+        auto info = classify_slug(slug);
+        if (info.asset.empty()) continue;
+
+        bool ev_neg_risk = false;
+        if (ev["negRisk"].get(ev_neg_risk) != simdjson::SUCCESS) ev_neg_risk = false;
+        simdjson::dom::element markets_el;
+        if (ev["markets"].get(markets_el) || !markets_el.is_array()) continue;
+
+        for (auto m : markets_el.get_array()) {
+            std::string_view sv;
+            PmMarket pm;
+            pm.slug = slug;
+            pm.asset = info.asset;
+            pm.horizon_seconds = info.horizon;
+            pm.neg_risk = ev_neg_risk;
+            std::string_view resolution;
+            if (m["resolutionSource"].get(resolution) == simdjson::SUCCESS &&
+                resolution.find("data.chain.link/") != std::string_view::npos) {
+                if (resolution.find("twap-60s") != std::string_view::npos) pm.settlement_window_s = 60;
+                else if (resolution.find("twap-30s") != std::string_view::npos) pm.settlement_window_s = 30;
+                else if (resolution.find("twap") == std::string_view::npos) pm.settlement_window_s = 0;
+            } else if (m["resolutionSource"].get(resolution) == simdjson::SUCCESS &&
+                       resolution.find("binance.com/") != std::string_view::npos) {
+                pm.reference_is_binance = true;
+                pm.settlement_window_s = 0;
+            }
+            if (m["conditionId"].get(sv) != simdjson::SUCCESS || sv.empty()) continue;
+            pm.condition_id = std::string(sv);
+            if (!seen.insert(pm.condition_id).second) continue;
+            if (m["question"].get(sv) == simdjson::SUCCESS) pm.question = std::string(sv);
+
+            double tick_size = 0.01;
+            if (m["orderPriceMinTickSize"].get(tick_size) == simdjson::SUCCESS && tick_size > 0)
+                pm.tick_size = tick_size;
+
+            std::vector<std::string> tokens, outcomes;
+            if (m["clobTokenIds"].get(sv) == simdjson::SUCCESS)
+                tokens = parse_json_string_array(sv);
+            if (m["outcomes"].get(sv) == simdjson::SUCCESS)
+                outcomes = parse_json_string_array(sv);
+            if (tokens.size() < 2) continue;
+
+            int up_idx = 0, down_idx = 1;
+            for (size_t i = 0; i < outcomes.size() && i < 2; ++i) {
+                std::string lo = outcomes[i];
+                std::transform(lo.begin(), lo.end(), lo.begin(),
+                               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+                if (lo == "up") up_idx = static_cast<int>(i);
+                if (lo == "down") down_idx = static_cast<int>(i);
+            }
+            pm.yes_token_id = tokens[up_idx];
+            pm.no_token_id = tokens[down_idx];
+
+            if (m["endDate"].get(sv) == simdjson::SUCCESS) pm.window_close_ms = iso_to_ms(sv);
+            if (pm.window_close_ms > 0 && pm.window_close_ms < now_ms) continue;
+            if (m["eventStartTime"].get(sv) == simdjson::SUCCESS) {
+                int64_t t = iso_to_ms(sv);
+                const int64_t expected = static_cast<int64_t>(pm.horizon_seconds) * 1000LL;
+                const int64_t tolerance = std::max<int64_t>(30000, expected / 100);
+                if (t > 0 && pm.window_close_ms > t &&
+                    std::llabs((pm.window_close_ms - t) - expected) <= tolerance)
+                    pm.window_open_ms = t;
+            }
+            if (pm.window_open_ms == 0 && pm.window_close_ms != 0 && pm.horizon_seconds > 0)
+                pm.window_open_ms = pm.window_close_ms - static_cast<int64_t>(pm.horizon_seconds) * 1000LL;
+            pm.target_price = parse_target_price(pm.question);
+
+            if (diag++ < 4) {
+                const int64_t close_in = (pm.window_close_ms - now_ms) / 1000;
+                const int64_t open_ago = (now_ms - pm.window_open_ms) / 1000;
+                const char* hz_label = pm.horizon_seconds == 300 ? "5m" :
+                    pm.horizon_seconds == 900 ? "15m" : pm.horizon_seconds == 3600 ? "1h" :
+                    pm.horizon_seconds == 14400 ? "4h" : pm.horizon_seconds == 86400 ? "24h" : "?";
+                spdlog::debug("rest mkt[{}] {} {} close_in={}s open_ago={}s",
+                              diag - 1, pm.asset, hz_label, close_in, open_ago);
+            }
+            out.push_back(std::move(pm));
+        }
+    }
+    return page_count;
+}
 } // namespace
 PolymarketRest::PolymarketRest(std::string c, std::string g)
     : clob_url_(std::move(c)), gamma_url_(std::move(g)) {
@@ -140,149 +242,117 @@ PolymarketRest::PolymarketRest(std::string c, std::string g)
     if (gamma_url_.empty()) gamma_url_ = "https://gamma-api.polymarket.com";
 }
 PolymarketRest::~PolymarketRest() = default;
-std::vector<PmMarket> PolymarketRest::discover_updown_markets() {
-    std::vector<PmMarket> out; out.reserve(64);
+std::vector<PmMarket> PolymarketRest::discover_updown_markets(
+        const std::vector<int>& horizons_seconds,
+        const std::vector<std::string>& blocked_assets,
+        int prewarm_ahead_minutes,
+        int max_windows_per_series) {
+    std::vector<PmMarket> out;
     std::unordered_set<std::string> seen;
-    simdjson::dom::parser parser;
-    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    auto to_iso = [](int64_t ms) -> std::string {
-        time_t t = (time_t)(ms / 1000);
-        struct tm tms {};
-        gmtime_r(&t, &tms);
-        char buf[32];
-        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tms);
-        return buf;
+    const std::vector<std::pair<std::string, std::string>> asset_slugs = {
+        {"BTC", "btc"}, {"ETH", "eth"}, {"SOL", "sol"}, {"XRP", "xrp"}
     };
-    std::string now_iso = to_iso(now_ms);
-    // Gamma caps at 100 results per page, and BTC/ETH updown events are
-    // alphabetically buried past page 1 among ~500+ events. Paginate through
-    // pages to find them. Break when a page has fewer than 100 items (last page).
-    std::string plus25h = to_iso(now_ms + 25LL * 60 * 60 * 1000);
+    std::vector<std::pair<std::string, std::string>> requested_assets;
+    for (const auto& asset : asset_slugs) {
+        if (std::find(blocked_assets.begin(), blocked_assets.end(), asset.first) ==
+            blocked_assets.end())
+            requested_assets.push_back(asset);
+    }
+    const std::unordered_set<int> requested_horizons(
+        horizons_seconds.begin(), horizons_seconds.end());
+
+    auto horizon_slug = [](int horizon) -> const char* {
+        switch (horizon) {
+            case 300: return "5m";
+            case 900: return "15m";
+            case 3600: return "1h";
+            case 14400: return "4h";
+            case 86400: return "24h";
+            default: return nullptr;
+        }
+    };
+
+    const int64_t prewarm_ms =
+        static_cast<int64_t>(std::max(0, prewarm_ahead_minutes)) * 60'000LL;
+    const size_t max_windows = static_cast<size_t>(
+        std::clamp(max_windows_per_series, 1, 100));
     int diag = 0;
-    for (int offset = 0; offset < 2000; offset += 100) {
-        std::string url = gamma_url_
-            + "/events?limit=100&offset=" + std::to_string(offset)
-            + "&closed=false"
-            + "&end_date_min=" + now_iso
-            + "&end_date_max=" + plus25h;
-        std::string body = http_get(url);
-        if (body.empty()) break;
+    size_t exact_requests = 0;
+    size_t exact_hits = 0;
 
-        simdjson::padded_string padded(body);
-        simdjson::dom::element doc;
-        if (parser.parse(padded).get(doc) || !doc.is_array()) break;
+    // Query the epoch slugs directly. General /events pagination stops at
+    // offset 2,000 and short BTC slugs sort beyond that boundary, making an
+    // otherwise healthy bot appear to have no markets.
+    for (const int horizon : horizons_seconds) {
+        const char* label = horizon_slug(horizon);
+        if (!label || horizon <= 0) continue;
+        const int64_t period_ms = static_cast<int64_t>(horizon) * 1000LL;
+        const int64_t current_open_ms = (now_ms / period_ms) * period_ms;
+        const int64_t span_from_current_open =
+            (now_ms - current_open_ms) + prewarm_ms;
+        const size_t prewarm_windows = static_cast<size_t>(
+            std::max<int64_t>(1, span_from_current_open / period_ms + 1));
+        const size_t windows_to_fetch = std::max(max_windows, prewarm_windows);
 
-        auto arr = doc.get_array();
-        // Check if page is empty
-        int page_count = 0;
-        for ([[maybe_unused]] auto _ : arr) ++page_count;
-        if (page_count == 0) break;
-
-        simdjson::padded_string padded2(body);
-        simdjson::dom::element doc2;
-        if (parser.parse(padded2).get(doc2) || !doc2.is_array()) break;
-
-        for (auto ev : doc2.get_array()) {
-            std::string_view ev_sv;
-            if (ev["slug"].get(ev_sv)) continue;
-            std::string slug(ev_sv);
-            auto info = classify_slug(slug);
-            if (info.asset.empty()) continue;
-
-            bool ev_neg_risk = false;
-            if (ev["negRisk"].get(ev_neg_risk) != simdjson::SUCCESS) ev_neg_risk = false;
-
-            simdjson::dom::element markets_el;
-            if (ev["markets"].get(markets_el) || !markets_el.is_array()) continue;
-
-            for (auto m : markets_el.get_array()) {
-                std::string_view sv;
-                PmMarket pm;
-                pm.slug           = slug;
-                pm.asset          = info.asset;
-                pm.horizon_seconds = info.horizon;
-                pm.neg_risk       = ev_neg_risk;
-                std::string_view resolution;
-                if (m["resolutionSource"].get(resolution) == simdjson::SUCCESS &&
-                    resolution.find("data.chain.link/") != std::string_view::npos) {
-                    if (resolution.find("twap-60s") != std::string_view::npos) pm.settlement_window_s = 60;
-                    else if (resolution.find("twap-30s") != std::string_view::npos) pm.settlement_window_s = 30;
-                    else if (resolution.find("twap") == std::string_view::npos) pm.settlement_window_s = 0;
-                } else if (m["resolutionSource"].get(resolution) == simdjson::SUCCESS &&
-                           resolution.find("binance.com/") != std::string_view::npos) {
-                    pm.reference_is_binance = true;
-                    pm.settlement_window_s = 0;
-                }
-
-                if (m["conditionId"].get(sv) != simdjson::SUCCESS || sv.empty()) continue;
-                pm.condition_id = std::string(sv);
-                if (!seen.insert(pm.condition_id).second) continue;
-
-                if (m["question"].get(sv) == simdjson::SUCCESS) pm.question = std::string(sv);
-
-                double tick_size = 0.01;
-                if (m["orderPriceMinTickSize"].get(tick_size) == simdjson::SUCCESS && tick_size > 0)
-                    pm.tick_size = tick_size;
-
-                std::vector<std::string> tokens, outcomes;
-                if (m["clobTokenIds"].get(sv) == simdjson::SUCCESS)
-                    tokens = parse_json_string_array(sv);
-                if (m["outcomes"].get(sv) == simdjson::SUCCESS)
-                    outcomes = parse_json_string_array(sv);
-                if (tokens.size() < 2) continue;
-
-                int up_idx = 0, down_idx = 1;
-                for (size_t i = 0; i < outcomes.size() && i < 2; ++i) {
-                    std::string lo = outcomes[i];
-                    std::transform(lo.begin(), lo.end(), lo.begin(),
-                                   [](unsigned char c){ return std::tolower(c); });
-                    if (lo == "up")   up_idx   = (int)i;
-                    if (lo == "down") down_idx = (int)i;
-                }
-                pm.yes_token_id = tokens[up_idx];
-                pm.no_token_id  = tokens[down_idx];
-
-                if (m["endDate"].get(sv) == simdjson::SUCCESS) pm.window_close_ms = iso_to_ms(sv);
-                if (pm.window_close_ms > 0 && pm.window_close_ms < now_ms) continue;
-
-                if (m["eventStartTime"].get(sv) == simdjson::SUCCESS) {
-                    int64_t t = iso_to_ms(sv);
-                    // Long-form hourly and daily events can be listed before
-                    // their measurement window opens. Trust the event timestamp
-                    // only when it agrees with the contract's duration.
-                    const int64_t expected=static_cast<int64_t>(pm.horizon_seconds)*1000LL;
-                    const int64_t tolerance=std::max<int64_t>(30000,expected/100);
-                    if (t>0 && pm.window_close_ms>t &&
-                        std::llabs((pm.window_close_ms-t)-expected)<=tolerance)
-                        pm.window_open_ms=t;
-                }
-                if (pm.window_open_ms == 0 && pm.window_close_ms != 0 && pm.horizon_seconds>0)
-                    pm.window_open_ms = pm.window_close_ms - (int64_t)pm.horizon_seconds * 1000LL;
-
-                pm.target_price = parse_target_price(pm.question);
-
-                if (diag++ < 4) {
-                    int64_t close_in = (pm.window_close_ms - now_ms) / 1000;
-                    int64_t open_ago = (now_ms - pm.window_open_ms) / 1000;
-                    const char* hz_label = pm.horizon_seconds == 300  ? "5m"  :
-                                           pm.horizon_seconds == 900  ? "15m" :
-                                           pm.horizon_seconds == 3600 ? "1h"  :
-                                           pm.horizon_seconds == 14400? "4h"  :
-                                           pm.horizon_seconds == 86400? "24h" : "?";
-                    spdlog::debug("rest mkt[{}] {} {} close_in={}s open_ago={}s",
-                        diag - 1, pm.asset, hz_label, close_in, open_ago);
-                }
-                out.push_back(std::move(pm));
+        for (const auto& asset : requested_assets) {
+            for (size_t i = 0; i < windows_to_fetch; ++i) {
+                const int64_t open_s = current_open_ms / 1000LL +
+                    static_cast<int64_t>(i) * horizon;
+                const std::string slug = asset.second + "-updown-" + label + "-" +
+                    std::to_string(open_s);
+                const std::string url = gamma_url_ + "/events?slug=" + slug;
+                ++exact_requests;
+                const int found = append_event_page(http_get(url), now_ms, out, seen, diag);
+                if (found > 0) ++exact_hits;
+                else if (found < 0)
+                    spdlog::debug("Gamma returned an unreadable event page for slug {}", slug);
             }
         }
     }
-    spdlog::info("gamma discovered {} up-down markets", out.size());
+
+    // Keep support for the older long-form hourly/daily events, whose slugs do
+    // not encode an epoch start. Short-window profiles never pay this scan cost.
+    const bool needs_long_form = std::any_of(
+        horizons_seconds.begin(), horizons_seconds.end(),
+        [](int horizon) { return horizon >= 3600; });
+    if (needs_long_form && !requested_assets.empty()) {
+        auto to_iso = [](int64_t ms) -> std::string {
+            time_t t = static_cast<time_t>(ms / 1000LL);
+            struct tm tms {};
+            gmtime_r(&t, &tms);
+            char buf[32];
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tms);
+            return buf;
+        };
+        const std::string now_iso = to_iso(now_ms);
+        const std::string plus25h = to_iso(now_ms + 25LL * 60 * 60 * 1000);
+        for (int offset = 0; offset < 2000; offset += 100) {
+            const std::string url = gamma_url_ +
+                "/events?limit=100&offset=" + std::to_string(offset) +
+                "&closed=false&end_date_min=" + now_iso +
+                "&end_date_max=" + plus25h;
+            const std::string body = http_get(url);
+            if (body.empty()) break;
+            const int page_count = append_event_page(body, now_ms, out, seen, diag);
+            if (page_count <= 0 || page_count < 100) break;
+        }
+    }
+
+    out.erase(std::remove_if(out.begin(), out.end(), [&](const PmMarket& market) {
+        return !requested_horizons.count(market.horizon_seconds) ||
+            std::none_of(requested_assets.begin(), requested_assets.end(),
+                [&](const auto& asset) { return asset.first == market.asset; });
+    }), out.end());
+
+    spdlog::info("gamma discovered {} up-down markets (configured universe; "
+                 "exact_slug_queries={} hits={})",
+                 out.size(), exact_requests, exact_hits);
     if (out.empty()) {
-        spdlog::warn("no up-down markets found — Polymarket may not have active "
-                     "windows right now (they typically run during US market hours 13:30+ UTC). "
-                     "The engine will retry on the next discovery cycle.");
+        spdlog::warn("Gamma returned no markets for the configured asset/horizon universe; "
+                     "the engine will retry on the next discovery cycle");
     }
     return out;
 }

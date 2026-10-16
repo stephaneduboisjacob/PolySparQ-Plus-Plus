@@ -257,6 +257,8 @@ Config Config::load(const std::string& path) {
     if (st && (*st)["recycler_settlement_entry_min_price"] && !(*st)["recycler_settlement_entry_min_price"].value<double>()) throw std::runtime_error("invalid type: recycler_settlement_entry_min_price");
     s.recycler_settlement_entry_max_price = get_or<double>(st, "recycler_settlement_entry_max_price", s.recycler_settlement_entry_max_price);
     if (st && (*st)["recycler_settlement_entry_max_price"] && !(*st)["recycler_settlement_entry_max_price"].value<double>()) throw std::runtime_error("invalid type: recycler_settlement_entry_max_price");
+    s.recycler_settlement_only = get_or<bool>(st, "recycler_settlement_only", s.recycler_settlement_only);
+    if (st && (*st)["recycler_settlement_only"] && !(*st)["recycler_settlement_only"].value<bool>()) throw std::runtime_error("invalid type: recycler_settlement_only");
     s.recycler_entry_open_grace_secs = get_or<int>(st, "recycler_entry_open_grace_secs", s.recycler_entry_open_grace_secs);
     if (st && (*st)["recycler_entry_open_grace_secs"] && !(*st)["recycler_entry_open_grace_secs"].value<int>()) throw std::runtime_error("invalid type: recycler_entry_open_grace_secs");
     s.recycler_first_entry_scale_pct = get_or<double>(st, "recycler_first_entry_scale_pct", s.recycler_first_entry_scale_pct);
@@ -295,7 +297,7 @@ Config Config::load(const std::string& path) {
         s.recycler_entry_open_grace_secs<0 || s.recycler_entry_open_grace_secs>recycler_max_open_grace ||
         !(s.recycler_first_entry_scale_pct>=1 && s.recycler_first_entry_scale_pct<=100) ||
         !(s.recycler_late_taker_min_bid>=0 && s.recycler_late_taker_min_bid<=0.99) ||
-        !(s.recycler_settlement_entry_min_price>=(s.recycler_maniac_mode ? 0.85 : 0.90) && s.recycler_settlement_entry_min_price<s.recycler_settlement_entry_max_price && s.recycler_settlement_entry_max_price<=0.98) ||
+        !(s.recycler_settlement_entry_min_price>=0.85 && s.recycler_settlement_entry_min_price<s.recycler_settlement_entry_max_price && s.recycler_settlement_entry_max_price<=0.98) ||
         (s.recycler_max_window_loss>0 && s.recycler_max_session_loss>0 &&
          s.recycler_max_session_loss<s.recycler_max_window_loss))
         throw std::runtime_error("invalid recycler price, timing, cycle, or loss constraints");
@@ -313,29 +315,42 @@ Config Config::load(const std::string& path) {
         std::sort(recycler_horizons.begin(),recycler_horizons.end());
         recycler_horizons.erase(std::unique(recycler_horizons.begin(),recycler_horizons.end()),
                                 recycler_horizons.end());
-        if(recycler_horizons.size()!=1)
+        if(s.recycler_settlement_only) {
+            if(recycler_horizons.empty() || recycler_horizons.size()>2 ||
+               std::any_of(recycler_horizons.begin(),recycler_horizons.end(),
+                           [](int h){return h!=300 && h!=900;}))
+                throw std::runtime_error("settlement-only profiles must select one or both 5m/15m horizons");
+        } else if(recycler_horizons.size()!=1)
             throw std::runtime_error(s.recycler_maniac_mode
                 ? "active Maniac Maker Recycler profiles must select exactly one unblocked 5m, 15m, 1h, 4h, or 24h horizon"
                 : "active Recycler profiles must select exactly one unblocked 5m or 15m horizon");
-        const int horizon_secs=recycler_horizons.front();
-        if(s.recycler_entry_cutoff_secs>=horizon_secs)
-            throw std::runtime_error("Recycler entry cutoff would block the entire configured window");
-        if(!s.recycler_maniac_mode && horizon_secs==900 && s.recycler_entry_cutoff_secs<360)
-            throw std::runtime_error("15m Recycler profiles must stop entries with at least 360 seconds remaining");
-        if(!s.recycler_maniac_mode && horizon_secs==300 && s.recycler_late_maker_secs>=s.recycler_entry_cutoff_secs)
-            throw std::runtime_error("5m Recycler late maker exit must begin after the entry cutoff");
+        if(!s.recycler_settlement_only) {
+            const int horizon_secs=recycler_horizons.front();
+            if(s.recycler_entry_cutoff_secs>=horizon_secs)
+                throw std::runtime_error("Recycler entry cutoff would block the entire configured window");
+            if(!s.recycler_maniac_mode && horizon_secs==900 && s.recycler_entry_cutoff_secs<360)
+                throw std::runtime_error("15m Recycler profiles must stop entries with at least 360 seconds remaining");
+            if(!s.recycler_maniac_mode && horizon_secs==300 && s.recycler_late_maker_secs>=s.recycler_entry_cutoff_secs)
+                throw std::runtime_error("5m Recycler late maker exit must begin after the entry cutoff");
+        }
         if(s.recycler_maniac_mode && s.recycler_settlement_entry_enabled &&
            s.recycler_entry_cutoff_secs<=s.recycler_settlement_entry_secs)
             throw std::runtime_error("Maniac Maker cycle-entry cutoff must leave a separate late settlement-entry phase");
     }
     if (s.recycler_settlement_entry_enabled && s.recycler_mode=="off")
         throw std::runtime_error("recycler settlement entry requires recycler_mode sniper or range");
+    if (s.recycler_settlement_only && !s.recycler_settlement_entry_enabled)
+        throw std::runtime_error("settlement-only profile requires recycler_settlement_entry_enabled=true");
     if (s.recycler_mode!="off" && s.recycler_stop_ticks>0)
         spdlog::warn("recycler price stop is disabled by operator policy; recycler_stop_ticks={} is retained but ignored",s.recycler_stop_ticks);
     s.entry_order_mode        = get_or<std::string>(st, "entry_order_mode",   s.entry_order_mode);
     if (s.entry_order_mode != "taker" && s.entry_order_mode != "maker" &&
         s.entry_order_mode != "hybrid")
         throw std::runtime_error("strategy.entry_order_mode must be taker, maker, or hybrid");
+    if (s.entry_order_mode != "maker")
+        spdlog::warn("strategy.entry_order_mode={} ignored: this build routes all orders as post-only maker",
+                     s.entry_order_mode);
+    s.entry_order_mode = "maker";
     s.maker_improve_ticks     = get_or<int>(st, "maker_improve_ticks", s.maker_improve_ticks);
     s.maker_reprice_ms        = get_or<int>(st, "maker_reprice_ms", s.maker_reprice_ms);
     s.maker_poll_ms           = get_or<int>(st, "maker_poll_ms", s.maker_poll_ms);
@@ -487,6 +502,64 @@ Config Config::load(const std::string& path) {
     s.scalp_v3_runner_min_profit    = get_or<double>(st, "scalp_v3_runner_min_profit",     s.scalp_v3_runner_min_profit);
     s.scalp_v3_runner_max_secs_left = get_or<int>   (st, "scalp_v3_runner_max_secs_left",  s.scalp_v3_runner_max_secs_left);
     s.scalp_v3_runner_velocity_floor= get_or<double>(st, "scalp_v3_runner_velocity_floor", s.scalp_v3_runner_velocity_floor);
+    s.lead_lag_scalp_enabled = get_or<bool>(st, "lead_lag_scalp_enabled", s.lead_lag_scalp_enabled);
+    s.lead_lag_scalp_horizon_s = get_or<int>(st, "lead_lag_scalp_horizon_s", s.lead_lag_scalp_horizon_s);
+    s.lead_lag_scalp_min_signal_confidence = get_or<double>(
+        st, "lead_lag_scalp_min_signal_confidence", s.lead_lag_scalp_min_signal_confidence);
+    s.lead_lag_scalp_min_cb_move_bps = get_or<double>(st, "lead_lag_scalp_min_cb_move_bps", s.lead_lag_scalp_min_cb_move_bps);
+    s.lead_lag_scalp_min_cb_lead_bps = get_or<double>(st, "lead_lag_scalp_min_cb_lead_bps", s.lead_lag_scalp_min_cb_lead_bps);
+    s.lead_lag_scalp_max_oracle_counter_bps = get_or<double>(st, "lead_lag_scalp_max_oracle_counter_bps", s.lead_lag_scalp_max_oracle_counter_bps);
+    s.lead_lag_scalp_min_net_edge_pct = get_or<double>(st, "lead_lag_scalp_min_net_edge_pct", s.lead_lag_scalp_min_net_edge_pct);
+    s.lead_lag_scalp_min_price = get_or<double>(st, "lead_lag_scalp_min_price", s.lead_lag_scalp_min_price);
+    s.lead_lag_scalp_max_price = get_or<double>(st, "lead_lag_scalp_max_price", s.lead_lag_scalp_max_price);
+    s.lead_lag_scalp_max_spread_pct = get_or<double>(st, "lead_lag_scalp_max_spread_pct", s.lead_lag_scalp_max_spread_pct);
+    s.lead_lag_scalp_max_book_age_ms = get_or<int>(st, "lead_lag_scalp_max_book_age_ms", s.lead_lag_scalp_max_book_age_ms);
+    s.lead_lag_scalp_stop_entry_secs = get_or<int>(st, "lead_lag_scalp_stop_entry_secs", s.lead_lag_scalp_stop_entry_secs);
+    const int default_stop_5m = s.lead_lag_scalp_horizon_s == 300
+        ? s.lead_lag_scalp_stop_entry_secs : 90;
+    const int default_stop_15m = s.lead_lag_scalp_horizon_s == 900
+        ? s.lead_lag_scalp_stop_entry_secs : 270;
+    s.lead_lag_scalp_stop_entry_5m_secs = get_or<int>(
+        st, "lead_lag_scalp_stop_entry_5m_secs", default_stop_5m);
+    s.lead_lag_scalp_stop_entry_15m_secs = get_or<int>(
+        st, "lead_lag_scalp_stop_entry_15m_secs", default_stop_15m);
+    s.lead_lag_scalp_flatten_secs = get_or<int>(st, "lead_lag_scalp_flatten_secs", s.lead_lag_scalp_flatten_secs);
+    // A multi-horizon profile (horizon_s == 0) must retain the per-window
+    // safety defaults. The legacy shared flatten setting only overrides the
+    // selected horizon for a single-horizon profile.
+    const int default_flatten_5m = s.lead_lag_scalp_horizon_s == 300
+        ? s.lead_lag_scalp_flatten_secs : 90;
+    const int default_flatten_15m = s.lead_lag_scalp_horizon_s == 900
+        ? s.lead_lag_scalp_flatten_secs : 270;
+    s.lead_lag_scalp_flatten_5m_secs = get_or<int>(
+        st, "lead_lag_scalp_flatten_5m_secs", default_flatten_5m);
+    s.lead_lag_scalp_flatten_15m_secs = get_or<int>(
+        st, "lead_lag_scalp_flatten_15m_secs", default_flatten_15m);
+    s.lead_lag_scalp_max_entries_per_window = get_or<int>(st, "lead_lag_scalp_max_entries_per_window", s.lead_lag_scalp_max_entries_per_window);
+    s.lead_lag_scalp_order_usd = get_or<double>(st, "lead_lag_scalp_order_usd", s.lead_lag_scalp_order_usd);
+    s.lead_lag_scalp_profit_target_pct = get_or<double>(st, "lead_lag_scalp_profit_target_pct", s.lead_lag_scalp_profit_target_pct);
+    s.lead_lag_scalp_hard_stop_pct = get_or<double>(st, "lead_lag_scalp_hard_stop_pct", s.lead_lag_scalp_hard_stop_pct);
+    s.lead_lag_scalp_hard_stop_ticks = get_or<int>(st, "lead_lag_scalp_hard_stop_ticks", s.lead_lag_scalp_hard_stop_ticks);
+    s.lead_lag_scalp_reversal_exit_enabled = get_or<bool>(st, "lead_lag_scalp_reversal_exit_enabled", s.lead_lag_scalp_reversal_exit_enabled);
+    s.lead_lag_scalp_rearm_bps = get_or<double>(st, "lead_lag_scalp_rearm_bps", s.lead_lag_scalp_rearm_bps);
+    s.late_window_sniper_enabled = get_or<bool>(st, "late_window_sniper_enabled", s.late_window_sniper_enabled);
+    s.late_window_sniper_min_secs = get_or<int>(st, "late_window_sniper_min_secs", s.late_window_sniper_min_secs);
+    s.late_window_sniper_max_secs = get_or<int>(st, "late_window_sniper_max_secs", s.late_window_sniper_max_secs);
+    s.late_window_sniper_min_secs_5m = get_or<int>(
+        st, "late_window_sniper_min_secs_5m", s.late_window_sniper_min_secs);
+    s.late_window_sniper_max_secs_5m = get_or<int>(
+        st, "late_window_sniper_max_secs_5m", s.late_window_sniper_max_secs);
+    s.late_window_sniper_min_secs_15m = get_or<int>(
+        st, "late_window_sniper_min_secs_15m", s.late_window_sniper_min_secs);
+    s.late_window_sniper_max_secs_15m = get_or<int>(
+        st, "late_window_sniper_max_secs_15m", s.late_window_sniper_max_secs);
+    s.late_window_sniper_min_price = get_or<double>(st, "late_window_sniper_min_price", s.late_window_sniper_min_price);
+    s.late_window_sniper_max_price = get_or<double>(st, "late_window_sniper_max_price", s.late_window_sniper_max_price);
+    s.late_window_sniper_min_net_edge_pct = get_or<double>(st, "late_window_sniper_min_net_edge_pct", s.late_window_sniper_min_net_edge_pct);
+    s.late_window_sniper_order_usd = get_or<double>(st, "late_window_sniper_order_usd", s.late_window_sniper_order_usd);
+    s.late_window_sniper_max_entries_per_window = get_or<int>(st, "late_window_sniper_max_entries_per_window", s.late_window_sniper_max_entries_per_window);
+    s.late_window_sniper_hard_stop_ticks = get_or<int>(
+        st, "late_window_sniper_hard_stop_ticks", s.late_window_sniper_hard_stop_ticks);
     s.momentum_scalp_enabled        = get_or<bool>  (st, "momentum_scalp_enabled",         s.momentum_scalp_enabled);
     s.trend_filter_enabled          = get_or<bool>  (st, "trend_filter_enabled",           s.trend_filter_enabled);
     s.trend_filter_windows          = get_or<int>   (st, "trend_filter_windows",           s.trend_filter_windows);
@@ -595,6 +668,76 @@ Config Config::load(const std::string& path) {
     s.adaptive_require_predictor_agree = get_or<bool>(st, "adaptive_require_predictor_agree", s.adaptive_require_predictor_agree);
     s.adaptive_oracle_agree_margin  = get_or<double>(st, "adaptive_oracle_agree_margin",  s.adaptive_oracle_agree_margin);
     s.adaptive_use_wpred_payload    = get_or<bool>  (st, "adaptive_use_wpred_payload",     s.adaptive_use_wpred_payload);
+
+    if (s.lead_lag_scalp_enabled) {
+        if (s.lead_lag_scalp_horizon_s != 0 &&
+            s.lead_lag_scalp_horizon_s != 300 &&
+            s.lead_lag_scalp_horizon_s != 900)
+            throw std::runtime_error("lead_lag_scalp_horizon_s must be 0, 300, or 900");
+        if (!(s.lead_lag_scalp_min_signal_confidence >= 0.55 &&
+              s.lead_lag_scalp_min_signal_confidence <= 0.92))
+            throw std::runtime_error("lead_lag_scalp_min_signal_confidence must be 0.55..0.92");
+        const std::vector<int> required_horizons = s.lead_lag_scalp_horizon_s == 0
+            ? std::vector<int>{300, 900}
+            : std::vector<int>{s.lead_lag_scalp_horizon_s};
+        for (const int horizon : required_horizons)
+            if (std::find(c.polymarket.universe_horizons_seconds.begin(),
+                          c.polymarket.universe_horizons_seconds.end(), horizon) ==
+                c.polymarket.universe_horizons_seconds.end())
+                throw std::runtime_error("lead/lag scalp horizon must be enabled in polymarket.universe_horizons_seconds");
+        if (!(s.lead_lag_scalp_min_cb_move_bps > 0.0 && s.lead_lag_scalp_min_cb_move_bps <= 100.0) ||
+            !(s.lead_lag_scalp_min_cb_lead_bps > 0.0 && s.lead_lag_scalp_min_cb_lead_bps <= 100.0) ||
+            !(s.lead_lag_scalp_max_oracle_counter_bps >= 0.0 && s.lead_lag_scalp_max_oracle_counter_bps <= 100.0) ||
+            !(s.lead_lag_scalp_min_net_edge_pct >= 0.0 && s.lead_lag_scalp_min_net_edge_pct <= 50.0) ||
+            !(s.lead_lag_scalp_min_price >= 0.03 && s.lead_lag_scalp_min_price < s.lead_lag_scalp_max_price && s.lead_lag_scalp_max_price <= 0.97) ||
+            !(s.lead_lag_scalp_max_spread_pct > 0.0 && s.lead_lag_scalp_max_spread_pct <= 100.0) ||
+            s.lead_lag_scalp_max_book_age_ms < 100 || s.lead_lag_scalp_max_book_age_ms > 10000 ||
+            s.lead_lag_scalp_stop_entry_secs < 15 || s.lead_lag_scalp_stop_entry_secs >= 900 ||
+            s.lead_lag_scalp_stop_entry_5m_secs < 15 || s.lead_lag_scalp_stop_entry_5m_secs >= 300 ||
+            s.lead_lag_scalp_stop_entry_15m_secs < 15 || s.lead_lag_scalp_stop_entry_15m_secs >= 900 ||
+            s.lead_lag_scalp_flatten_secs <= 0 ||
+            s.lead_lag_scalp_flatten_5m_secs < 15 ||
+            s.lead_lag_scalp_flatten_5m_secs > s.lead_lag_scalp_stop_entry_5m_secs ||
+            s.lead_lag_scalp_flatten_15m_secs < 15 ||
+            s.lead_lag_scalp_flatten_15m_secs > s.lead_lag_scalp_stop_entry_15m_secs ||
+            s.lead_lag_scalp_max_entries_per_window < 1 || s.lead_lag_scalp_max_entries_per_window > 100 ||
+            !(s.lead_lag_scalp_order_usd > 0.0) ||
+            !(s.lead_lag_scalp_profit_target_pct >= 1.0 && s.lead_lag_scalp_profit_target_pct <= 100.0) ||
+            !(s.lead_lag_scalp_hard_stop_pct >= 0.0 && s.lead_lag_scalp_hard_stop_pct <= 90.0) ||
+            s.lead_lag_scalp_hard_stop_ticks < 0 || s.lead_lag_scalp_hard_stop_ticks > 1000 ||
+            !(s.lead_lag_scalp_rearm_bps >= 0.0 && s.lead_lag_scalp_rearm_bps < s.lead_lag_scalp_min_cb_lead_bps))
+            throw std::runtime_error("invalid Coinbase lead/lag scalp timing, edge, sizing, price, or risk settings");
+        if (!s.predictor_mode)
+            throw std::runtime_error("Coinbase lead/lag scalp requires predictor_mode=true for independent model confirmation");
+    }
+    if (s.late_window_sniper_enabled) {
+        if (!(s.late_window_sniper_min_secs >= 1 &&
+              s.late_window_sniper_min_secs < s.late_window_sniper_max_secs &&
+              s.late_window_sniper_max_secs <= 45) ||
+            !(s.late_window_sniper_min_secs_5m >= 1 &&
+              s.late_window_sniper_min_secs_5m < s.late_window_sniper_max_secs_5m &&
+              s.late_window_sniper_max_secs_5m <= 45) ||
+            !(s.late_window_sniper_min_secs_15m >= 1 &&
+              s.late_window_sniper_min_secs_15m < s.late_window_sniper_max_secs_15m &&
+              s.late_window_sniper_max_secs_15m <= 45) ||
+            !(s.late_window_sniper_min_price >= 0.82 &&
+              s.late_window_sniper_min_price < s.late_window_sniper_max_price &&
+              s.late_window_sniper_max_price <= 0.97) ||
+            !(s.late_window_sniper_min_net_edge_pct >= 0.0 &&
+              s.late_window_sniper_min_net_edge_pct <= 25.0) ||
+            !(s.late_window_sniper_order_usd > 0.0) ||
+            s.late_window_sniper_max_entries_per_window < 1 ||
+            s.late_window_sniper_max_entries_per_window > 10 ||
+            s.late_window_sniper_hard_stop_ticks < 0 ||
+            s.late_window_sniper_hard_stop_ticks > 1000)
+            throw std::runtime_error("invalid late-window settlement sniper settings (entry cap must be 1..10 per asset/window)");
+        const bool has_supported_horizon = std::any_of(
+            c.polymarket.universe_horizons_seconds.begin(),
+            c.polymarket.universe_horizons_seconds.end(),
+            [](int h) { return h == 300 || h == 900; });
+        if (!has_supported_horizon)
+            throw std::runtime_error("late-window sniper requires a 5m or 15m market universe");
+    }
     auto* rs = tbl["risk"].as_table();
     auto& r = c.risk;
     r.max_order_usd             = get_or<double>(rs, "max_order_usd",             r.max_order_usd);

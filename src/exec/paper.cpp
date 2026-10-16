@@ -51,6 +51,19 @@ OrderResult PaperExecutor::submit(
         r.reject_class = OrderResult::RejectClass::RiskCap;
         return r; // Never overwrite a previously reserved order's state.
     }
+    const bool authorized_stop_fak =
+        req.stop_loss_fak_authorized &&
+        (req.source == "CB_LEAD_SCALP_HARD_STOP" ||
+         req.source == "LATE_SETTLEMENT_HARD_STOP") &&
+        req.dir == OrderDir::Sell;
+    if (req.execution_mode == ExecutionMode::Taker && !authorized_stop_fak) {
+        r.status = "rejected";
+        r.terminal = true;
+        r.reject_class = OrderResult::RejectClass::RiskCap;
+        r.reject_reason = "taker execution disabled except for an authorized tick hard stop";
+        if (journal_.on_order) journal_.on_order(req, r);
+        return r;
+    }
     // Risk checks
     if (req.dir == OrderDir::Buy) {
         if (req.size_usd <= 0) {
@@ -106,6 +119,13 @@ OrderResult PaperExecutor::submit(
                 if (exec_price <= 0 || exec_price >= a.price - 1e-9) {
                     r.reject_class = OrderResult::RejectClass::PostOnlyCross;
                     r.reject_reason = "no passive maker price available";
+                    goto done;
+                }
+                if (req.maker_min_price > 0.0 &&
+                    exec_price + 1e-9 < req.maker_min_price) {
+                    r.reject_reason = fmt::format(
+                        "maker quote {:.3f} below required minimum {:.3f}",
+                        exec_price, req.maker_min_price);
                     goto done;
                 }
                 r.order_shares = std::floor((req.size_usd / exec_price) * 100.0) / 100.0;
@@ -247,7 +267,9 @@ std::size_t PaperExecutor::maintain_open_orders(
     const std::function<const OrderBook*(const std::string&, ShareSide)>& book_lookup,
     std::int64_t now_ms) {
     struct Action { OpenOrder order; double quantity; bool terminal; bool fallback; };
+    struct Reprice { OrderRequest req; std::string client_order_id; double price; double shares; };
     std::vector<Action> actions;
+    std::vector<Reprice> reprices;
     {
         std::lock_guard<std::mutex> lk(open_mu_);
         for (auto it = open_orders_.begin(); it != open_orders_.end();) {
@@ -291,6 +313,7 @@ std::size_t PaperExecutor::maintain_open_orders(
                     if (o.req.dir==OrderDir::Buy)
                         o.shares=std::floor(o.shares*o.price/px*100.0)/100.0;
                     o.price=px;
+                    reprices.push_back({o.req,o.client_order_id,px,o.shares});
                 }
                 o.last_reprice_ms=now_ms;
             }
@@ -324,6 +347,9 @@ std::size_t PaperExecutor::maintain_open_orders(
             submit(req,book_lookup);
         }
     }
+    for (const auto& r:reprices)
+        if (journal_.on_reprice)
+            journal_.on_reprice(r.req,r.client_order_id,r.price,r.shares);
     return actions.size();
 }
 

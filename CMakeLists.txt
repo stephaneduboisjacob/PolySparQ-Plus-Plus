@@ -64,6 +64,7 @@ add_library(vp_core STATIC
     src/engine/pm_flow_buffer.cpp
     src/engine/tick_buffer.cpp
     src/engine/scalp_manager.cpp
+    src/engine/window_bots.cpp
     src/engine/predictor.cpp
     src/risk/risk_manager.cpp
     src/sign/eip712.cpp

@@ -39,8 +39,14 @@ public:
     PolymarketRest(std::string clob_url, std::string gamma_url);
     ~PolymarketRest();
 
-    // Returns supported BTC/ETH/SOL/XRP UP-DOWN markets across 5m/15m/1h/4h/24h.
-    std::vector<PmMarket> discover_updown_markets();
+    // Returns active and prewarmed UP/DOWN markets in the configured universe.
+    // Short-window markets are fetched by exact epoch slug so they are not lost
+    // behind Gamma's general-event pagination.
+    std::vector<PmMarket> discover_updown_markets(
+        const std::vector<int>& horizons_seconds,
+        const std::vector<std::string>& blocked_assets,
+        int prewarm_ahead_minutes,
+        int max_windows_per_series);
 
     // Fetches order books for stale tokens via CLOB REST endpoint.
     // Returns vector of BookUpdate for each token that responded.

@@ -297,12 +297,15 @@ h2.sec .cnt{font-size:10px;color:#8190a1;letter-spacing:0}
 .kpi .bar{height:5px;background:#202b37}
 .kpi .bar i{background:linear-gradient(90deg,var(--orange),#ffbd65)}
 .mcard{background:linear-gradient(150deg,#141f2a,#101720);border-color:rgba(105,126,147,.2);border-radius:12px;padding:15px;transition:transform .16s,border-color .16s,box-shadow .16s}
-.mcard.board-card.board-direction-up{background:linear-gradient(145deg,rgba(11,111,66,.82),rgba(8,47,34,.94) 56%,rgba(12,27,27,.98));border:2px solid #39f29a;box-shadow:inset 0 0 34px rgba(30,255,145,.13),0 0 22px rgba(35,235,129,.22)}
-.mcard.board-card.board-direction-down{background:linear-gradient(145deg,rgba(142,30,49,.84),rgba(62,20,34,.95) 56%,rgba(28,19,29,.98));border:2px solid #ff536b;box-shadow:inset 0 0 34px rgba(255,50,84,.14),0 0 22px rgba(255,65,92,.23)}
+.mcard.board-card.board-direction-up{background:linear-gradient(145deg,#087f4b 0%,#05623f 55%,#0c3b31 100%);border:2px solid #65ffb4;box-shadow:inset 0 1px 0 rgba(255,255,255,.16),inset 0 -22px 44px rgba(0,20,13,.2),0 0 26px rgba(35,235,129,.32)}
+.mcard.board-card.board-direction-down{background:linear-gradient(145deg,#c23850 0%,#96263f 55%,#571d34 100%);border:2px solid #ff91a1;box-shadow:inset 0 1px 0 rgba(255,255,255,.15),inset 0 -22px 44px rgba(26,0,8,.2),0 0 26px rgba(255,65,92,.34)}
 .mcard.board-card.board-direction-wait{background:linear-gradient(145deg,#202936,#131b25);border:1px solid #738092;box-shadow:inset 0 0 24px rgba(145,160,178,.08)}
-.mcard.board-card.board-direction-up::before{background:#39f29a;width:5px;opacity:1}.mcard.board-card.board-direction-down::before{background:#ff536b;width:5px;opacity:1}.mcard.board-card.board-direction-wait::before{background:#8996a6}
-.mcard.board-card.board-direction-up:hover{border-color:#8cffc5;box-shadow:inset 0 0 40px rgba(30,255,145,.18),0 0 28px rgba(35,235,129,.32)}
-.mcard.board-card.board-direction-down:hover{border-color:#ff9aa8;box-shadow:inset 0 0 40px rgba(255,50,84,.2),0 0 28px rgba(255,65,92,.33)}
+.mcard.board-card.board-direction-up::before{background:#65ffb4;width:7px;opacity:1}.mcard.board-card.board-direction-down::before{background:#ff91a1;width:7px;opacity:1}.mcard.board-card.board-direction-wait::before{background:#8996a6}
+.mcard.board-card.board-direction-up .mh .tag.long{color:#eafff4;background:rgba(0,37,22,.64);border-color:rgba(173,255,218,.38)}
+.mcard.board-card.board-direction-down .mh .tag.short{color:#fff0f2;background:rgba(54,5,17,.58);border-color:rgba(255,192,201,.4)}
+.mcard.board-card .board-forecast{color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.45)}
+.mcard.board-card.board-direction-up:hover{border-color:#b1ffd7;box-shadow:inset 0 1px 0 rgba(255,255,255,.2),inset 0 -22px 44px rgba(0,20,13,.16),0 0 34px rgba(35,235,129,.44)}
+.mcard.board-card.board-direction-down:hover{border-color:#ffc0c9;box-shadow:inset 0 1px 0 rgba(255,255,255,.19),inset 0 -22px 44px rgba(26,0,8,.16),0 0 34px rgba(255,65,92,.45)}
 .board-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-5px 0 10px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:rgba(13,20,29,.88)}
 .board-toolbar label{display:flex;align-items:center;gap:5px;font-size:10px;color:#b6c1cd}.board-toolbar .group-label{font-size:9px;letter-spacing:.08em;color:#738297;text-transform:uppercase;margin-right:2px}.board-toolbar select{font-size:11px;min-height:30px}.board-window-toggles{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .board-method{margin:0 0 12px;padding:10px 13px;border:1px solid var(--line);border-radius:10px;background:rgba(12,18,27,.8);color:#aebac7;font-size:11px;line-height:1.6}.board-method summary{cursor:pointer;color:#dce6ef;font-weight:650}.board-method code{color:#9be2ff;white-space:normal}
@@ -544,10 +547,10 @@ pre,code{font-family:var(--mono)}
         <label><input type="checkbox" data-board-window="900:CURRENT" checked onchange="boardPrefsChanged()"> 15m live</label>
         <label><input type="checkbox" data-board-window="900:NEXT" checked onchange="boardPrefsChanged()"> 15m next</label>
       </div>
-      <span class="group-label">Refresh</span><select id="boardRefreshFilter" aria-label="Prediction refresh rate" onchange="boardPrefsChanged()"><option value="2">2 sec</option><option value="5" selected>5 sec</option><option value="10">10 sec</option><option value="15">15 sec</option></select>
+      <span class="tag" aria-live="polite">AUTO · server updates</span>
       <button onclick="armBoardAlerts()" id="boardAlertArm">Enable sound + desktop alerts</button><button class="primary" onclick="loadBoard(true)">Refresh now ↻</button>
     </div>
-    <div class="sub">Green cards call UP; red cards call DOWN. Click a card to open its Polymarket event. Alerts are candidate edges from the unvalidated shadow model and need a fresh manual book check.</div>
+    <div class="sub">Green cards show the UP forecast; red cards show the DOWN forecast. Gray cards are waiting for fresh inputs. Click a card to open its Polymarket event. Alerts are candidate edges from the unvalidated shadow model and need a fresh manual book check.</div>
     <div class="card" style="margin-bottom:12px;padding:8px 14px;display:flex;gap:18px;flex-wrap:wrap;font-size:11px" id="boardStats"></div>
     <details class="board-method"><summary>How a prediction is calculated · inputs · what the colors mean</summary><div style="margin-top:8px"><p id="boardMethodText">Loading the current model specification…</p><p style="margin-top:7px"><b>Sources:</b> Chainlink spot/opening reference (including supported settlement TWAP), completed Binance 1-minute candles, live Coinbase and Binance prices, Binance taker trades, fresh Polymarket UP/DOWN books, and asset-matched headline sentiment. Every card lists source ages, computed features and the signal adjustments used by the shadow model.</p><p style="margin-top:7px"><b>Color:</b> green means UP is the current primary direction; red means DOWN; grey means the forecast is waiting for valid inputs. A bright lead/lag popup requires a fresh venue move, a fresh two-sided book, at least a 5 point model/market gap, and at least 2 points of stressed net edge after the configured fee and 0.5¢ slippage reserve. Those alerts remain experimental and are not a guarantee or an automatic order.</p></div></details>
     <div class="grid g3" id="boardGrid"></div>
@@ -647,32 +650,27 @@ const fmt$=v=>(v>=0?'+':'−')+'$'+Math.abs(Number(v)||0).toFixed(2);
 const cl=v=>Number(v)>0.005?'pos':Number(v)<-0.005?'neg':'';
 const edgeText=v=>v==null?'—':`${Number(v)>0?'+':''}${(100*Number(v)).toFixed(2)}¢`;
 const mono=v=>`<span class="${typeof v==='number'?cl(v):''}">${typeof v==='number'?fmt$(v):esc(v)}</span>`;
-let S={inst:localStorage.getItem('v4scope')||'',knobs:null,dirty:{},events:[],pred:null,timer:null,t0:0,user:null,boardLoading:false,boardForceQueued:false,boardAudioArmed:false,boardAudioContext:null,boardAlertSeen:new Set()};
+let S={inst:localStorage.getItem('v4scope')||'',knobs:null,dirty:{},events:[],pred:null,timer:null,t0:0,user:null,boardLoading:false,boardForceQueued:false,boardAudioArmed:false,boardAudioContext:null,boardAlertSeen:new Set(),boardVersion:0};
 const boardWindowKeys=['300:CURRENT','300:NEXT','900:CURRENT','900:NEXT'];
 function readBoardPrefs(){
   try{
     const saved=JSON.parse(localStorage.getItem('v4BoardWindows')||'null');
     const asset=localStorage.getItem('v4BoardAsset')||'ALL';
-    const interval=Number(localStorage.getItem('v4BoardInterval')||5);
     return {asset:['ALL','BTC','ETH','SOL','XRP'].includes(asset)?asset:'ALL',
-      interval:[2,5,10,15].includes(interval)?interval:5,
       windows:new Set(Array.isArray(saved)?saved.filter(x=>boardWindowKeys.includes(x)):boardWindowKeys)};
-  }catch(e){return {asset:'ALL',interval:5,windows:new Set(boardWindowKeys)}}
+  }catch(e){return {asset:'ALL',windows:new Set(boardWindowKeys)}}
 }
 let boardPrefs=readBoardPrefs(),boardRefreshTimer=null;
 function syncBoardControls(){
   if($('boardAssetFilter'))$('boardAssetFilter').value=boardPrefs.asset;
-  if($('boardRefreshFilter'))$('boardRefreshFilter').value=String(boardPrefs.interval);
   document.querySelectorAll('[data-board-window]').forEach(x=>x.checked=boardPrefs.windows.has(x.dataset.boardWindow));
 }
 function boardPrefsChanged(){
   boardPrefs.asset=$('boardAssetFilter').value;
-  boardPrefs.interval=Number($('boardRefreshFilter').value);
   boardPrefs.windows=new Set([...document.querySelectorAll('[data-board-window]:checked')].map(x=>x.dataset.boardWindow));
   localStorage.setItem('v4BoardAsset',boardPrefs.asset);
-  localStorage.setItem('v4BoardInterval',String(boardPrefs.interval));
   localStorage.setItem('v4BoardWindows',JSON.stringify([...boardPrefs.windows]));
-  loadBoard(true);
+  loadBoard(false);
 }
 function boardAlertText(candidate,card){
   const leads=(candidate.lead_sources||[]).map(x=>`${x.source} ${Number(x.move_bps)>0?'+':''}${Number(x.move_bps).toFixed(1)}bp`).join(' · ');
@@ -746,7 +744,7 @@ function scheduleBoardRefresh(delay){
   clearTimeout(boardRefreshTimer);boardRefreshTimer=null;
   const active=(location.hash||'#overview').slice(1)==='board'||S.boardAudioArmed;
   if(!active||document.hidden)return;
-  boardRefreshTimer=setTimeout(()=>loadBoard(false),delay==null?boardPrefs.interval*1000:delay);
+  boardRefreshTimer=setTimeout(()=>loadBoard(false),delay==null?0:delay);
 }
 syncBoardControls();
 async function jf(u,opt){const r=await fetch(u,opt);if(r.status===401){document.body.innerHTML='<div style="min-height:100vh;background:url(/assets_v4/hero-login.webp?v=5.1) center/cover no-repeat,var(--bg);display:grid;place-items:center"><div style="background:rgba(10,14,21,.88);border:1px solid var(--line2);border-radius:14px;padding:38px 48px;text-align:center"><img src="/assets_v4/polysparq_logo_full_with_name.webp?v=5.1" alt="PolySparQ++" style="width:260px;max-width:70vw"><h2 style="margin:18px 0 10px">Session expired</h2><p style="color:var(--mut)"><a href="/">Sign in</a>, then return to <a href="/v5">/v5</a>.</p></div></div>';throw new Error('auth')}const payload=await r.json().catch(()=>({}));if(!r.ok)throw new Error(payload.error||u+' '+r.status);if(!opt?.method||opt.method.toUpperCase()==='GET')S.t0=Date.now();return payload}
@@ -1471,10 +1469,12 @@ async function edHistory(){
 async function loadBoard(force){
   if(S.boardLoading){if(force)S.boardForceQueued=true;return}
   S.boardLoading=true;
+  let retryDelay=0;
   try{
-    const params=new URLSearchParams({interval:String(boardPrefs.interval)});if(force)params.set('force','1');
+    const params=new URLSearchParams({after_version:String(S.boardVersion||0),wait:'2'});if(force)params.set('force','1');
     const r=await jf('/api/manual_predictions?'+params.toString());
     S.pred=r;
+    S.boardVersion=Number(r.producer_version||S.boardVersion||0);
     syncBoardControls();
     const all=(r.cards||[]).flatMap(c=>[c,c.next_window].filter(Boolean));
     const cards=all.filter(c=>(boardPrefs.asset==='ALL'||c.asset===boardPrefs.asset)&&boardPrefs.windows.has(`${c.horizon_seconds}:${c.period}`));
@@ -1492,10 +1492,11 @@ async function loadBoard(force){
       ['RESOLVED',q.resolved_markets||0],
       ['SHADOW CALIBRATION',cal?`${cal.settled} settled · ${cal.active?'ACTIVE':'warming'}`:'—']
     ].map(([k,v])=>`<span style="color:var(--dim)">${k}</span><b>${v}</b>`).join('');
-    $('boardMeta').textContent=(r.model_version||'')+' · '+new Date(r.generated_at||Date.now()).toLocaleTimeString()+' · '+(r.stale?'STALE · WAIT':Number(r.snapshot_age_s||0).toFixed(1)+'s old')+' · refresh '+boardPrefs.interval+'s · '+Number(r.compute_ms||0)+'ms compute';
+    const staleCards=cards.filter(c=>c.model_status==='stale_data').length;
+    $('boardMeta').textContent=(r.model_version||'')+' · '+new Date(r.generated_at||Date.now()).toLocaleTimeString()+' · '+(r.stale?'SNAPSHOT STALE':`${Number(r.snapshot_age_s||0).toFixed(1)}s snapshot`)+(staleCards?` · ${staleCards} card${staleCards===1?'':'s'} waiting on stale inputs`:' · inputs checked live')+' · server tick '+Number(r.refresh_interval_s||1).toFixed(1)+'s · '+Number(r.compute_ms||0)+'ms compute';
     $('boardMethodText').textContent=r.disclaimer||'Prediction method unavailable.';
     $('boardGrid').innerHTML=cards.map(c=>{
-      const ready2=['ready','provisional'].includes(c.model_status);const dir=c.direction||'WAIT';
+      const ready2=['ready','provisional'].includes(c.model_status);const reportedDir=c.direction==='UP'||c.direction==='DOWN'?c.direction:'WAIT';const dir=ready2?reportedDir:'WAIT';
       const ask=dir==='UP'?c.polymarket_up_price:c.polymarket_down_price;
       const p=(c.up_probability??0.5)*100;
       const shadow=Number(c.experimental_up_probability??c.up_probability??0.5)*100;
@@ -1509,9 +1510,9 @@ async function loadBoard(force){
       const selectedOutcome=c.market_outcome_indices?.[dir];
       return `<article class="mcard board-card board-direction-${tint}" style="cursor:pointer" data-url="${esc(c.market_url||'')}" data-outcome-index="${Number.isInteger(selectedOutcome)?selectedOutcome:''}" onclick="openBoardMarket(this)">
       <div class="mh"><img src="/assets_v3/medals/${esc(String(c.asset).toLowerCase())}.png" style="width:22px;height:22px;border-radius:50%" onerror="this.remove()"><span class="as">${esc(c.asset)} ${c.horizon_seconds/60}m</span>
-      <span class="tag ${dir==='UP'?'long':dir==='DOWN'?'short':''}" style="font-weight:800">${ready2?`${esc(dir)} · ${tint==='up'?'GREEN':'RED'}`:'WAIT'}</span>${c.period==='NEXT'?'<span class="tag">NEXT</span>':''}
+      <span class="tag ${dir==='UP'?'long':dir==='DOWN'?'short':''}" style="font-weight:800">${ready2?`${esc(dir)} FORECAST · ${tint==='up'?'GREEN':'RED'}`:'WAIT'}</span>${c.period==='NEXT'?'<span class="tag">NEXT</span>':''}
       <span class="tag" style="margin-left:auto">${c.period==='NEXT'?fmtSecs3(c.seconds_until_open)+' to open':fmtSecs3(c.seconds_left)+' left'}</span></div>
-      <div class="mrow"><span style="font-size:22px;font-family:var(--mono);font-weight:800">${ready2?`${esc(dir)} · ${(100*(c.chance??Math.max(Number(c.up_probability),1-Number(c.up_probability)))).toFixed(1)}%`:'WAITING FOR FRESH INPUTS'}</span></div>
+      <div class="mrow"><span class="board-forecast" style="font-size:22px;font-family:var(--mono);font-weight:800">${ready2?`${esc(dir)} FORECAST · ${(100*(c.chance??Math.max(Number(c.up_probability),1-Number(c.up_probability)))).toFixed(1)}%`:'WAITING FOR FRESH INPUTS'}</span></div>
       <div class="gd" style="height:7px;border-radius:4px;background:linear-gradient(90deg,rgba(255,77,95,.78),rgba(139,151,166,.3) 50%,rgba(46,204,143,.78));position:relative;margin:7px 0"><i style="position:absolute;top:-3px;width:3px;height:13px;background:#fff;box-shadow:0 0 8px #fff;left:${ready2?p:50}%"></i></div>
       <div class="mrow"><span>primary UP / CLOB midpoint</span><b>${pxv(c.up_probability)} / ${pxv(c.polymarket_up)}</b></div>
       <div class="mrow"><span>shadow ensemble UP / side</span><b>${pxv(c.experimental_up_probability)} · ${esc(shadowDir)}</b></div>
@@ -1528,10 +1529,10 @@ async function loadBoard(force){
       <div class="mrow"><span>fee / top ask depth</span><b>${c.fee_rate>=0?(100*c.fee_rate).toFixed(2)+'%':'unknown'} / ${c.predicted_ask_depth==null?'—':Number(c.predicted_ask_depth).toFixed(1)+' sh'}</b></div>
       <a class="pred-market-link" href="${esc(c.market_url||'#')}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open this Polymarket market ↗</a>
       </article>`}).join('')||'<div class="empty">No windows match these filters, or the board is warming up.</div>';
-  }catch(e){$('boardGrid').innerHTML=`<div class="empty">prediction feed unavailable: ${esc(e.message)}</div>`}
+  }catch(e){retryDelay=1000;$('boardGrid').innerHTML=`<div class="empty">prediction feed unavailable: ${esc(e.message)}</div>`}
   finally{
     S.boardLoading=false;
-    if(S.boardForceQueued){S.boardForceQueued=false;setTimeout(()=>loadBoard(true),0)}else scheduleBoardRefresh();
+    if(S.boardForceQueued){S.boardForceQueued=false;setTimeout(()=>loadBoard(true),0)}else scheduleBoardRefresh(retryDelay);
   }
 }
 /* PolyTron */

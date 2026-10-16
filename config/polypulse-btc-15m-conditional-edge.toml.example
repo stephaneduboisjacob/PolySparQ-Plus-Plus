@@ -1,0 +1,79 @@
+# Isolated PAPER research overlay for a conservative conditional-settlement
+# probability strategy. Merge into a local full config; retain its DB/feed
+# endpoints. This is an experiment, not a profitability claim.
+
+[runtime]
+mode = "paper"
+instance_label = "btc-15m-conditional-edge-candidate"
+journal_dir = "./journal/btc-15m-conditional-edge-candidate"
+
+[polymarket]
+universe_horizons_seconds = [900]
+universe_max_windows_per_series = 10
+universe_max_markets = 40
+
+[strategy.hot]
+# Deliberately do not auto-start order generation. Enable only after the local
+# merged config and isolated PAPER service have been reviewed.
+autopilot_on_start = false
+autopilot_startup_delay_secs = 30
+blocked_assets = ["ETH", "SOL", "XRP"]
+
+# One BTC 15m settlement-probability entry per market; no unrelated strategy
+# path is allowed to add exposure in this candidate instance.
+recycler_mode = "off"
+predictor_mode = false
+window_predictor_mode = false
+oracle_lag_mode = false
+coinbase_lead_mode = false
+endgame_mode = false
+scalp_v2_enabled = false
+scalp_v3_enabled = false
+momentum_scalp_enabled = false
+lead_lag_scalp_enabled = false
+late_window_sniper_enabled = true
+
+late_window_sniper_min_secs_15m = 15
+late_window_sniper_max_secs_15m = 45
+late_window_sniper_min_price = 0.82
+late_window_sniper_max_price = 0.90
+# Conservative forecast must clear the passive quote by at least 10 percentage
+# points. This is a model hurdle, not a guaranteed realized edge.
+late_window_sniper_min_net_edge_pct = 10.0
+late_window_sniper_order_usd = 5.0
+late_window_sniper_max_entries_per_window = 1
+late_window_sniper_hard_stop_ticks = 25
+
+# Stay passive at the bid; cap order lifetime to limit stale-quote selection.
+entry_order_mode = "maker"
+maker_improve_ticks = 0
+maker_reprice_ms = 250
+maker_poll_ms = 250
+maker_max_age_ms = 5000
+maker_cancel_before_close_ms = 15000
+
+# Stay aligned with the engine-reported $5 minimum and hard-cap exposure.
+per_click_size_usd = 5.0
+min_order_usd = 5.0
+min_size_usd = 5.0
+max_size_usd = 5.0
+max_per_window_usd = 5.0
+max_entries_per_window = 1
+
+[risk]
+min_order_usd = 5.0
+max_order_usd = 5.0
+max_per_window_usd = 5.0
+max_deployed_usd = 10.0
+
+[data_collection]
+# The shared feed collector owns raw oracle/exchange tick writes. Capture the
+# candidate's own decision context for later calibration and execution review.
+oracle_ticks_enabled = false
+binance_ticks_enabled = false
+coinbase_ticks_enabled = false
+window_events_enabled = true
+features_enabled = true
+book_snapshots_enabled = true
+pm_trades_enabled = true
+features_write_interval_ms = 1000

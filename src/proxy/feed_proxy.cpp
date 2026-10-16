@@ -204,14 +204,16 @@ public:
             }
             dedup_.emplace(msg, now);
         }
-        fwd_.fetch_add(1, std::memory_order_relaxed);
-        if (upstream_) upstream_->send(msg);
+        if (upstream_ && upstream_up()) {
+            fwd_.fetch_add(1, std::memory_order_relaxed);
+            upstream_->send(msg);
+        }
     }
 
     // Recycle a half-dead upstream: a websocket that stops delivering frames
     // without ever closing (the RTDS outage of Sep 06 16:42-16:47 starved the
-    // whole fleet while the socket looked healthy). WsClient's own reconnect
-    // logic owns recovery once the socket is actually closed.
+    // whole fleet while the socket looked healthy). On a real disconnect,
+    // on_upstream_state() also drops downstreams so they re-subscribe.
     void check_stall() {
         if (!upstream_up_.load(std::memory_order_relaxed)) return;
         const int64_t last = last_upstream_frame_ms_.load(std::memory_order_relaxed);
@@ -224,6 +226,12 @@ public:
             spdlog::warn("{}: upstream silent for {:.0f}s — forcing reconnect",
                          name_, (now - last) / 1000.0);
             last_upstream_frame_ms_.store(now, std::memory_order_relaxed);
+            // stop() is an intentional shutdown, so WsClient does not report
+            // an upstream-disconnected state. Drop downstreams explicitly:
+            // otherwise their one-time subscribe message is lost when the
+            // upstream socket is recreated, leaving a connected but unsubscribed
+            // RTDS feed until a bot happens to reconnect on its own.
+            reset_downstream_clients("upstream stalled");
             if (upstream_) {
                 upstream_->stop();
                 upstream_->start();
@@ -414,15 +422,23 @@ private:
         }
         upstream_up_.store(false, std::memory_order_relaxed);
         spdlog::warn("{}: upstream {}", name_, state);
+        reset_downstream_clients("upstream lost");
+    }
+
+    void reset_downstream_clients(const char* reason) {
+        upstream_up_.store(false, std::memory_order_relaxed);
         clear_market_state();
         {
             std::lock_guard<std::mutex> lk(dedup_mu_);
             dedup_.clear();
         }
-        // Cut every client loose; their reconnect logic owns re-subscription.
+        // Their reconnect logic owns re-subscription and reseeds feed state.
         std::vector<std::shared_ptr<ClientSession>> snapshot;
         { std::lock_guard<std::mutex> lk(mu_); snapshot.swap(sessions_); }
-        for (auto& s : snapshot) s->close("upstream lost");
+        if (!snapshot.empty())
+            spdlog::warn("{}: reconnecting {} downstream client(s) ({})",
+                         name_, snapshot.size(), reason);
+        for (auto& s : snapshot) s->close(reason);
     }
 
     bool open_acceptor() {

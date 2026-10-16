@@ -113,7 +113,7 @@ struct StrategyHot {
     double recycler_min_range = 0.08;
     double recycler_max_window_loss = 0.0;   // disabled by default for paper research
     double recycler_max_session_loss = 0.0;  // disabled by default for paper research
-    bool recycler_allow_taker_exit = false; // legacy key; late taker policy uses recycler_late_taker_exit_enabled
+    bool recycler_allow_taker_exit = false; // legacy key; late-window exit uses recycler_late_taker_exit_enabled
     // Settlement-aware Recycler controls. The BTC reference and strike are
     // required; missing/stale inputs fail closed rather than guessing.
     double recycler_min_settlement_edge_pct = 10.0;
@@ -134,12 +134,15 @@ struct StrategyHot {
     int recycler_settlement_entry_secs = 15;
     double recycler_settlement_entry_min_price = 0.90;
     double recycler_settlement_entry_max_price = 0.98;
+    // Dedicated settlement-only profile: skip ordinary Recycler cycle entries
+    // and require the conservative independent forecast edge before a late bid.
+    bool recycler_settlement_only = false;
     // Entry-shaping and late-exit refinements (2026-09-28 study). Defaults
     // preserve the previous behavior exactly.
     int recycler_entry_open_grace_secs = 0;       // skip entries this long after window open
     double recycler_first_entry_scale_pct = 100.0; // click scale for a window's first cycle
-    double recycler_late_taker_min_bid = 0.0;     // below this bid, ride to settlement instead of crossing
-    std::string entry_order_mode   = "taker"; // taker | maker | hybrid
+    double recycler_late_taker_min_bid = 0.0;     // legacy threshold: below it, ride to settlement instead of posting a late maker exit
+    std::string entry_order_mode   = "maker"; // fixed post-only LIMIT-MAKER routing
     int    maker_improve_ticks     = 0;
     int    maker_reprice_ms        = 750;
     int    maker_poll_ms           = 500;
@@ -361,6 +364,53 @@ struct StrategyHot {
     double scalp_v3_runner_min_profit    = 0.12;
     int    scalp_v3_runner_max_secs_left = 75;
     double scalp_v3_runner_velocity_floor= -0.0003;
+
+    // ── BTC Coinbase → Chainlink lead/lag window scalper ──
+    // Independent strategy path for the new 5m and 15m bot instances. It
+    // requires a fresh Coinbase impulse that is not yet reflected in the
+    // official Chainlink reference, then checks a conservative, Coinbase-
+    // adjusted settlement forecast before quoting a passive Polymarket bid.
+    bool   lead_lag_scalp_enabled = false;
+    int    lead_lag_scalp_horizon_s = 0;       // 0 = both supported windows
+    double lead_lag_scalp_min_signal_confidence = 0.55;
+    double lead_lag_scalp_min_cb_move_bps = 0.5;
+    double lead_lag_scalp_min_cb_lead_bps = 0.5;
+    double lead_lag_scalp_max_oracle_counter_bps = 1.5;
+    double lead_lag_scalp_min_net_edge_pct = 1.5;
+    double lead_lag_scalp_min_price = 0.03;
+    double lead_lag_scalp_max_price = 0.86;
+    double lead_lag_scalp_max_spread_pct = 8.0;
+    int    lead_lag_scalp_max_book_age_ms = 1000;
+    int    lead_lag_scalp_stop_entry_secs = 45;
+    int    lead_lag_scalp_stop_entry_5m_secs = 90;
+    int    lead_lag_scalp_stop_entry_15m_secs = 270;
+    int    lead_lag_scalp_flatten_secs = 30;
+    int    lead_lag_scalp_flatten_5m_secs = 90;
+    int    lead_lag_scalp_flatten_15m_secs = 270;
+    int    lead_lag_scalp_max_entries_per_window = 24;
+    double lead_lag_scalp_order_usd = 5.0;
+    double lead_lag_scalp_profit_target_pct = 15.0;
+    double lead_lag_scalp_hard_stop_pct = 12.0;
+    int    lead_lag_scalp_hard_stop_ticks = 0; // 0 disables the entry-relative tick stop
+    bool   lead_lag_scalp_reversal_exit_enabled = true;
+    double lead_lag_scalp_rearm_bps = 0.25;
+
+    // ── Late-window settlement sniper ──
+    // Quote-band paper limit buys; qualifying same-side clips may accumulate
+    // while filled shares are held to settlement.
+    bool   late_window_sniper_enabled = false;
+    int    late_window_sniper_min_secs = 1;
+    int    late_window_sniper_max_secs = 45;
+    int    late_window_sniper_min_secs_5m = 1;
+    int    late_window_sniper_max_secs_5m = 45;
+    int    late_window_sniper_min_secs_15m = 1;
+    int    late_window_sniper_max_secs_15m = 45;
+    double late_window_sniper_min_price = 0.82;
+    double late_window_sniper_max_price = 0.97;
+    double late_window_sniper_min_net_edge_pct = 3.0;
+    double late_window_sniper_order_usd = 5.0;
+    int    late_window_sniper_max_entries_per_window = 5;
+    int    late_window_sniper_hard_stop_ticks = 0; // 0 disables the entry-relative emergency stop
 
     // ── Trend Filter (easy to revert: set trend_filter_enabled = false) ──
     bool   trend_filter_enabled       = false;   // toggle: set true to enable, false to disable

@@ -10,7 +10,7 @@ import time
 import tomllib
 
 # Mirrors src/config/config.hpp and Config::load. These are implemented execution controls.
-EXECUTION_DEFAULTS = {'entry_order_mode':'taker','entry_cross_ticks':2.0,
+EXECUTION_DEFAULTS = {'entry_order_mode':'maker',
     'maker_improve_ticks':0,'maker_reprice_ms':750,'maker_poll_ms':500,
     'maker_max_age_ms':5000,'maker_cancel_before_close_ms':3000}
 
@@ -22,8 +22,8 @@ RECYCLER_DEFAULTS={'recycler_mode':'off','recycler_entry_price':.40,'recycler_ta
     'recycler_max_cycles':15,'recycler_lookback_secs':30,
     'recycler_min_range':.08,'recycler_max_window_loss':3.,'recycler_max_session_loss':10.,
     'recycler_settlement_entry_enabled':False,
-    'recycler_settlement_entry_secs':15,'recycler_settlement_entry_min_price':.90,
-    'recycler_settlement_entry_max_price':.98}
+    'recycler_settlement_entry_secs':15,'recycler_settlement_entry_min_price':.85,
+    'recycler_settlement_entry_max_price':.98,'recycler_settlement_only':False}
 EXECUTION_DEFAULTS.update(RECYCLER_DEFAULTS)
 
 def validate_recycler(settings,mode):
@@ -40,10 +40,12 @@ def validate_recycler(settings,mode):
         raise ValueError('Recycler window loss cap exceeds session loss cap.')
     if not (1 <= c['recycler_settlement_entry_secs'] <= 120):
         raise ValueError('Recycler settlement-entry window must be between 1 and 120 seconds.')
-    if not (0.90 <= c['recycler_settlement_entry_min_price'] < c['recycler_settlement_entry_max_price'] <= 0.98):
-        raise ValueError('Recycler settlement-entry price band must be within 0.90–0.98 and ordered.')
+    if not (0.85 <= c['recycler_settlement_entry_min_price'] < c['recycler_settlement_entry_max_price'] <= 0.98):
+        raise ValueError('Recycler settlement-entry price band must be within 0.85–0.98 and ordered.')
     if c['recycler_settlement_entry_enabled'] and c['recycler_mode']=='off':
         raise ValueError('Recycler settlement entry requires sniper or range mode.')
+    if c['recycler_settlement_only'] and not c['recycler_settlement_entry_enabled']:
+        raise ValueError('Settlement-only mode requires settlement entries to be enabled.')
 
 
 def set_value(app, content, section, key, value):
@@ -91,7 +93,7 @@ def fleet_view(app):
     counts={r['instance']:r['entries'] for r in counts}
     for row in fleet:
         name=row['instance'];cfg=app.load_config(name)
-        row.update(configured_mode=cfg['mode'],execution_mode=cfg['strategy'].get('entry_order_mode','taker'),recycler_mode=cfg['strategy'].get('recycler_mode','off'),
+        row.update(configured_mode=cfg['mode'],execution_mode='maker',recycler_mode=cfg['strategy'].get('recycler_mode','off'),
             supervisor_running=app._supervisor_running(name),autopilot_on_start=cfg['strategy'].get('autopilot_on_start',False),
             performance=perf.get(name,{}),entries_24h=counts.get(name,0),diagnostics=diagnostics(app,name))
         path=Path(app.CONFIG_DIR)/f'polypulse-{name}.toml'
@@ -120,7 +122,7 @@ def action(app, body, actor):
             base=body.get('template')
             if base not in app.fleet_instances():raise ValueError('Choose an existing bot as the template.')
             execution=body.get('execution_mode','maker')
-            if execution not in ('maker','taker','hybrid'):raise ValueError('Invalid execution mode.')
+            if execution!='maker':raise ValueError('Only post-only maker routing is available.')
             content=(Path(app.CONFIG_DIR)/f'polypulse-{base}.toml').read_text()
             content=set_value(app,content,'runtime','mode','paper')
             content=set_value(app,content,'runtime','instance_label',name)
