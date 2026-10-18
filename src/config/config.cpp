@@ -505,6 +505,9 @@ Config Config::load(const std::string& path) {
     s.lead_lag_scalp_enabled = get_or<bool>(st, "lead_lag_scalp_enabled", s.lead_lag_scalp_enabled);
     s.lead_lag_scalp_impulse_only = get_or<bool>(
         st, "lead_lag_scalp_impulse_only", s.lead_lag_scalp_impulse_only);
+    s.lead_lag_scalp_impulse_require_value_edge = get_or<bool>(
+        st, "lead_lag_scalp_impulse_require_value_edge",
+        s.lead_lag_scalp_impulse_require_value_edge);
     s.lead_lag_scalp_model_value_enabled = get_or<bool>(
         st, "lead_lag_scalp_model_value_enabled", s.lead_lag_scalp_model_value_enabled);
     s.lead_lag_scalp_horizon_s = get_or<int>(st, "lead_lag_scalp_horizon_s", s.lead_lag_scalp_horizon_s);

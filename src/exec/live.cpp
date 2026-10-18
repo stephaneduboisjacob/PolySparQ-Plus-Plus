@@ -1488,7 +1488,8 @@ std::size_t LiveExecutor::maintain_open_orders(
         const bool expired = snapshot.req.maker_root_deadline_ms > 0 &&
                              now_ms >= snapshot.req.maker_root_deadline_ms;
         bool reprice = false;
-        if (!closing && !expired && snapshot.req.maker_reprice_ms > 0 &&
+        if (!closing && !expired && !snapshot.req.maker_fixed_price &&
+            snapshot.req.maker_reprice_ms > 0 &&
             now_ms - snapshot.last_reprice_ms >= snapshot.req.maker_reprice_ms) {
             if (const OrderBook* book = book_lookup(snapshot.req.condition_id, snapshot.req.side)) {
                 const auto bid = book->best_bid();

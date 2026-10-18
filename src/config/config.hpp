@@ -374,6 +374,9 @@ struct StrategyHot {
     // PAPER-only experimental entry path using the event-time Binance OFI
     // detector instead of the Coinbase lead/lag trigger.
     bool   lead_lag_scalp_impulse_only = false;
+    // Keep the settlement-value/edge filter on by default. A disabled value
+    // gate is permitted only for the explicitly PAPER-only impulse experiment.
+    bool   lead_lag_scalp_impulse_require_value_edge = true;
     // Disable settlement-value entries when no Coinbase lead is present.
     // Coinbase entries still require the same conservative probability and
     // net-edge guards before they can place a maker quote.

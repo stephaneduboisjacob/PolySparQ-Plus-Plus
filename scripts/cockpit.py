@@ -179,6 +179,7 @@ COCKPIT_TUNABLE = {
     "hard_stop_pct":               ("float", 0.0, 100.0),
     "lead_lag_scalp_hard_stop_ticks": ("int", 0, 1000),
     "lead_lag_scalp_impulse_only": ("bool",),
+    "lead_lag_scalp_impulse_require_value_edge": ("bool",),
     "lead_lag_scalp_model_value_enabled": ("bool",),
     "lead_lag_scalp_max_secs_remaining_15m": ("int", 0, 899),
     "lead_lag_scalp_max_secs_remaining_5m": ("int", 0, 299),

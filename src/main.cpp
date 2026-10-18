@@ -4903,10 +4903,13 @@ int main(int argc, char** argv) {
                                     // Binance OFI/250ms/500ms detector only for
                                     // an explicitly configured 5m PAPER
                                     // instance, across configured assets.
-                                    // Existing price, value, spread,
-                                    // book-age, maker-entry and lead-scalper
-                                    // exit safeguards still apply. Production
-                                    // lead bots retain their Coinbase/model path.
+                                    // Existing price, Chainlink freshness and
+                                    // direction, spread, book-age, maker-entry,
+                                    // sizing and lead-scalper exit safeguards
+                                    // still apply. The settlement value gate is
+                                    // independently configurable for this
+                                    // PAPER-only experiment; production lead
+                                    // bots retain their existing value path.
                                     if (!bot_signal &&
                                         cfg.strategy.lead_lag_scalp_impulse_only &&
                                         cfg.runtime.mode == vp::TradeMode::Paper &&
@@ -4921,7 +4924,13 @@ int main(int argc, char** argv) {
                                             lead_cfg.max_entries_per_window &&
                                         impulse_features.ready &&
                                         impulse_features.candidate) {
-                                        if (!physical_ready) {
+                                        const bool impulse_paper_override =
+                                            cfg.strategy.lead_lag_scalp_impulse_only &&
+                                            cfg.runtime.mode == vp::TradeMode::Paper;
+                                        const bool value_gate_required =
+                                            !impulse_paper_override ||
+                                            cfg.strategy.lead_lag_scalp_impulse_require_value_edge;
+                                        if (value_gate_required && !physical_ready) {
                                             impulse_entry_reject_reason =
                                                 "physical_forecast_not_ready";
                                         } else if (!oracle_fresh) {
@@ -4939,9 +4948,6 @@ int main(int argc, char** argv) {
                                             ? up_spr : down_spr;
                                         const int selected_book_age = side == vp::ShareSide::UP
                                             ? up_book_age : down_book_age;
-                                        const bool impulse_paper_override =
-                                            cfg.strategy.lead_lag_scalp_impulse_only &&
-                                            cfg.runtime.mode == vp::TradeMode::Paper;
                                         // For the isolated paper impulse arm, the
                                         // short-horizon order-flow signal may
                                         // differ from the settlement ensemble.
@@ -4966,11 +4972,13 @@ int main(int argc, char** argv) {
                                         const bool oracle_not_opposing = direction != 0 &&
                                             direction * oracle_move_2s >=
                                                 -lead_cfg.max_oracle_counter_bps;
-                                        const double edge = ask > 0.0
+                                        const double edge = physical_ready && ask > 0.0
                                             ? vp::engine::checkpoint_net_edge(
                                                 conservative_probability, ask, 0.0,
                                                 cfg.strategy.fee_exponent)
-                                            : -1.0;
+                                            : 0.0;
+                                        const bool edge_available = physical_ready &&
+                                            ask > 0.0 && std::isfinite(edge);
                                         const bool price_ok = ask >= lead_cfg.min_price &&
                                             ask <= lead_cfg.max_price;
                                         const bool book_ok = bid > 0.0 && ask > bid &&
@@ -4987,38 +4995,80 @@ int main(int argc, char** argv) {
                                             impulse_entry_reject_reason = "share_price_outside_band";
                                         } else if (!book_ok) {
                                             impulse_entry_reject_reason = "book_quality";
-                                        } else if (!std::isfinite(edge) ||
-                                                   edge < lead_cfg.min_net_edge_pct / 100.0) {
+                                        } else if (value_gate_required &&
+                                                   (!edge_available || edge <
+                                                    lead_cfg.min_net_edge_pct / 100.0)) {
                                             impulse_entry_reject_reason = "entry_net_edge_too_small";
                                         } else {
-                                            const double confidence = std::clamp(
-                                                0.55 + std::min(0.20, edge * 1.5) +
-                                                std::min(0.15, std::abs(
-                                                    impulse_features.ofi_250ms) / 10.0),
-                                                0.55, 0.92);
+                                            // When value gating is disabled, rank
+                                            // candidates by OFI strength only.
+                                            // This bounded score is not a calibrated
+                                            // settlement probability.
+                                            const double ofi_threshold = std::max(
+                                                std::abs(impulse_features.ofi_threshold),
+                                                1e-9);
+                                            const double ofi_strength = std::isfinite(
+                                                impulse_features.ofi_250ms)
+                                                ? std::abs(impulse_features.ofi_250ms) /
+                                                    ofi_threshold
+                                                : 1.0;
+                                            const double confidence = value_gate_required
+                                                ? std::clamp(
+                                                    0.55 + std::min(0.20, edge * 1.5) +
+                                                    std::min(0.15, std::abs(
+                                                        impulse_features.ofi_250ms) / 10.0),
+                                                    0.55, 0.92)
+                                                : std::clamp(
+                                                    0.55 + std::min(0.15, 0.05 *
+                                                        std::max(0.0, ofi_strength - 1.0)),
+                                                    0.55, 0.70);
                                             if (confidence >=
                                                 lead_cfg.min_signal_confidence) {
+                                                const double reported_edge =
+                                                    value_gate_required ? edge : 0.0;
+                                                const std::string reason =
+                                                    value_gate_required
+                                                    ? fmt::format(
+                                                        "BN_OFI_IMPULSE {} "
+                                                        "move250={:+.3f}bp "
+                                                        "move500={:+.3f}bp "
+                                                        "z250={:+.2f} "
+                                                        "ofi250={:+.3f}/{:.3f} "
+                                                        "oracle2={:+.2f}bp "
+                                                        "p={:.3f} ask={:.3f} "
+                                                        "edge={:+.2f}pt",
+                                                        direction > 0 ? "UP" : "DOWN",
+                                                        impulse_features.move_250ms_bps,
+                                                        impulse_features.move_500ms_bps,
+                                                        impulse_features.move_z_250ms,
+                                                        impulse_features.ofi_250ms,
+                                                        impulse_features.ofi_threshold,
+                                                        oracle_move_2s,
+                                                        conservative_probability,
+                                                        ask, edge * 100.0)
+                                                    : fmt::format(
+                                                        "BN_OFI_IMPULSE {} "
+                                                        "move250={:+.3f}bp "
+                                                        "move500={:+.3f}bp "
+                                                        "z250={:+.2f} "
+                                                        "ofi250={:+.3f}/{:.3f} "
+                                                        "ofi_strength={:.2f} "
+                                                        "oracle2={:+.2f}bp ask={:.3f} "
+                                                        "value_gate=OFF "
+                                                        "confidence_score=OFI_ONLY "
+                                                        "edge=research_only",
+                                                        direction > 0 ? "UP" : "DOWN",
+                                                        impulse_features.move_250ms_bps,
+                                                        impulse_features.move_500ms_bps,
+                                                        impulse_features.move_z_250ms,
+                                                        impulse_features.ofi_250ms,
+                                                        impulse_features.ofi_threshold,
+                                                        ofi_strength, oracle_move_2s, ask);
                                                 bot_signal =
                                                     vp::engine::WindowBotSignal{
-                                                        side, confidence, edge, ask,
-                                                        fmt::format(
-                                                            "BN_OFI_IMPULSE {} "
-                                                            "move250={:+.3f}bp "
-                                                            "move500={:+.3f}bp "
-                                                            "z250={:+.2f} "
-                                                            "ofi250={:+.3f}/{:.3f} "
-                                                            "oracle2={:+.2f}bp "
-                                                            "p={:.3f} ask={:.3f} "
-                                                            "edge={:+.2f}pt",
-                                                            direction > 0 ? "UP" : "DOWN",
-                                                            impulse_features.move_250ms_bps,
-                                                            impulse_features.move_500ms_bps,
-                                                            impulse_features.move_z_250ms,
-                                                            impulse_features.ofi_250ms,
-                                                            impulse_features.ofi_threshold,
-                                                            oracle_move_2s,
-                                                            conservative_probability,
-                                                            ask, edge * 100.0)};
+                                                        side, confidence,
+                                                        reported_edge, ask,
+                                                        reason};
                                             } else {
                                                 impulse_entry_reject_reason =
                                                     "signal_confidence";
@@ -5056,10 +5106,9 @@ int main(int argc, char** argv) {
                                         cfg.strategy.lead_lag_scalp_impulse_only &&
                                         m.horizon_seconds == 300 &&
                                         bot_diag_due()) {
-                                        const bool model_strongly_opposes =
-                                            impulse_features.candidate &&
-                                            (impulse_features.direction > 0
-                                                ? model_up <= 0.40 : model_up >= 0.60);
+                                        const bool impulse_value_gate_required =
+                                            cfg.runtime.mode != vp::TradeMode::Paper ||
+                                            cfg.strategy.lead_lag_scalp_impulse_require_value_edge;
                                         const char* reason =
                                             secs_left <= lead_cfg.stop_entry_5m_secs
                                                 ? "entry_cutoff"
@@ -5071,12 +5120,10 @@ int main(int argc, char** argv) {
                                                 ? "entry_limit"
                                             : !impulse_features.candidate
                                                 ? impulse_features.gate_reason.c_str()
-                                            : !physical_ready
+                                            : impulse_value_gate_required && !physical_ready
                                                 ? "physical_forecast_not_ready"
                                             : !oracle_fresh
                                                 ? "chainlink_stale"
-                                            : model_strongly_opposes
-                                                ? "model_conflict"
                                                 : "impulse_entry_gates";
                                         spdlog::info(
                                             "WINDOW_BOT asset={} horizon={} state=no_entry "
@@ -5542,6 +5589,15 @@ int main(int argc, char** argv) {
                                 : (from_scalp
                                     ? (cfg.strategy.scalp_v3_enabled ? "SCALP_V3_ENTRY" : "SCALP_V2_ENTRY")
                                     : "RULE");
+                            const bool impulse_window_entry = from_window_bot &&
+                                !from_late_sniper &&
+                                sig->reason.rfind("BN_OFI_IMPULSE ", 0) == 0;
+                            if (impulse_window_entry) {
+                                // The impulse is valid at decision time. Keep
+                                // its initial passive quote fixed: repricing
+                                // down would chase a move after it has faded.
+                                req.maker_fixed_price = true;
+                            }
                             req.window_close_ms= m.window_close_ms;
                             req.neg_risk       = m.neg_risk;
                             req.tick_size      = m.tick_size;
@@ -5813,10 +5869,12 @@ int main(int argc, char** argv) {
                             const char* state_name = !res.accepted ? "order_rejected"
                                 : (res.resting ? "maker_order_resting" : "entry_filled");
                             spdlog::info("WINDOW_BOT asset={} horizon={} state={} source={} "
-                                "side={} order_price={:.3f} shares={:.2f} detail={}",
+                                "side={} order_price={:.3f} shares={:.2f} "
+                                "maker_reprice={} detail={}",
                                 dt_req.asset, dt_req.horizon_s, state_name,
                                 dt_req.source, vp::to_string(dt_req.side),
                                 res.order_price, res.fill_shares,
+                                dt_req.maker_fixed_price ? "OFF" : "ON",
                                 res.accepted ? res.status : res.reject_reason);
                         }
                         persist_q.push([pg=pg.get(), cid=std::move(cid_copy),

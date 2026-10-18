@@ -3,7 +3,7 @@
 #include <array>
 #include <string_view>
 namespace vp {
-inline constexpr std::array<std::string_view, 400> known_config_keys = {
+inline constexpr std::array<std::string_view, 401> known_config_keys = {
     "binance.futures_ws_url",
     "binance.streams",
     "binance.ws_url",
@@ -153,6 +153,7 @@ inline constexpr std::array<std::string_view, 400> known_config_keys = {
     "strategy.hot.lead_lag_scalp_hard_stop_ticks",
     "strategy.hot.lead_lag_scalp_horizon_s",
     "strategy.hot.lead_lag_scalp_impulse_only",
+    "strategy.hot.lead_lag_scalp_impulse_require_value_edge",
     "strategy.hot.lead_lag_scalp_max_book_age_ms",
     "strategy.hot.lead_lag_scalp_max_entries_per_window",
     "strategy.hot.lead_lag_scalp_max_oracle_counter_bps",
