@@ -371,8 +371,16 @@ struct StrategyHot {
     // official Chainlink reference, then checks a conservative, Coinbase-
     // adjusted settlement forecast before quoting a passive Polymarket bid.
     bool   lead_lag_scalp_enabled = false;
+    // PAPER-only experimental entry path using the event-time Binance OFI
+    // detector instead of the Coinbase lead/lag trigger.
+    bool   lead_lag_scalp_impulse_only = false;
+    // Disable settlement-value entries when no Coinbase lead is present.
+    // Coinbase entries still require the same conservative probability and
+    // net-edge guards before they can place a maker quote.
+    bool   lead_lag_scalp_model_value_enabled = true;
     int    lead_lag_scalp_horizon_s = 0;       // 0 = both supported windows
     double lead_lag_scalp_min_signal_confidence = 0.55;
+    double lead_lag_scalp_min_model_confidence = 0.20;
     double lead_lag_scalp_min_cb_move_bps = 0.5;
     double lead_lag_scalp_min_cb_lead_bps = 0.5;
     double lead_lag_scalp_max_oracle_counter_bps = 1.5;
@@ -384,6 +392,8 @@ struct StrategyHot {
     int    lead_lag_scalp_stop_entry_secs = 45;
     int    lead_lag_scalp_stop_entry_5m_secs = 90;
     int    lead_lag_scalp_stop_entry_15m_secs = 270;
+    int    lead_lag_scalp_max_secs_remaining_5m = 0;  // 0 disables the opening delay
+    int    lead_lag_scalp_max_secs_remaining_15m = 0; // 0 disables the opening delay
     int    lead_lag_scalp_flatten_secs = 30;
     int    lead_lag_scalp_flatten_5m_secs = 90;
     int    lead_lag_scalp_flatten_15m_secs = 270;
@@ -393,6 +403,7 @@ struct StrategyHot {
     double lead_lag_scalp_hard_stop_pct = 12.0;
     int    lead_lag_scalp_hard_stop_ticks = 0; // 0 disables the entry-relative tick stop
     bool   lead_lag_scalp_reversal_exit_enabled = true;
+    double lead_lag_scalp_reversal_oracle_confirm_bps = 0.0; // 0 disables oracle confirmation
     double lead_lag_scalp_rearm_bps = 0.25;
 
     // ── Late-window settlement sniper ──
@@ -411,6 +422,11 @@ struct StrategyHot {
     double late_window_sniper_order_usd = 5.0;
     int    late_window_sniper_max_entries_per_window = 5;
     int    late_window_sniper_hard_stop_ticks = 0; // 0 disables the entry-relative emergency stop
+
+    // Isolated, paper-only implementation of the reference engine's simple
+    // 5m simulation strategy: fixed 5-share UP maker entry, maker target,
+    // then a paper-only emergency exit 30s before close.
+    bool   simulation_strategy_enabled = false;
 
     // ── Trend Filter (easy to revert: set trend_filter_enabled = false) ──
     bool   trend_filter_enabled       = false;   // toggle: set true to enable, false to disable

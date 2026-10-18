@@ -178,6 +178,11 @@ COCKPIT_TUNABLE = {
     "stop_loss_pct":               ("float", 0.0, 100.0),
     "hard_stop_pct":               ("float", 0.0, 100.0),
     "lead_lag_scalp_hard_stop_ticks": ("int", 0, 1000),
+    "lead_lag_scalp_impulse_only": ("bool",),
+    "lead_lag_scalp_model_value_enabled": ("bool",),
+    "lead_lag_scalp_max_secs_remaining_15m": ("int", 0, 899),
+    "lead_lag_scalp_max_secs_remaining_5m": ("int", 0, 299),
+    "lead_lag_scalp_reversal_oracle_confirm_bps": ("float", 0.0, 100.0),
     "lead_lag_scalp_min_signal_confidence": ("float", 0.55, 0.92),
     "lead_lag_scalp_max_entries_per_window": ("int", 1, 10),
     "lead_lag_scalp_order_usd": ("float", 1.0, 5.0),
@@ -3492,32 +3497,38 @@ def api_v3_command(body, actor=None):
 
 
 def api_pnl_today():
-    """Fleet P&L command center: today per instance + 7-day daily series.
+    """Fleet fill-cash-flow summary: UTC-day totals and 30 calendar dates.
 
     Reads the net-of-fee view (vp.v_strategy_net_pnl) so the numbers match
-    scripts/accounting.py exactly. Read-only, cheap (~1 indexed scan)."""
+    scripts/accounting.py exactly. Read-only, cheap (~1 indexed scan).
+    The weekly total is deliberately restricted to the last seven UTC dates;
+    the chart series is the current UTC date plus the preceding 29 dates."""
     try:
         rows = q("""SELECT instance,
                           (day = (now() at time zone 'utc')::date) AS is_today,
+                          (day >= (now() at time zone 'utc')::date - 6) AS is_week,
                           day, settles_won, settles_lost,
                           net_pnl_usd::float8 AS net, fees_usd::float8 AS fees
                    FROM vp.v_strategy_net_pnl
-                   WHERE day > (now() at time zone 'utc')::date - 31
+                   WHERE day >= (now() at time zone 'utc')::date - 29
                    ORDER BY day, instance""") or []
     except Exception as e:
         return {"ok": False, "error": str(e), "instances": [], "days": []}
-    today, days = [], {}
+    today, days, week_net = [], {}, 0.0
     for r in rows:
         d = r["day"]
         key = d.isoformat() if hasattr(d, "isoformat") else str(d)
         agg = days.setdefault(key, {"day": key, "net": 0.0, "w": 0, "l": 0, "fees": 0.0})
-        agg["net"] += r["net"] or 0.0
+        net = r["net"] or 0.0
+        agg["net"] += net
         agg["w"] += r["settles_won"] or 0
         agg["l"] += r["settles_lost"] or 0
         agg["fees"] += r["fees"] or 0.0
+        if r["is_week"]:
+            week_net += net
         if r["is_today"]:
             today.append({"instance": r["instance"], "w": r["settles_won"] or 0,
-                          "l": r["settles_lost"] or 0, "net": r["net"] or 0.0,
+                          "l": r["settles_lost"] or 0, "net": net,
                           "fees": r["fees"] or 0.0})
     series = [days[k] for k in sorted(days)]
     return {"ok": True, "instances": today, "days": series,
@@ -3525,7 +3536,7 @@ def api_pnl_today():
             "today_w": sum(t["w"] for t in today),
             "today_l": sum(t["l"] for t in today),
             "today_fees": round(sum(t["fees"] for t in today), 2),
-            "week_net": round(sum(d["net"] for d in series), 2)}
+            "week_net": round(week_net, 2)}
 
 
 def api_pnl_history(hours=24):
@@ -4177,6 +4188,7 @@ def api_supervisor_feed(limit=15):
 _live_cache = {}   # instance-key -> (built_monotonic, payload)
 _live_lite_cache = {}
 _activity_cache = {}
+_exit_performance_cache = {}
 _wallet_mode_lock = threading.Lock()
 ADMIN_WALLET_CREDENTIALS_FILE = "./secrets/polymarket_admin_credentials.json"
 ADMIN_WALLET_PRIVATE_KEY_FILE = "./secrets/polymarket_admin_private_key.txt"
@@ -4311,6 +4323,117 @@ def api_live_lite(instance=None):
     return out
 
 
+def api_exit_performance(instance=None, hours=24):
+    """Cache matched exit-ledger P&L by bot, exit reason and execution route."""
+    mode = current_mode(instance)
+    cache_key = (instance or "", mode, int(hours))
+    now = time.monotonic()
+    hit = _exit_performance_cache.get(cache_key)
+    if hit and now - hit[0] < 30.0:
+        return hit[1]
+
+    params = {
+        "mode": mode,
+        "from_ms": str(int((time.time() - int(hours) * 3600) * 1000)),
+        "limit": "100",
+    }
+    groups = {}
+    instance_groups = {}
+    incomplete = 0
+    scanned = 0
+    truncated = False
+    try:
+        for _ in range(12):
+            page = api_settlement_history(instance, params)
+            scanned += int(page.get("scanned") or 0)
+            for row in page.get("rows") or []:
+                if not row.get("accounting_complete") or row.get("realized_pnl") is None:
+                    incomplete += 1
+                    continue
+                source = str(row.get("source") or "unknown")
+                if source.lower() == "settle":
+                    route = "settlement"
+                elif row.get("post_only") is True:
+                    route = "maker"
+                elif row.get("post_only") is False:
+                    route = "taker"
+                else:
+                    route = "unknown"
+                asset = str(row.get("asset") or "?").upper()
+                horizon = int(row.get("horizon_seconds") or 0)
+                key = (str(row.get("instance") or "unknown"), source, route,
+                       asset, horizon)
+                agg = groups.setdefault(key, {
+                    "instance": key[0], "source": source, "route": route,
+                    "asset": asset, "horizon_seconds": horizon,
+                    "count": 0, "wins": 0, "losses": 0, "flats": 0, "net": 0.0,
+                    "fees": 0.0, "winner_net": 0.0, "loser_net": 0.0,
+                })
+                instance_agg = instance_groups.setdefault(key[0], {
+                    "instance": key[0], "count": 0, "wins": 0, "losses": 0,
+                    "flats": 0,
+                    "net": 0.0, "fees": 0.0,
+                    "winner_net": 0.0, "loser_net": 0.0,
+                })
+                pnl = float(row["realized_pnl"])
+                for target in (agg, instance_agg):
+                    target["count"] += 1
+                    if pnl > 0.0:
+                        target["wins"] += 1
+                        target["winner_net"] += pnl
+                    elif pnl < 0.0:
+                        target["losses"] += 1
+                        target["loser_net"] += abs(pnl)
+                    else:
+                        target["flats"] += 1
+                    target["net"] += pnl
+                    target["fees"] += float(row.get("fee_usd") or 0.0)
+            if not page.get("has_more"):
+                break
+            cursor = page.get("next_cursor")
+            if not cursor:
+                truncated = True
+                break
+            params["cursor"] = cursor
+        else:
+            truncated = True
+    except Exception:
+        result = {"mode": mode, "hours": int(hours), "groups": [],
+                  "incomplete": incomplete, "truncated": truncated,
+                  "error": "Exit ledger temporarily unavailable"}
+        _exit_performance_cache[cache_key] = (now, result)
+        return result
+
+    def finalize(agg):
+        agg["net"] = round(agg["net"], 2)
+        agg["fees"] = round(agg["fees"], 2)
+        winner_net = agg.pop("winner_net")
+        loser_net = agg.pop("loser_net")
+        avg_win = winner_net / agg["wins"] if agg["wins"] else None
+        avg_loss = loser_net / agg["losses"] if agg["losses"] else None
+        agg["avg_win"] = round(avg_win, 2) if avg_win is not None else None
+        agg["avg_loss"] = round(avg_loss, 2) if avg_loss is not None else None
+        agg["breakeven_win_pct"] = round(
+            100.0 * avg_loss / (avg_win + avg_loss), 1
+        ) if avg_win is not None and avg_loss is not None and avg_win + avg_loss > 0 else None
+        return agg
+
+    summary = [finalize(agg) for agg in groups.values()]
+    summary.sort(key=lambda x: (
+        x["net"], x["instance"], x["source"], x["asset"], x["horizon_seconds"]
+    ))
+    by_instance = [finalize(agg) for agg in instance_groups.values()]
+    by_instance.sort(key=lambda x: (x["net"], x["instance"]))
+    result = {"mode": mode, "hours": int(hours), "groups": summary,
+              "by_instance": by_instance,
+              "exits": sum(x["count"] for x in summary),
+              "incomplete": incomplete, "scanned": scanned,
+              "truncated": truncated,
+              "as_of": datetime.now(timezone.utc).isoformat()}
+    _exit_performance_cache[cache_key] = (now, result)
+    return result
+
+
 def api_activity(instance=None):
     """Slower activity payload with durable cross-mode trade history."""
     key = instance or ""
@@ -4318,11 +4441,16 @@ def api_activity(instance=None):
     hit = _activity_cache.get(key)
     if hit and now - hit[0] < 1.5:
         return hit[1]
+    try:
+        exit_performance = api_exit_performance(instance)
+    except Exception:
+        exit_performance = {"groups": [], "error": "Exit ledger temporarily unavailable"}
     out = {
         "orders": api_orders(200, instance, all_modes=True),
         "settles": api_settles(100, instance, all_modes=True),
         "orderstats": api_orderstats(24),
         "source_pnl": api_source_pnl(instance),
+        "exit_performance": exit_performance,
         "server_ts": int(time.time() * 1000),
     }
     _activity_cache[key] = (now, out)
@@ -4347,6 +4475,12 @@ def api_execution(instance=None):
         LEFT JOIN vp.fills f ON f.client_order_id=o.client_order_id
         LEFT JOIN vp.pm_markets m ON m.condition_id=o.condition_id
         WHERE o.mode=%s AND o.status IN ('submitted','acked','partial','uncertain')
+          AND (o.mode::text <> 'paper' OR EXISTS (
+              SELECT 1 FROM vp.strategy_runs r
+              WHERE r.instance IS NOT DISTINCT FROM o.instance
+                AND r.session_id IS NOT DISTINCT FROM o.session_id
+                AND r.ended_at IS NULL
+          ))
           {inst_clause}
         GROUP BY o.client_order_id,m.asset,m.horizon_seconds,m.window_close
         ORDER BY o.ts_submitted DESC LIMIT 100
@@ -5033,15 +5167,32 @@ def api_fleet_detail():
 
 _window_bot_desk_cache = {}
 _WINDOW_BOT_IDS = {
+    "btc-5m-article-sim-test",
+    "btc-5m-ofi-impulse-paper-test",
     "btc-5m-lead-scalper",
     "btc-15m-lead-scalper",
+    "btc-15m-conditional-edge-candidate",
+    "btc-5m-lead-scalper-rr-test",
+    "btc-15m-lead-scalper-rr-test",
+    "btc-5m-lead-scalper-stop15-test",
+    "btc-15m-lead-scalper-stop15-test",
+    "btc-5m-lead-scalper-stop10-tp20-test",
+    "btc-15m-lead-scalper-stop10-tp20-test",
+    "btc-5m-lead-scalper-stop10-tp50-test",
+    "btc-15m-lead-scalper-stop10-tp50-test",
+    "btc-5m-lead-scalper-stop15-tp20-reversal-test",
+    "btc-15m-lead-scalper-stop15-tp20-reversal-test",
+    "btc-5m-lead-scalper-stop15-tp20-reversal-oracle-test",
+    "btc-15m-lead-scalper-stop15-tp20-reversal-oracle-test",
+    "btc-5m-lead-scalper-stop15-tp20-test",
+    "btc-15m-lead-scalper-stop15-tp20-test",
     "btc-late-settlement-sniper",
 }
 _WINDOW_BOT_ASSETS = ("BTC", "ETH", "SOL", "XRP")
 
 
 def api_window_bot_desk(allowed_instances=None):
-    """Live operational view for the three multi-asset window-bot profiles."""
+    """Live operational view for the window-bot profiles and PAPER challengers."""
     scope = None if allowed_instances is None else tuple(sorted(allowed_instances))
     cache_key = ("admin",) if scope is None else ("user", *scope)
     now = time.monotonic()
@@ -5063,6 +5214,8 @@ def api_window_bot_desk(allowed_instances=None):
         hot = cfg.get("strategy", {}).get("hot", {})
         blocked_assets = {str(asset).upper() for asset in hot.get("blocked_assets", [])}
         bot_assets = [asset for asset in _WINDOW_BOT_ASSETS if asset not in blocked_assets]
+        if hot.get("lead_lag_scalp_impulse_only"):
+            bot_assets = ["BTC"]
         mode = str(cfg.get("runtime", {}).get("mode", "unknown")).lower()
         horizons = cfg.get("polymarket", {}).get("universe_horizons_seconds", [])
         fleet_row = fleet_rows[inst]
@@ -5070,16 +5223,152 @@ def api_window_bot_desk(allowed_instances=None):
         positions = reconstructed_positions(mode, since, inst)
         accounting = ledger_accounting(mode, positions, since, inst)
         execution = api_execution(inst)
+        exit_review = api_exit_performance(inst, 24)
+        exit_total = next((x for x in (exit_review.get("by_instance") or [])
+                           if x.get("instance") == inst), None)
+        exit_24h = {
+            "count": int((exit_total or {}).get("count") or 0),
+            "wins": int((exit_total or {}).get("wins") or 0),
+            "losses": int((exit_total or {}).get("losses") or 0),
+            "net": float((exit_total or {}).get("net") or 0.0),
+            "fees": float((exit_total or {}).get("fees") or 0.0),
+            "avg_win": (float(exit_total["avg_win"])
+                        if exit_total and exit_total.get("avg_win") is not None else None),
+            "avg_loss": (float(exit_total["avg_loss"])
+                         if exit_total and exit_total.get("avg_loss") is not None else None),
+            "breakeven_win_pct": (float(exit_total["breakeven_win_pct"])
+                                  if exit_total and exit_total.get("breakeven_win_pct") is not None else None),
+            "incomplete": int(exit_review.get("incomplete") or 0),
+            "available": not bool(exit_review.get("error")),
+        }
         recent = api_orders(12, inst, all_modes=True).get("orders", [])
         if scope is not None:
             for order in recent:
                 order.pop("exchange_order_id", None)
-        log_lines = tail(instance_log(inst), 240)
-        engine_line = next((line for line in reversed(log_lines) if "WINDOW_BOT " in line), "")
+        # Keep enough history to retain a loss-pause event for the duration of
+        # the configured cooldown, even while per-market scan logs are busy.
+        log_lines = tail(instance_log(inst), 6000)
+        # A restarted bot can leave less than a minute of old gate messages in
+        # the same log tail. Anchor diagnostics to this process run so the
+        # cockpit never mixes yesterday's/current-session filters together.
+        def log_timestamp(line):
+            match = re.match(
+                r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\]", line
+            )
+            if not match:
+                return None
+            try:
+                return datetime.strptime(
+                    f"{match.group(1)} {match.group(2)}", "%Y-%m-%d %H:%M:%S.%f"
+                )
+            except ValueError:
+                return None
+
+        process_started_at = None
+        for line in reversed(log_lines):
+            if "tui: headless run loop active" not in line:
+                continue
+            process_started_at = log_timestamp(line)
+            break
+        # Loss-streak cooldowns are intentionally silent in the scan loop.
+        # Surface the current process's last pause event so operators can tell
+        # a deliberate entry pause from a stalled strategy/feed.
+        entry_pause = None
+        pause_now_ms = int(time.time() * 1000)
+        for line in reversed(log_lines):
+            if "autopilot paused after " not in line:
+                continue
+            pause_ts = log_timestamp(line)
+            if process_started_at is not None and (
+                    pause_ts is None or pause_ts < process_started_at):
+                continue
+            pause_match = re.search(
+                r"autopilot paused after (\d+) consecutive loss\(es\) until (\d+)",
+                line,
+            )
+            if not pause_match:
+                continue
+            pause_until_ms = int(pause_match.group(2))
+            remaining_s = max(0, (pause_until_ms - pause_now_ms + 999) // 1000)
+            entry_pause = {
+                "active": pause_until_ms > pause_now_ms,
+                "consecutive_losses": int(pause_match.group(1)),
+                "until_ms": pause_until_ms,
+                "remaining_s": remaining_s,
+                "age_s": (round(max(0.0, (datetime.now(timezone.utc).replace(tzinfo=None)
+                                         - pause_ts).total_seconds()), 1)
+                          if pause_ts is not None else None),
+            }
+            break
+        # Each scalper writes a second WINDOW_BOT startup line for impulse
+        # shadow mode. Prefer the newest state-bearing line so that auxiliary
+        # telemetry cannot hide the bot's actual monitoring/entry state.
+        engine_line = next((line for line in reversed(log_lines)
+                            if "WINDOW_BOT " in line and " state=" in line
+                            and (process_started_at is None or
+                                 (log_timestamp(line) is not None and
+                                  log_timestamp(line) >= process_started_at))), "")
         engine_state = None
+        engine_match = re.search(
+            r"WINDOW_BOT asset=(BTC|ETH|SOL|XRP) horizon=(300|900) "
+            r"state=([a-z_]+) source=([^ ]+) reason=([a-z0-9_.]+)(?: t=(\d+)s)?",
+            engine_line,
+        )
         match = re.search(r"WINDOW_BOT .*state=([^ ]+)", engine_line)
         if match:
             engine_state = match.group(1)
+        configured_horizon = int(hot.get("lead_lag_scalp_horizon_s") or 0) \
+            if hot.get("lead_lag_scalp_enabled") else 0
+        gate_horizons = {configured_horizon} if configured_horizon else {
+            int(value) for value in horizons if str(value).isdigit()
+        }
+        gate_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        gate_checks = []
+        latest_gate_by_asset = {}
+        for line in reversed(log_lines):
+            gate_match = re.search(
+                r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\].*?"
+                r"WINDOW_BOT asset=(BTC|ETH|SOL|XRP) horizon=(300|900) "
+                r"state=([a-z_]+) source=([^ ]+) reason=([a-z0-9_.]+)(?: t=(\d+)s)?",
+                line,
+            )
+            if not gate_match:
+                continue
+            gate_ts = log_timestamp(line)
+            if gate_ts is None:
+                continue
+            if process_started_at is not None and gate_ts < process_started_at:
+                continue
+            horizon_s = int(gate_match.group(4))
+            if gate_horizons and horizon_s not in gate_horizons:
+                continue
+            age_s = max(0.0, (gate_now - gate_ts).total_seconds())
+            gate = {
+                "asset": gate_match.group(3), "horizon_seconds": horizon_s,
+                "state": gate_match.group(5), "source": gate_match.group(6),
+                "reason": gate_match.group(7),
+                "seconds_left": int(gate_match.group(8)) if gate_match.group(8) else None,
+                "age_s": round(age_s, 1),
+            }
+            if age_s <= 60.0:
+                gate_checks.append(gate)
+            if gate["asset"] not in latest_gate_by_asset:
+                latest_gate_by_asset[gate["asset"]] = gate
+        gate_reason_counts = {}
+        for gate in gate_checks:
+            if gate["state"] == "no_entry":
+                gate_reason_counts[gate["reason"]] = gate_reason_counts.get(gate["reason"], 0) + 1
+        top_gate_blockers = [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(gate_reason_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+        ]
+        entry_gate = {
+            "checks_60s": len(gate_checks),
+            "no_entry_60s": sum(gate["state"] == "no_entry" for gate in gate_checks),
+            "top_blockers": top_gate_blockers,
+            "latest_by_asset": list(latest_gate_by_asset.values()),
+            "age_s": min((gate["age_s"] for gate in latest_gate_by_asset.values()), default=None),
+        }
         market_feed_state = "unknown"
         market_feed_frames = None
         discovered_markets = None
@@ -5108,10 +5397,15 @@ def api_window_bot_desk(allowed_instances=None):
         is_scalper = bool(hot.get("lead_lag_scalp_enabled"))
         horizon = int(hot.get("lead_lag_scalp_horizon_s") or 0)
         sniper = bool(hot.get("late_window_sniper_enabled"))
+        article_simulation = bool(hot.get("simulation_strategy_enabled")) and mode == "paper"
         settlement_only = sniper and not is_scalper
         if is_scalper:
             scalp_horizon_label = f"{horizon // 60}m" if horizon else "5m+15m"
-            strategy_name = f"Coinbase Lead Scalper · {scalp_horizon_label} · {len(bot_assets)} assets"
+            strategy_name = (
+                f"Binance OFI Impulse · BTC · {scalp_horizon_label} · research challenger"
+                if hot.get("lead_lag_scalp_impulse_only") else
+                f"Coinbase Lead Scalper · {scalp_horizon_label} · {len(bot_assets)} assets"
+            )
             entry_usd = float(hot.get("lead_lag_scalp_order_usd") or 0)
             entry_min = float(hot.get("lead_lag_scalp_min_price") or 0)
             entry_max = float(hot.get("lead_lag_scalp_max_price") or 0)
@@ -5127,16 +5421,44 @@ def api_window_bot_desk(allowed_instances=None):
                 entry_max = min(entry_max, 0.99 / (1.0 + target_pct / 100.0))
             strategy_horizons = [horizon] if horizon else [int(x) for x in horizons if str(x).isdigit()]
         elif sniper:
-            strategy_name = f"Late Settlement Sniper · {len(bot_assets)} assets · 5m/15m"
+            strategy_horizons = [int(x) for x in horizons
+                                 if str(x).isdigit() and int(x) in (300, 900)]
+            horizon_label = "/".join(f"{value // 60}m" for value in strategy_horizons)
+            strategy_name = (f"Late Settlement Sniper · {len(bot_assets)} assets · "
+                             f"{horizon_label or 'configured windows'}")
             entry_usd = float(hot.get("late_window_sniper_order_usd") or 0)
             entry_min = float(hot.get("late_window_sniper_min_price") or 0)
             entry_max = float(hot.get("late_window_sniper_max_price") or 0)
             entry_window_secs = int(hot.get("late_window_sniper_max_secs") or 0)
+            entry_windows = []
+            for horizon_s in strategy_horizons:
+                suffix = "5m" if horizon_s == 300 else "15m"
+                min_key = f"late_window_sniper_min_secs_{suffix}"
+                max_key = f"late_window_sniper_max_secs_{suffix}"
+                min_secs = hot.get(min_key)
+                max_secs = hot.get(max_key)
+                entry_windows.append({
+                    "horizon_seconds": horizon_s,
+                    "min_secs": int(min_secs if min_secs is not None else
+                                    hot.get("late_window_sniper_min_secs") or 0),
+                    "max_secs": int(max_secs if max_secs is not None else
+                                    hot.get("late_window_sniper_max_secs") or 0),
+                })
             target_pct = hard_stop_pct = hard_stop_ticks = flatten_secs = 0
             flatten_secs_5m = flatten_secs_15m = 0
             reversal_exit_enabled = False
+        elif article_simulation:
+            bot_assets = ["BTC"]
             strategy_horizons = [int(x) for x in horizons
-                                 if str(x).isdigit() and int(x) in (300, 900)]
+                                 if str(x).isdigit() and int(x) == 300]
+            strategy_name = "Article Reference Simulation · BTC · 5m"
+            entry_usd = min(2.45, float(cfg.get("risk", {}).get("max_order_usd") or 2.45))
+            entry_min = entry_max = 0.49
+            entry_window_secs = 0
+            target_pct = hard_stop_pct = hard_stop_ticks = flatten_secs = 0
+            flatten_secs_5m = flatten_secs_15m = 0
+            reversal_exit_enabled = False
+            entry_windows = []
         else:
             strategy_name = "Unconfigured multi-asset window bot"
             entry_usd = entry_min = entry_max = target_pct = hard_stop_pct = hard_stop_ticks = 0
@@ -5144,6 +5466,7 @@ def api_window_bot_desk(allowed_instances=None):
             flatten_secs_5m = flatten_secs_15m = 0
             reversal_exit_enabled = False
             strategy_horizons = [int(x) for x in horizons if str(x).isdigit()]
+            entry_windows = []
         bots.append({
             "instance": inst,
             "name": fleet_row.get("name") or inst,
@@ -5152,6 +5475,7 @@ def api_window_bot_desk(allowed_instances=None):
             "strategy": strategy_name,
             "assets": bot_assets,
             "settlement_only": settlement_only,
+            "article_simulation": article_simulation,
             "horizons": strategy_horizons,
             "entry_order_mode": hot.get("entry_order_mode", "maker"),
             "entry_usd": entry_usd,
@@ -5162,12 +5486,18 @@ def api_window_bot_desk(allowed_instances=None):
                 if is_scalper else 0,
             "entry_window_secs_15m": int(hot.get("lead_lag_scalp_stop_entry_15m_secs") or 270)
                 if is_scalper else 0,
-            "entry_min_secs": int(hot.get("late_window_sniper_min_secs") or 0) if settlement_only else 0,
+            "entry_windows": entry_windows if settlement_only else [],
+            "entry_min_secs": (entry_windows[0]["min_secs"] if settlement_only and entry_windows else 0),
+            "article_target_price": 0.70 if article_simulation else None,
+            "article_emergency_exit_secs": 30 if article_simulation else 0,
             "settlement_edge_pct": float(hot.get("late_window_sniper_min_net_edge_pct") or 0),
             "target_pct": target_pct,
             "hard_stop_pct": hard_stop_pct,
             "hard_stop_ticks": hard_stop_ticks,
             "reversal_exit_enabled": reversal_exit_enabled,
+            "reversal_oracle_confirm_bps": float(
+                hot.get("lead_lag_scalp_reversal_oracle_confirm_bps") or 0.0
+            ),
             "flatten_secs": flatten_secs,
             "flatten_secs_5m": flatten_secs_5m,
             "flatten_secs_15m": flatten_secs_15m,
@@ -5179,6 +5509,7 @@ def api_window_bot_desk(allowed_instances=None):
             "max_window_usd": float(cfg.get("risk", {}).get("max_per_window_usd") or 0),
             "max_deployed_usd": float(cfg.get("risk", {}).get("max_deployed_usd") or 0),
             "session_net": float(accounting.get("net_pnl") or 0),
+            "exit_24h": exit_24h,
             "realized_pnl": float(accounting.get("realized_pnl") or 0),
             "unrealized_pnl": float(accounting.get("unrealized_pnl") or 0),
             "deployed_usd": float(accounting.get("deployed_usd") or 0),
@@ -5187,6 +5518,13 @@ def api_window_bot_desk(allowed_instances=None):
             "order_stats": execution.get("stats", []),
             "recent_orders": recent,
             "engine_state": engine_state,
+            "engine_asset": engine_match.group(1) if engine_match else None,
+            "engine_horizon_seconds": int(engine_match.group(2)) if engine_match else None,
+            "engine_source": engine_match.group(4) if engine_match else None,
+            "engine_reason": engine_match.group(5) if engine_match else None,
+            "engine_seconds_left": int(engine_match.group(6)) if engine_match and engine_match.group(6) else None,
+            "entry_gate": entry_gate,
+            "entry_pause": entry_pause,
             "market_feed_state": market_feed_state,
             "market_feed_frames": market_feed_frames,
             "discovered_markets": discovered_markets,

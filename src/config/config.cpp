@@ -503,9 +503,15 @@ Config Config::load(const std::string& path) {
     s.scalp_v3_runner_max_secs_left = get_or<int>   (st, "scalp_v3_runner_max_secs_left",  s.scalp_v3_runner_max_secs_left);
     s.scalp_v3_runner_velocity_floor= get_or<double>(st, "scalp_v3_runner_velocity_floor", s.scalp_v3_runner_velocity_floor);
     s.lead_lag_scalp_enabled = get_or<bool>(st, "lead_lag_scalp_enabled", s.lead_lag_scalp_enabled);
+    s.lead_lag_scalp_impulse_only = get_or<bool>(
+        st, "lead_lag_scalp_impulse_only", s.lead_lag_scalp_impulse_only);
+    s.lead_lag_scalp_model_value_enabled = get_or<bool>(
+        st, "lead_lag_scalp_model_value_enabled", s.lead_lag_scalp_model_value_enabled);
     s.lead_lag_scalp_horizon_s = get_or<int>(st, "lead_lag_scalp_horizon_s", s.lead_lag_scalp_horizon_s);
     s.lead_lag_scalp_min_signal_confidence = get_or<double>(
         st, "lead_lag_scalp_min_signal_confidence", s.lead_lag_scalp_min_signal_confidence);
+    s.lead_lag_scalp_min_model_confidence = get_or<double>(
+        st, "lead_lag_scalp_min_model_confidence", s.lead_lag_scalp_min_model_confidence);
     s.lead_lag_scalp_min_cb_move_bps = get_or<double>(st, "lead_lag_scalp_min_cb_move_bps", s.lead_lag_scalp_min_cb_move_bps);
     s.lead_lag_scalp_min_cb_lead_bps = get_or<double>(st, "lead_lag_scalp_min_cb_lead_bps", s.lead_lag_scalp_min_cb_lead_bps);
     s.lead_lag_scalp_max_oracle_counter_bps = get_or<double>(st, "lead_lag_scalp_max_oracle_counter_bps", s.lead_lag_scalp_max_oracle_counter_bps);
@@ -523,6 +529,10 @@ Config Config::load(const std::string& path) {
         st, "lead_lag_scalp_stop_entry_5m_secs", default_stop_5m);
     s.lead_lag_scalp_stop_entry_15m_secs = get_or<int>(
         st, "lead_lag_scalp_stop_entry_15m_secs", default_stop_15m);
+    s.lead_lag_scalp_max_secs_remaining_5m = get_or<int>(
+        st, "lead_lag_scalp_max_secs_remaining_5m", 0);
+    s.lead_lag_scalp_max_secs_remaining_15m = get_or<int>(
+        st, "lead_lag_scalp_max_secs_remaining_15m", 0);
     s.lead_lag_scalp_flatten_secs = get_or<int>(st, "lead_lag_scalp_flatten_secs", s.lead_lag_scalp_flatten_secs);
     // A multi-horizon profile (horizon_s == 0) must retain the per-window
     // safety defaults. The legacy shared flatten setting only overrides the
@@ -541,6 +551,7 @@ Config Config::load(const std::string& path) {
     s.lead_lag_scalp_hard_stop_pct = get_or<double>(st, "lead_lag_scalp_hard_stop_pct", s.lead_lag_scalp_hard_stop_pct);
     s.lead_lag_scalp_hard_stop_ticks = get_or<int>(st, "lead_lag_scalp_hard_stop_ticks", s.lead_lag_scalp_hard_stop_ticks);
     s.lead_lag_scalp_reversal_exit_enabled = get_or<bool>(st, "lead_lag_scalp_reversal_exit_enabled", s.lead_lag_scalp_reversal_exit_enabled);
+    s.lead_lag_scalp_reversal_oracle_confirm_bps = get_or<double>(st, "lead_lag_scalp_reversal_oracle_confirm_bps", s.lead_lag_scalp_reversal_oracle_confirm_bps);
     s.lead_lag_scalp_rearm_bps = get_or<double>(st, "lead_lag_scalp_rearm_bps", s.lead_lag_scalp_rearm_bps);
     s.late_window_sniper_enabled = get_or<bool>(st, "late_window_sniper_enabled", s.late_window_sniper_enabled);
     s.late_window_sniper_min_secs = get_or<int>(st, "late_window_sniper_min_secs", s.late_window_sniper_min_secs);
@@ -560,6 +571,8 @@ Config Config::load(const std::string& path) {
     s.late_window_sniper_max_entries_per_window = get_or<int>(st, "late_window_sniper_max_entries_per_window", s.late_window_sniper_max_entries_per_window);
     s.late_window_sniper_hard_stop_ticks = get_or<int>(
         st, "late_window_sniper_hard_stop_ticks", s.late_window_sniper_hard_stop_ticks);
+    s.simulation_strategy_enabled = get_or<bool>(
+        st, "simulation_strategy_enabled", s.simulation_strategy_enabled);
     s.momentum_scalp_enabled        = get_or<bool>  (st, "momentum_scalp_enabled",         s.momentum_scalp_enabled);
     s.trend_filter_enabled          = get_or<bool>  (st, "trend_filter_enabled",           s.trend_filter_enabled);
     s.trend_filter_windows          = get_or<int>   (st, "trend_filter_windows",           s.trend_filter_windows);
@@ -677,6 +690,9 @@ Config Config::load(const std::string& path) {
         if (!(s.lead_lag_scalp_min_signal_confidence >= 0.55 &&
               s.lead_lag_scalp_min_signal_confidence <= 0.92))
             throw std::runtime_error("lead_lag_scalp_min_signal_confidence must be 0.55..0.92");
+        if (!(s.lead_lag_scalp_min_model_confidence >= 0.0 &&
+              s.lead_lag_scalp_min_model_confidence <= 0.5))
+            throw std::runtime_error("lead_lag_scalp_min_model_confidence must be 0..0.5");
         const std::vector<int> required_horizons = s.lead_lag_scalp_horizon_s == 0
             ? std::vector<int>{300, 900}
             : std::vector<int>{s.lead_lag_scalp_horizon_s};
@@ -695,6 +711,12 @@ Config Config::load(const std::string& path) {
             s.lead_lag_scalp_stop_entry_secs < 15 || s.lead_lag_scalp_stop_entry_secs >= 900 ||
             s.lead_lag_scalp_stop_entry_5m_secs < 15 || s.lead_lag_scalp_stop_entry_5m_secs >= 300 ||
             s.lead_lag_scalp_stop_entry_15m_secs < 15 || s.lead_lag_scalp_stop_entry_15m_secs >= 900 ||
+            (s.lead_lag_scalp_max_secs_remaining_5m != 0 &&
+             (s.lead_lag_scalp_max_secs_remaining_5m <= s.lead_lag_scalp_stop_entry_5m_secs ||
+              s.lead_lag_scalp_max_secs_remaining_5m >= 300)) ||
+            (s.lead_lag_scalp_max_secs_remaining_15m != 0 &&
+             (s.lead_lag_scalp_max_secs_remaining_15m <= s.lead_lag_scalp_stop_entry_15m_secs ||
+              s.lead_lag_scalp_max_secs_remaining_15m >= 900)) ||
             s.lead_lag_scalp_flatten_secs <= 0 ||
             s.lead_lag_scalp_flatten_5m_secs < 15 ||
             s.lead_lag_scalp_flatten_5m_secs > s.lead_lag_scalp_stop_entry_5m_secs ||
@@ -737,6 +759,14 @@ Config Config::load(const std::string& path) {
             [](int h) { return h == 300 || h == 900; });
         if (!has_supported_horizon)
             throw std::runtime_error("late-window sniper requires a 5m or 15m market universe");
+    }
+    if (s.simulation_strategy_enabled) {
+        if (c.runtime.mode != TradeMode::Paper)
+            throw std::runtime_error("simulation_strategy_enabled is paper-only");
+        if (std::find(c.polymarket.universe_horizons_seconds.begin(),
+                      c.polymarket.universe_horizons_seconds.end(), 300) ==
+            c.polymarket.universe_horizons_seconds.end())
+            throw std::runtime_error("simulation_strategy_enabled requires a 5m market universe");
     }
     auto* rs = tbl["risk"].as_table();
     auto& r = c.risk;

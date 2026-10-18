@@ -94,7 +94,9 @@ const std::vector<Feed> kFeeds = {
     {"pmmd",     "wss://ws-subscriptions-clob.polymarket.com/ws/market", 9101},
     {"rtds",     "wss://ws-live-data.polymarket.com",                    9102},
     {"binance",  "wss://stream.binance.com:9443/stream?streams="
-                 "btcusdt@trade/ethusdt@trade/solusdt@trade/xrpusdt@trade", 9103},
+                 "btcusdt@trade/ethusdt@trade/solusdt@trade/xrpusdt@trade/"
+                 "btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/"
+                 "xrpusdt@bookTicker", 9103},
     {"coinbase", "wss://ws-feed.exchange.coinbase.com",                  9104},
 };
 

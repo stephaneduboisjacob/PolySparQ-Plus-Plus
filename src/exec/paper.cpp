@@ -28,6 +28,20 @@ double passive_sell_price(const OrderBook& book, const OrderRequest& req) {
     px = std::max({px, req.limit_price, bid.price + tick});
     return std::ceil(px/tick-1e-9)*tick;
 }
+double visible_queue_ahead(const OrderBook& book, OrderDir dir, double price,
+                           double tick_size) {
+    const double tolerance = std::max(1e-6, tick_size * 0.25);
+    const auto levels = dir == OrderDir::Buy ? book.copy_bids() : book.copy_asks();
+    double total = 0.0;
+    for (const auto& level : levels) {
+        const bool ahead = dir == OrderDir::Buy
+            ? level.price + tolerance >= price
+            : level.price - tolerance <= price;
+        if (!ahead) break; // bids descend, asks ascend
+        if (std::isfinite(level.size) && level.size > 0.0) total += level.size;
+    }
+    return total;
+}
 } // namespace
 PaperExecutor::PaperExecutor(Positions& pos, Journal j,
                              double max_order_usd, double max_deployed_usd,
@@ -128,11 +142,14 @@ OrderResult PaperExecutor::submit(
                         exec_price, req.maker_min_price);
                     goto done;
                 }
-                r.order_shares = std::floor((req.size_usd / exec_price) * 100.0) / 100.0;
+                const double budget = std::min(req.size_usd, max_order_usd_);
+                r.order_shares = req.size_shares > 0.0
+                    ? std::floor(std::min(req.size_shares, budget / exec_price) * 100.0) / 100.0
+                    : std::floor((budget / exec_price) * 100.0) / 100.0;
                 const double min_shares = std::max(0.0, clob_min_shares_fallback_);
                 if (r.order_shares + 1e-9 < min_shares) {
                     const double needed = min_shares * exec_price;
-                    if (needed > std::min(req.size_usd,max_order_usd_) + 1e-9) {
+                    if (req.size_shares > 0.0 || needed > budget + 1e-9) {
                         r.reject_class = OrderResult::RejectClass::SizeBelowMinimum;
                         r.reject_reason = fmt::format("maker minimum {:.2f} shares needs ${:.2f}",
                                                       min_shares, needed);
@@ -150,9 +167,22 @@ OrderResult PaperExecutor::submit(
                     stored.maker_root_deadline_ms = now_ms + stored.maker_max_age_ms;
                 {
                     std::lock_guard<std::mutex> lk(open_mu_);
-                    open_orders_[r.client_order_id] = OpenOrder{
-                        stored, r.client_order_id, exec_price, r.order_shares, now_ms, now_ms,
-                        r.order_shares, book->generation()};
+                    OpenOrder resting{
+                        stored, r.client_order_id, exec_price, r.order_shares,
+                        now_ms, now_ms, now_ms,
+                        r.order_shares,
+                        visible_queue_ahead(*book, req.dir, exec_price, req.tick_size)};
+                    const double tolerance = std::max(1e-6, req.tick_size * 0.25);
+                    for (const auto& [id, other] : open_orders_) {
+                        if (id == r.client_order_id || other.req.condition_id != req.condition_id ||
+                            other.req.token_id != req.token_id || other.req.side != req.side ||
+                            other.req.dir != req.dir) continue;
+                        const bool ahead = req.dir == OrderDir::Buy
+                            ? other.price + tolerance >= exec_price
+                            : other.price - tolerance <= exec_price;
+                        if (ahead) resting.queue_ahead_shares += other.shares;
+                    }
+                    open_orders_[r.client_order_id] = std::move(resting);
                 }
                 spdlog::info("PAPER MAKER REST {} {:.2f}@{:.3f} ${:.2f} ({})",
                              to_string(req.side), r.order_shares, exec_price,
@@ -207,8 +237,20 @@ OrderResult PaperExecutor::submit(
             if (req.execution_mode != ExecutionMode::Taker) {
                 const double px = passive_sell_price(*book,req);
                 const double shares = std::floor(std::min(want,held)*100.0+1e-8)/100.0;
-                if (px<=b.price || px>=1 || shares+1e-9<std::max(0.0,clob_min_shares_fallback_) || shares<=0) {
-                    r.reject_reason="no passive sell price or sufficient unreserved maker inventory"; goto done;
+                if (px<=b.price) {
+                    r.reject_class=OrderResult::RejectClass::PostOnlyCross;
+                    r.reject_reason="passive sell price would cross the best bid"; goto done;
+                }
+                if (px>=1.0) {
+                    r.reject_class=OrderResult::RejectClass::InvalidPayload;
+                    r.reject_reason="passive sell price is outside the valid share-price range"; goto done;
+                }
+                if (shares+1e-9<std::max(0.0,clob_min_shares_fallback_) || shares<=0) {
+                    r.reject_class=OrderResult::RejectClass::SizeBelowMinimum;
+                    r.reject_reason=fmt::format(
+                        "CLOB min {:.2f} shares: passive sell has {:.2f} unreserved shares",
+                        std::max(0.0,clob_min_shares_fallback_), shares);
+                    goto done;
                 }
                 auto stored=req;
                 const auto now=Clock::wall_ns()/1'000'000LL;
@@ -218,7 +260,19 @@ OrderResult PaperExecutor::submit(
                 r.order_price=px;r.order_shares=shares;
                 {
                     std::lock_guard<std::mutex> lk(open_mu_);
-                    open_orders_[r.client_order_id]={stored,r.client_order_id,px,shares,now,now,shares,book->generation()};
+                    OpenOrder resting{stored,r.client_order_id,px,shares,now,now,now,
+                        shares,
+                        visible_queue_ahead(*book, req.dir, px, req.tick_size)};
+                    const double tolerance=std::max(1e-6,req.tick_size*0.25);
+                    for(const auto& [id,other]:open_orders_){
+                        if(id==r.client_order_id||other.req.condition_id!=req.condition_id||
+                           other.req.token_id!=req.token_id||other.req.side!=req.side||
+                           other.req.dir!=req.dir)continue;
+                        const bool ahead=req.dir==OrderDir::Buy
+                            ?other.price+tolerance>=px:other.price-tolerance<=px;
+                        if(ahead)resting.queue_ahead_shares+=other.shares;
+                    }
+                    open_orders_[r.client_order_id]=std::move(resting);
                 }
                 spdlog::info("PAPER MAKER SELL REST {} {:.2f}@{:.3f} ({})",req.asset,shares,px,req.source);
                 goto done;
@@ -226,7 +280,15 @@ OrderResult PaperExecutor::submit(
             if (req.limit_price > 0 && exec_price < req.limit_price) {
                 r.reject_reason = "bid below sell limit"; goto done;
             }
-            r.fill_shares = std::min({want, held, b.size});
+            const double sellable = std::min(want, held);
+            if (sellable+1e-9<std::max(0.0,clob_min_shares_fallback_)) {
+                r.reject_class=OrderResult::RejectClass::SizeBelowMinimum;
+                r.reject_reason=fmt::format(
+                    "CLOB min {:.2f} shares: sell size {:.2f} too small (holding retained)",
+                    std::max(0.0,clob_min_shares_fallback_), sellable);
+                goto done;
+            }
+            r.fill_shares = std::min(sellable, b.size);
             if (r.fill_shares <= 0) { r.reject_reason = "no position to sell"; goto done; }
         }
         r.fill_price = exec_price;
@@ -279,21 +341,9 @@ std::size_t PaperExecutor::maintain_open_orders(
                 now_ms >= o.req.window_close_ms - std::max(0, o.req.maker_cancel_before_close_ms);
             const bool expired = o.req.maker_root_deadline_ms > 0 && now_ms >= o.req.maker_root_deadline_ms;
             double quantity = 0;
-            // A new book generation is required. Visible depth is a simulation,
-            // not queue priority or evidence of an actual venue fill.
-            if (book && !closing && !expired && book->generation()!=o.last_fill_generation) {
-                const auto touch = o.req.dir==OrderDir::Buy ? book->best_ask() : book->best_bid();
-                const bool crossed = touch.price>0 && (o.req.dir==OrderDir::Buy
-                    ? touch.price<=o.price+1e-9 : touch.price>=o.price-1e-9);
-                if (crossed) quantity=std::min(o.shares,std::floor(touch.size*100.0)/100.0);
-                if (quantity>0 && o.req.dir==OrderDir::Sell) {
-                    double held=0;
-                    for (const auto& p:positions_.snapshot())
-                        if (p.condition_id==o.req.condition_id && p.side==o.req.side) held=p.shares;
-                    quantity=std::min(quantity,held);
-                }
-                o.last_fill_generation=book->generation();
-            }
+            // A BBO touch/cross is not a maker execution. Fills are driven only
+            // by on_public_trade(), which requires an aggressor print at the
+            // resting price after estimated queue ahead has traded.
             if (quantity>0 || closing || expired) {
                 const bool terminal=closing || expired || o.shares-quantity<=1e-8;
                 actions.push_back({o,quantity,terminal,expired && !closing &&
@@ -313,6 +363,21 @@ std::size_t PaperExecutor::maintain_open_orders(
                     if (o.req.dir==OrderDir::Buy)
                         o.shares=std::floor(o.shares*o.price/px*100.0)/100.0;
                     o.price=px;
+                    o.active_since_ms=now_ms;
+                    o.queue_ahead_shares=visible_queue_ahead(
+                        *book,o.req.dir,px,o.req.tick_size);
+                    const double tolerance=std::max(1e-6,o.req.tick_size*0.25);
+                    for(const auto& [other_id,other]:open_orders_){
+                        if(other_id==o.client_order_id||
+                           other.req.condition_id!=o.req.condition_id||
+                           other.req.token_id!=o.req.token_id||
+                           other.req.side!=o.req.side||
+                           other.req.dir!=o.req.dir)continue;
+                        const bool ahead=o.req.dir==OrderDir::Buy
+                            ?other.price+tolerance>=px
+                            :other.price-tolerance<=px;
+                        if(ahead)o.queue_ahead_shares+=other.shares;
+                    }
                     reprices.push_back({o.req,o.client_order_id,px,o.shares});
                 }
                 o.last_reprice_ms=now_ms;
@@ -351,6 +416,126 @@ std::size_t PaperExecutor::maintain_open_orders(
         if (journal_.on_reprice)
             journal_.on_reprice(r.req,r.client_order_id,r.price,r.shares);
     return actions.size();
+}
+
+std::size_t PaperExecutor::on_public_trade(
+    const std::string& condition_id, const std::string& token_id,
+    ShareSide side, std::optional<OrderDir> aggressor, double price, double size,
+    std::int64_t exchange_ms, std::int64_t received_ms) {
+    if (condition_id.empty() || token_id.empty() || received_ms <= 0 ||
+        !std::isfinite(price) || !std::isfinite(size) || price <= 0.0 ||
+        price >= 1.0 || size <= 0.0) return 0;
+    // Polymarket's trade event timestamp is exchange time, while received_ms
+    // is local callback time. Prefer exchange time so a delayed websocket
+    // print from before placement (or before a reprice) cannot create a paper
+    // fill after it arrives. Fall back only when the feed omits its timestamp.
+    const std::int64_t trade_ms = exchange_ms > 0 ? exchange_ms : received_ms;
+
+    struct FilledOrder {
+        OrderRequest req;
+        std::string id;
+        double order_price = 0.0;
+        double original_shares = 0.0;
+        double fill_shares = 0.0;
+        bool terminal = false;
+        Position after;
+    };
+    std::vector<FilledOrder> fills;
+    {
+        std::lock_guard<std::mutex> lk(open_mu_);
+        const double epsilon = 1e-9;
+        for (auto it = open_orders_.begin(); it != open_orders_.end();) {
+            auto& order = it->second;
+            const double tick = order.req.tick_size > 0.0
+                ? order.req.tick_size : 0.01;
+            const double tolerance = std::max(1e-6, tick * 0.25);
+            const double difference = price - order.price;
+            const bool at_order_price = std::fabs(difference) <= tolerance;
+            const bool better_queue_price = order.req.dir == OrderDir::Buy
+                ? difference > tolerance : difference < -tolerance;
+            // A print beyond our limit proves the intervening price level was
+            // traversed, so a resting order at the better limit must have
+            // matched. This remains valid even when the feed's BBO-based
+            // aggressor inference is unavailable or disagrees after the book
+            // has already moved. At the exact limit we still require the
+            // correctly directed aggressor print.
+            const bool traded_through = order.req.dir == OrderDir::Buy
+                ? difference < -tolerance : difference > tolerance;
+            const bool matching_order =
+                order.req.condition_id == condition_id &&
+                order.req.token_id == token_id && order.req.side == side &&
+                ((aggressor &&
+                  ((*aggressor == OrderDir::Sell && order.req.dir == OrderDir::Buy) ||
+                   (*aggressor == OrderDir::Buy && order.req.dir == OrderDir::Sell))) ||
+                 traded_through);
+            if (!matching_order || received_ms < order.active_since_ms ||
+                trade_ms <= order.active_since_ms) {
+                ++it;
+                continue;
+            }
+
+            // Better-priced prints consume displayed queue ahead. At the exact
+            // order price, only volume beyond that queue can fill our shares.
+            // A trade through the limit clears the quoted price level, even if
+            // the feed does not preserve the pre-trade BBO needed to infer its
+            // aggressor reliably.
+            if (better_queue_price && !traded_through) {
+                order.queue_ahead_shares = std::max(0.0,
+                    order.queue_ahead_shares - size);
+                ++it;
+                continue;
+            }
+            if (!at_order_price && !better_queue_price) {
+                // Only a through-limit print reaches here. Its price is worse
+                // than our limit; the order must have cleared the displayed
+                // queue at our level before the market traded beyond it.
+                order.queue_ahead_shares = 0.0;
+            }
+            const double queue_before = order.queue_ahead_shares;
+            double quantity = at_order_price
+                ? std::min(order.shares, std::max(0.0, size - queue_before))
+                : std::min(order.shares, size);
+            if (at_order_price)
+                order.queue_ahead_shares = std::max(0.0, queue_before - size);
+            quantity = std::floor(quantity * 100.0 + epsilon) / 100.0;
+            if (quantity <= 0.0) {
+                ++it;
+                continue;
+            }
+
+            const bool terminal = order.shares - quantity <= 1e-8;
+            FilledOrder fill{order.req, order.client_order_id, order.price,
+                order.original_shares, quantity, terminal, {}};
+            fill.after = positions_.apply_fill(order.req.condition_id,
+                order.req.asset, order.req.horizon_s, order.req.token_id,
+                order.req.side, order.req.dir, order.price, quantity,
+                order.req.window_close_ms, 0.0);
+            order.shares -= quantity;
+            fills.push_back(std::move(fill));
+            if (terminal) it = open_orders_.erase(it);
+            else ++it;
+        }
+    }
+
+    for (const auto& fill : fills) {
+        OrderResult update;
+        update.client_order_id = fill.id;
+        update.exchange_order_id = fill.id;
+        update.accepted = true;
+        update.terminal = fill.terminal;
+        update.resting = !fill.terminal;
+        update.status = fill.terminal ? "filled" : "partial";
+        update.order_price = fill.order_price;
+        update.order_shares = fill.original_shares;
+        update.fill_price = fill.order_price;
+        update.fill_shares = fill.fill_shares;
+        update.after = fill.after;
+        spdlog::info("PAPER MAKER TRADE_FILL {} {:.2f}@{:.3f} ({})",
+            to_string(fill.req.dir), fill.fill_shares, fill.order_price,
+            fill.req.source);
+        if (journal_.on_order) journal_.on_order(fill.req, update);
+    }
+    return fills.size();
 }
 
 std::size_t PaperExecutor::open_order_count() const {

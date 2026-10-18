@@ -1,7 +1,7 @@
 #pragma once
-// Paper-trading executor. Simulates fills against the live order book at
-// time of submission. All orders + fills are persisted via the journal
-// callback. Caller is responsible for risk checks (caps, deployed limit).
+// Paper-trading executor. Takers use executable top-of-book depth; passive
+// makers require public trade prints and an estimated queue ahead. All order
+// updates are persisted via the journal callback.
 #include "core/types.hpp"
 #include "exec/positions.hpp"
 #include "market/orderbook.hpp"
@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 namespace vp {
@@ -56,6 +57,7 @@ struct OrderRequest {
     double      decision_model_up_high = 0;
     double      decision_midpoint = 0;
     int64_t     decision_reference_age_ms = 0;
+    double      entry_avg_price_at_submit = 0; // internal: basis for delayed SELL-fill P&L
 };
 struct OrderResult {
     bool         accepted = false;
@@ -119,6 +121,15 @@ public:
     std::size_t maintain_open_orders(
         const std::function<const OrderBook*(const std::string&, ShareSide)>& book_lookup,
         std::int64_t now_ms);
+    // Use public trade prints to simulate passive maker fills. A book touch by
+    // itself is never treated as a fill; prints at the order price must first
+    // clear the estimated queue ahead.
+    std::size_t on_public_trade(const std::string& condition_id,
+                                const std::string& token_id,
+                                ShareSide side, std::optional<OrderDir> aggressor,
+                                double price, double size,
+                                std::int64_t exchange_ms,
+                                std::int64_t received_ms);
     std::size_t open_order_count() const;
     void cancel_open_orders();
     bool cancel_order(const std::string& client_order_id);
@@ -155,8 +166,11 @@ private:
         double shares = 0;
         std::int64_t placed_ms = 0;
         std::int64_t last_reprice_ms = 0;
+        // Earliest exchange event time allowed to fill at the currently
+        // active price. Repricing loses queue priority and starts a new epoch.
+        std::int64_t active_since_ms = 0;
         double original_shares = 0;
-        std::uint64_t last_fill_generation = 0;
+        double queue_ahead_shares = 0;
     };
     mutable std::mutex open_mu_;
     std::unordered_map<std::string, OpenOrder> open_orders_;

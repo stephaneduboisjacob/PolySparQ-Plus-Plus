@@ -60,6 +60,11 @@ public:
         return q_.size();
     }
 
+    bool is_shutdown() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return shutdown_;
+    }
+
 private:
     mutable std::mutex      mu_;
     std::condition_variable cv_;

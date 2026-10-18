@@ -58,6 +58,55 @@ The executable and default database identifiers are retained for compatibility. 
 | `mobile/` | Expo / React Native client |
 | `config/polypulse.toml.example` | Minimal paper-mode configuration template |
 
+## Scalper impulse research
+
+When a lead scalper is enabled, the engine records a shadow-only impulse
+candidate from Binance top-of-book order flow and volatility-scaled 250/500ms
+price movement. It also records one feature sample per second and follows the
+selected Polymarket best bid for five seconds. These observations never submit
+orders. The `lead_lag_scalp_impulse_only` profile can consume the same detector
+for a separate BTC 5m PAPER challenger; it does not change the production
+Coinbase/model entry path. Its maker orders still use the configured risk and
+exit safeguards.
+
+Review the PAPER shadow observations with:
+
+```bash
+./.venv-cockpit/bin/python scripts/review_scalper_impulse_shadow.py --hours 24
+```
+
+The report separates bot instances, sessions, assets, and horizons. Its
+chronological 70/30 check keeps every candidate from a market window in the
+same split. Treat small samples as inconclusive. The signal must show enough
+later, independent windows before anyone should draw a profitability conclusion.
+A quote touching the target or stop does not establish a maker fill; venue queue
+position remains unknown. The shadow report is not realized P&L.
+
+Audit simulated maker fills against the public same-token trade tape with:
+
+```bash
+./.venv-cockpit/bin/python scripts/review_paper_maker_prints.py --hours 6 --current-sessions
+```
+
+The report checks for a same-direction price-crossing print around each paper
+fill and, when available, its BBO-inferred aggressor. A matching print still
+does not prove queue priority or a fill; no nearby print can also reflect tape
+gaps. Add `--current-sessions` to exclude fills from before each bot's current
+PAPER process began; this is the right view for telemetry enabled in newer
+sessions. The 5m and 15m baseline configs persist that tape for new sessions.
+
+## Article-reference paper experiment
+
+The local `btc-5m-article-sim-test` configuration is a separate paper-only
+reference run: one 5-share BTC UP maker entry at $0.49, held until a $0.70
+maker target fills or the final 30 seconds. At that boundary the target is
+cancelled and the engine may post a fresh-book, post-only sell one tick above
+the bid; if no valid maker price exists or it does not fill, the position stays
+open for paper settlement. The exit does not cross the spread or pay taker fees.
+The current local risk caps allow at most $2.45 per window and $4.90 total
+deployed across overlapping windows. Paper book touches do not model venue queue
+priority, and this experiment is not evidence of profitability.
+
 ## Safety and responsible use
 
 - Paper mode is the default in the example configuration. Do not switch to live mode until you understand the code, venue rules, and operational risks.

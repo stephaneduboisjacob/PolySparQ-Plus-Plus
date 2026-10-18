@@ -98,6 +98,10 @@ mobile/android/app/debug.keystore
 !/scripts/cockpit_ui.html
 !/scripts/cockpit_v2.html
 !/scripts/cockpit_v3.html
+!/scripts/review_scalper_impulse_shadow.py
+!/scripts/review_scalper_exit_pairs.py
+!/scripts/review_paper_maker_prints.py
+!/scripts/review_maker_quote_fill_pressure.py
 !/scripts/cockpit_v5.html
 !/scripts/prediction_board.py
 !/scripts/review_flatten_boundary.py

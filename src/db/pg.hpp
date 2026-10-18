@@ -3,6 +3,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -107,7 +108,8 @@ public:
                          const std::string& token_id,
                          ShareSide side,
                          double price, double size,
-                         std::int64_t exchange_ms) noexcept;
+                         std::int64_t exchange_ms,
+                         std::optional<OrderDir> aggressor = std::nullopt) noexcept;
     void upsert_market(const std::string& condition_id,
                        const std::string& asset, int horizon_s,
                        double target_price,

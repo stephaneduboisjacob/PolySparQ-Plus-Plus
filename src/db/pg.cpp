@@ -489,15 +489,18 @@ void Pg::insert_book_snapshot(const std::string& cid, const std::string& token_i
 }
 void Pg::insert_pm_trade(const std::string& cid, const std::string& token_id,
                          ShareSide side, double price, double size,
-                         std::int64_t exchange_ms) noexcept {
+                         std::int64_t exchange_ms,
+                         std::optional<OrderDir> aggressor) noexcept {
     try {
         std::lock_guard<std::mutex> lock(conn_mu_);
         pqxx::work tx{*conn_};
         tx.exec_params(
             "INSERT INTO vp.pm_trades "
-            "(ts, condition_id, token_id, side_label, price, size) "
-            "VALUES (to_timestamp($1/1000.0), $2, $3, $4::vp.share_side, $5, $6)",
-            (long long)exchange_ms, cid, token_id, side_to_pg(side), price, size);
+            "(ts, condition_id, token_id, side_label, price, size, aggressor) "
+            "VALUES (to_timestamp($1/1000.0), $2, $3, $4::vp.share_side, $5, $6, "
+            "NULLIF($7, '')::vp.order_side)",
+            (long long)exchange_ms, cid, token_id, side_to_pg(side), price, size,
+            aggressor ? dir_to_pg(*aggressor) : std::string{});
         tx.commit();
     } catch (const pqxx::broken_connection& e) {
         recover_disconnected("insert_pm_trade", e.what());

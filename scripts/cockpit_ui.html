@@ -94,7 +94,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code','C
 /* OVERVIEW GRID */
 #tabOverview .g{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
 #tabOverview .g.wide{grid-template-columns:1fr 1fr;margin-top:10px}
-#tabOverview .g.tri{grid-template-columns:1fr 1fr 1fr;margin-top:10px}
+#tabOverview .g.tri{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:10px}
 .stat-box{display:flex;flex-direction:column;gap:4px}
 .stat-label{font-size:10px;color:var(--text3);letter-spacing:1px;text-transform:uppercase}
 .stat-val{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
@@ -863,6 +863,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
 #tabScalpers .sd-status{padding:5px 7px;border:1px solid #33433a;color:#a7b6ac;font:7px var(--mono);letter-spacing:.5px;white-space:nowrap}
 #tabScalpers .sd-status.running{border-color:#31513f;color:var(--sd-green)}
 #tabScalpers .sd-status.degraded{border-color:#593638;color:#f08083}
+#tabScalpers .sd-status.paused{border-color:#605439;color:#e0b96f}
 #tabScalpers .sd-chips{display:flex;gap:5px;flex-wrap:wrap;margin:10px 0}
 #tabScalpers .sd-chip{padding:4px 6px;border:1px solid #2e3b35;color:#93a198;font:7px var(--mono);letter-spacing:.5px}
 #tabScalpers .sd-feed{display:grid;grid-template-columns:auto auto minmax(0,1fr);align-items:center;gap:9px;padding:8px 9px;border:1px solid #33433a;background:#0c1211;color:#a7b6ac;font:7px var(--mono);letter-spacing:.6px}
@@ -875,15 +876,33 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
 #tabScalpers .sd-feed.unknown{border-color:#51452f}
 #tabScalpers .sd-feed.unknown i{background:#e0b96f}
 #tabScalpers .sd-feed.unknown b{color:#e0b96f}
-#tabScalpers .sd-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:10px 0}
+#tabScalpers .sd-gates{margin-top:8px;padding:8px 9px;border:1px solid #2e3a35;background:#0d1413}
+#tabScalpers .sd-gates.quiet{border-color:#51452f;background:#15120d}
+#tabScalpers .sd-gates.stale{border-color:#593638;background:#160f10}
+#tabScalpers .sd-gates.paused{border-color:#605439;background:#18150f}
+#tabScalpers .sd-gates-head{display:flex;justify-content:space-between;gap:8px;color:#9eaaa2;font:7px var(--mono);letter-spacing:.8px}
+#tabScalpers .sd-gates-head b{color:var(--sd-green);font-weight:500}
+#tabScalpers .sd-gates.quiet .sd-gates-head b{color:#e0b96f}
+#tabScalpers .sd-gates.stale .sd-gates-head b{color:#f08083}
+#tabScalpers .sd-gates.paused .sd-gates-head b{color:#f1bd78}
+#tabScalpers .sd-gates-summary{margin-top:6px;color:#b8c4bc;font:8px/1.5 var(--mono)}
+#tabScalpers .sd-gates-summary small{color:#7c8981;font-size:7px}
+#tabScalpers .sd-gates-summary small.sd-gates-note{display:block;margin-top:4px;color:#849188}
+#tabScalpers .sd-gates-assets{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+#tabScalpers .sd-gate-asset{padding:3px 5px;border:1px solid #29352f;color:#99a69e;font:7px var(--mono)}
+#tabScalpers .sd-gate-asset.ready{border-color:#31513f;color:var(--sd-green)}
+#tabScalpers .sd-gate-asset b{color:#d6e0d9;font-weight:500}
+#tabScalpers .sd-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;margin:10px 0}
 #tabScalpers .sd-metric{padding:8px;border:1px solid #25312c;background:#0c1211;min-width:0}
 #tabScalpers .sd-metric small{display:block;overflow:hidden;color:#74847a;font:6px var(--mono);letter-spacing:.6px;text-overflow:ellipsis;white-space:nowrap}
 #tabScalpers .sd-metric b{display:block;overflow:hidden;margin-top:6px;color:#dfe8e1;font:500 11px var(--mono);text-overflow:ellipsis;white-space:nowrap}
+#tabScalpers .sd-metric em{display:block;overflow:hidden;margin-top:4px;color:#75847c;font:6px var(--mono);font-style:normal;text-overflow:ellipsis;white-space:nowrap}
 #tabScalpers .sd-metric b.pos{color:var(--sd-green)}#tabScalpers .sd-metric b.neg{color:#ef8b8f}
 #tabScalpers .sd-block{margin-top:11px}
 #tabScalpers .sd-block-head{display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;color:#9eaaa2;font:7px var(--mono);letter-spacing:.8px}
 #tabScalpers .sd-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:7px 0;border-top:1px solid #202a25;color:#bdc9c0;font-size:8px}
 #tabScalpers .sd-row small{display:block;overflow:hidden;margin-top:3px;color:#77867d;font:7px var(--mono);text-overflow:ellipsis;white-space:nowrap}
+#tabScalpers .sd-row .sd-reject{color:#e0b96f}
 #tabScalpers .sd-row b{font:500 8px var(--mono);white-space:nowrap}
 #tabScalpers .sd-empty{padding:10px 0;border-top:1px solid #202a25;color:#77867d;font-size:8px}
 #tabScalpers .sd-warn{color:#e7bf7c!important}
@@ -907,7 +926,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
     <button class="btn-icon" id="btnPause" title="Pause live updates">⏸</button>
     <div id="connDot" title="SSE connection"></div>
   </div>
-</header><div id="pnlCommand" role="region" aria-label="Fleet P&amp;L command center"><div class="pc-inner" id="pnlCommandInner"><span class="pc-load">P&amp;L command center connecting…</span></div></div>
+</header><div id="pnlCommand" role="region" aria-label="Fleet fill cash flow command center"><div class="pc-inner" id="pnlCommandInner"><span class="pc-load">Fleet fill cash flow connecting…</span></div></div>
 <div id="bootOverlay"><pre id="bootText"></pre></div>
 <div id="tabTermBar"><span id="ttLeft">&gt; terminal ready</span><span class="tt-live" id="ttClock">--:--:-- UTC</span></div>
 <div class="system-ribbon"></div>
@@ -943,7 +962,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
 <div class="observatory-hero"><div><div class="hero-eyebrow"><i></i> THE POLYSPARQ++ OBSERVATORY</div><h1>Market intelligence.<br><em>At execution speed.</em></h1><p>Your capital, your strategies, your view of the market.<br>A sharper perspective on every decision.</p><button class="hero-button" onclick="document.querySelector('[data-tab=manualpred]').click()">Explore predictions <span aria-hidden="true">↗</span></button></div><svg class="hero-graphic" viewBox="0 0 280 160" fill="none" aria-hidden="true"><defs><radialGradient id="orbGlow"><stop stop-color="#73efbe" stop-opacity=".2"/><stop offset="1" stop-color="#73efbe" stop-opacity="0"/></radialGradient></defs><circle cx="140" cy="80" r="78" fill="url(#orbGlow)"/><g stroke="#75b9a0" stroke-opacity=".25"><ellipse cx="140" cy="80" rx="111" ry="44" transform="rotate(-24 140 80)"/><ellipse cx="140" cy="80" rx="95" ry="58" transform="rotate(32 140 80)"/><circle cx="140" cy="80" r="33"/><path d="M15 80h250M140 8v144" stroke-dasharray="3 6"/></g><g class="hero-orbit"><circle cx="239" cy="37" r="4" fill="#73efbe"/><circle cx="52" cy="113" r="3" fill="#b8a1ef"/></g><path d="M96 84h21l9-24 15 42 12-31 8 13h23" stroke="#99f7d2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="140" cy="80" r="68" stroke="#73efbe" stroke-opacity=".08"/></svg></div>
 <div class="card" id="equityHero" style="padding:20px 22px;margin-top:14px">
   <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
-    <div><div style="font-size:9px;letter-spacing:1.2px;color:var(--text3)">FLEET EQUITY CURVE · CUMULATIVE NET P&amp;L · 30 DAYS · NET OF FEES</div>
+    <div><div style="font-size:9px;letter-spacing:1.2px;color:var(--text3)">FLEET NET FILL CASH FLOW · UTC · 30 CALENDAR DAYS · AFTER FEES</div>
     <div id="eqHeroTitle" style="font-size:15px;font-weight:600;margin-top:4px">Loading…</div></div>
     <div id="eqHeroStats" style="display:flex;gap:16px;font-family:var(--mono);font-size:10px;color:var(--text3)"></div>
   </div>
@@ -971,6 +990,10 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
       <div class="speed-grid" id="speedPanel"></div>
     </div>
   </div>
+  <div class="card entry-diagnostics" id="entryDiagnosticsCard">
+    <div class="card-title"><span class="ct-accent" style="background:var(--orange)"></span>SCALPER ENTRY GATES <span id="entryDiagnosticsUpdated" class="entry-diag-updated">READ-ONLY · LAST 60 SECONDS</span></div>
+    <div id="entryDiagnostics" class="entry-diag-grid"><div class="entry-diag-empty">Waiting for the bot gate feed…</div></div>
+  </div>
   <div class="g">
     <div class="card" style="grid-column:1/3">
       <div class="card-title"><span class="ct-accent"></span>SESSION EQUITY</div>
@@ -987,7 +1010,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
   </div>
   <div class="g wide">
     <div class="card chart-card">
-      <div class="card-title"><span class="ct-accent" style="background:var(--blue)"></span>EQUITY CURVE <span style="font-size:9px;color:var(--text3);font-weight:400;margin-left:auto">per-bot · click legend</span></div>
+      <div class="card-title"><span class="ct-accent" style="background:var(--blue)"></span>BOT NET FILL CASH FLOW <span style="font-size:9px;color:var(--text3);font-weight:400;margin-left:auto">per-bot · excludes open-position marks · click legend</span></div>
       <div class="chart-host" id="pnlChartHost"></div>
     </div>
     <div class="card">
@@ -997,8 +1020,12 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
   </div>
   <div class="g tri">
     <div class="card">
-      <div class="card-title"><span class="ct-accent" style="background:var(--cyan)"></span>SOURCE P&amp;L</div>
+      <div class="card-title"><span class="ct-accent" style="background:var(--cyan)"></span>ENTRY-SOURCE REALIZED P&amp;L</div>
       <div id="sourcePnl" class="scrollable"></div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="ct-accent" style="background:var(--red)"></span>EXIT PERFORMANCE · 24H</div>
+      <div id="exitPerformance" class="scrollable"></div>
     </div>
     <div class="card">
       <div class="card-title"><span class="ct-accent" style="background:var(--orange)"></span>WIN RATE BY HOUR (EDT)</div>
@@ -1170,13 +1197,13 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
 <section id="tabScalpers" class="tab-section">
   <div class="sd-wrap">
     <div class="sd-hero">
-      <div><div class="sd-kicker">BTC / ETH / SOL / XRP · 5M / 15M · PAPER BOT MONITOR</div><h1>Window bots</h1>
-        <p>Track the Coinbase-lead scalpers and late settlement sniper: feed health, open exposure, resting maker quotes, and recent fills. Bot state refreshes every 1.5 seconds.</p></div>
+      <div><div class="sd-kicker">BTC / ETH / SOL / XRP · 5M / 15M · WINDOW BOT TELEMETRY</div><h1>Window bots</h1>
+        <p>Track each configured window bot: feed health, entry filters, exposure, resting maker quotes, and recent fills. Horizon, asset scope, price band, and entry timing are shown from that bot’s configuration. Filtered scans are expected; failed submissions appear in recent order activity. State refreshes every 1.5 seconds.</p></div>
       <div class="sd-controls"><span class="sd-updated" id="scalperDeskUpdated">CONNECTING</span><button class="btn-sm" onclick="loadScalperDesk(true)">↻ REFRESH</button><button class="btn-sm" onclick="document.querySelector('[data-tab=fleet]').click()">BOT CONTROLS</button></div>
     </div>
     <div class="sd-kpis" id="scalperDeskKpis"></div>
-    <div class="sd-sample" id="windowBotNote"><b>STRATEGY SCOPE</b><span>Both lead scalpers trade BTC, ETH, SOL, and XRP on 5m and 15m markets. Their entry cutoffs are 90 seconds for 5m and 270 seconds for 15m; the late sniper keeps its 15–45 second settlement entries on both horizons. Entries require fresh Coinbase and Chainlink references, model confidence, forecast value at the current ask, and a fresh Polymarket book.</span></div>
-    <div class="sd-grid" id="scalperDeskGrid"><div class="sd-loading">WAITING FOR PAPER BOT TELEMETRY…</div></div>
+    <div class="sd-sample" id="windowBotNote"><b>STRATEGY SCOPE</b><span>Every card reports that bot’s configured horizon, assets, entry band, and timing. Scalp entry gates require current source and book data; settlement-only profiles show their own per-horizon entry window and conservative edge threshold.</span></div>
+    <div class="sd-grid" id="scalperDeskGrid"><div class="sd-loading">WAITING FOR BOT TELEMETRY…</div></div>
   </div>
 </section>
 
@@ -1453,7 +1480,7 @@ try{
 const fmt=(n,d=2)=>n==null?'—':(+n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtPx=n=>n==null?'—':n<10?fmt(n,4):fmt(n,2);
 const pnlClass=n=>n==null?'neutral':n>0?'pos':'neg';
-const pnlSign=n=>n==null?'':n>0?'+':'';
+const pnlSign=n=>n==null?'':n>0?'+':n<0?'−':'';
 const fmtSecs=s=>{if(s==null||s<0)return'—';if(s<60)return`${s}s`;if(s<3600)return`${Math.floor(s/60)}m${s%60?` ${s%60}s`:''}`;return`${Math.floor(s/3600)}h`;};
 const horizLabel=s=>({300:'5m',900:'15m',3600:'1h',86400:'1d'}[s]||`${s}s`);
 function setText(id,text,cls){
@@ -1547,11 +1574,11 @@ function loadPnlCommand(force){
     const bars=(r.days||[]).slice(-8).map(d=>{const h=Math.min(26,Math.max(3,Math.abs(d.net)*0.55));
       return `<i class="${d.net<0?'neg':''}" style="height:${h}px" title="${d.day}: $${d.net.toFixed(2)}"></i>`;}).join('');
     const chips=(r.instances||[]).map(t=>`<span class="pc-chip">${esc(t.instance)} <b class="${cls(t.net)}">${t.net>=0?'+':''}$${t.net.toFixed(2)}</b> <span style="color:var(--text3)">${t.w}W/${t.l}L</span></span>`).join('');
-    el.innerHTML=`<div class="pc-big"><small>FLEET · TODAY · NET OF FEES</small><strong class="${cls(net)}">${net>=0?'+':'−'}$${Math.abs(net).toFixed(2)}</strong></div>
-      <div class="pc-cell"><small>SETTLED TODAY</small><b>${w}W / ${l}L</b></div>
-      <div class="pc-cell"><small>FEES TODAY</small><b>${fees>=0?'$':'-$'}${Math.abs(fees).toFixed(2)}</b></div>
-      <div class="pc-cell"><small>7-DAY NET</small><b class="${cls(wk)}">${wk>=0?'+':'−'}$${Math.abs(wk).toFixed(2)}</b></div>
-      <div class="pc-cell"><small>LAST 8 DAYS</small><div class="pc-bars">${bars}</div></div>
+    el.innerHTML=`<div class="pc-big"><small>FILL CASH FLOW · TODAY UTC · AFTER FEES</small><strong class="${cls(net)}">${net>=0?'+':'−'}$${Math.abs(net).toFixed(2)}</strong></div>
+      <div class="pc-cell"><small>SETTLEMENTS · TODAY UTC</small><b>${w}W / ${l}L</b></div>
+      <div class="pc-cell"><small>FEES · TODAY UTC</small><b>${fees>=0?'$':'-$'}${Math.abs(fees).toFixed(2)}</b></div>
+      <div class="pc-cell"><small>FILL FLOW · LAST 7 UTC DAYS</small><b class="${cls(wk)}">${wk>=0?'+':'−'}$${Math.abs(wk).toFixed(2)}</b></div>
+      <div class="pc-cell"><small>FILL FLOW · LAST 8 UTC DAYS</small><div class="pc-bars">${bars}</div></div>
       <div class="pc-chips">${chips||'<span class="pc-chip" style="color:var(--text3)">no settlements yet</span>'}</div>`;
   }).catch(()=>{});
   if(force)return doLoad();
@@ -1577,7 +1604,7 @@ function loadEquityHero(){
       <path d="${line}" fill="none" stroke="#f7931a" stroke-width="2.2" stroke-linejoin="round" style="filter:drop-shadow(0 0 6px rgba(247,147,26,.55))"/>
       <circle cx="${X(pts.length-1)}" cy="${Y(last.v)}" r="4.5" fill="#f7931a"><animate attributeName="r" values="4.5;7;4.5" dur="1.8s" repeatCount="indefinite"/></circle>
       </svg>`;
-    $('eqHeroTitle').innerHTML=`30-day fleet net: <span class="${cls(last.v)}">${last.v>=0?'+':'−'}$${Math.abs(last.v).toFixed(2)}</span> · drawdown depth $${Math.abs(ddraw).toFixed(2)}`;
+    $('eqHeroTitle').innerHTML=`30-day net fill cash flow: <span class="${cls(last.v)}">${last.v>=0?'+':'−'}$${Math.abs(last.v).toFixed(2)}</span> · peak-to-trough flow $${Math.abs(ddraw).toFixed(2)}`;
     $('eqHeroStats').innerHTML=`<span>peak +$${Math.max(...vals).toFixed(2)}</span><span>trough ${Math.min(...vals)>=0?'+':'−'}$${Math.abs(Math.min(...vals)).toFixed(2)}</span><span>${d[0].day} → ${d[d.length-1].day}</span>`;
   }).catch(()=>{});
 }
@@ -1761,7 +1788,7 @@ function renderInstTabs(insts){
       const btn=document.createElement('button');
       btn.className='inst-tab';btn.dataset.inst=x.instance;
       const col=BOT_COLORS[x.instance]||'var(--text2)';
-      btn.innerHTML=`<span class="tab-name" style="color:${col}">${esc(x.name||x.instance)}</span><span class="tab-pnl" id="tab-pnl-${x.instance}" style="color:${col}"></span>`;
+      btn.innerHTML=`<span class="tab-name" style="color:${col}" title="Bot instance">${esc(x.name||x.instance)}</span><span class="tab-pnl" id="tab-pnl-${x.instance}" style="color:${col}" title="Net fill cash flow for this bot's accounting window; excludes open-position marks"></span>`;
       btn.onclick=()=>selectInstance(x.instance);
       tabs.appendChild(btn);
     }
@@ -1890,6 +1917,7 @@ async function loadActivity(force=false){
     renderFillTape(r);
     if(S.curTab==='overview'){
       renderSourcePnl({source_pnl:r.source_pnl});
+      renderExitPerformance(r.exit_performance);
       renderOrderStats(r.orderstats||{});
     }
     if(S.curTab==='positions'){
@@ -1928,12 +1956,13 @@ async function loadExecution(force=false){
     const filled=stats.reduce((n,x)=>n+(+x.filled||0),0);
     const cancelled=stats.reduce((n,x)=>n+(+x.cancelled||0),0);
     const rejected=stats.reduce((n,x)=>n+(+x.rejected||0),0);
+    const paperSession=(r.mode||'').toLowerCase()==='paper';
     const maker=stats.filter(x=>(x.execution_mode||'taker')!=='taker');
     const makerOrders=maker.reduce((n,x)=>n+(+x.orders||0),0);
     const makerFills=maker.reduce((n,x)=>n+(+x.filled||0),0);
     const life=makerOrders?maker.reduce((n,x)=>n+(+x.avg_lifetime_ms||0)*(+x.orders||0),0)/makerOrders:0;
     $('execKpis').innerHTML=[
-      ['RESTING',open.length,'live venue exposure'],
+      ['RESTING',open.length,paperSession?'active paper-session orders':'live venue exposure'],
       ['24H FILL RATE',total?`${fmt(filled/total*100,1)}%`:'—',`${filled} filled / ${total} orders`],
       ['MAKER CONVERSION',makerOrders?`${fmt(makerFills/makerOrders*100,1)}%`:'—',`${makerFills} fills / ${makerOrders} quotes`],
       ['QUOTE LIFETIME',life?`${fmt(life,0)}ms`:'—',`${cancelled} cancel · ${rejected} reject`]
@@ -1963,7 +1992,7 @@ async function loadExecution(force=false){
           const route=(o.execution_mode||'taker').toUpperCase();
           return `<div class="exec-order"><span>${esc(o.instance||'—')}</span><span style="color:var(--text);font-weight:700">${esc(o.asset||'?')} ${esc(horizLabel(+o.horizon_seconds||0))}</span><span style="color:${o.post_only?'var(--green)':'var(--gold)'}">${route}${o.post_only?' · POST':''}</span><span style="overflow:hidden"><b style="color:var(--text2)">${esc((o.client_order_id||'').slice(0,16))}</b><small style="display:block;color:var(--text3);overflow:hidden;text-overflow:ellipsis">${esc(o.exchange_order_id||'awaiting venue id')}</small></span><span>${fmt(o.price,4)}</span><span>${fmt(remaining,2)} / ${fmt(o.size_shares,2)}</span><span class="exec-status ${o.status==='partial'?'partial':''}">${esc((o.status||'open').toUpperCase())}<small style="display:block;border:0">${_execAge(o.ts_submitted)}</small></span></div>`;
         }).join('')}`
-      : '<div class="empty-state"><div class="empty-icon">◇</div><div>NO RESTING ORDERS</div><div style="font-size:9px;margin-top:5px">The venue queue is clear.</div></div>';
+      : `<div class="empty-state"><div class="empty-icon">◇</div><div>NO RESTING ORDERS</div><div style="font-size:9px;margin-top:5px">${paperSession?'No active orders in this bot session.':'The venue queue is clear.'}</div></div>`;
   }finally{S.executionRefreshing=false;}
 }
 
@@ -2104,8 +2133,10 @@ function renderOverview(d){
   const a=S.activity||{};
   renderEquityGrid(d.status||{});
   renderSourcePnl({source_pnl:a.source_pnl||d.source_pnl});
+  renderExitPerformance(a.exit_performance);
   renderTournamentMini((d.tournament||{}).instances||[]);
   renderOrderStats(a.orderstats||d.orderstats||{});
+  loadEntryGateDiagnostics();
 }
 
 let _slowTs=0;
@@ -2118,6 +2149,75 @@ function loadOverviewSlow(force){
   loadPerfStats();
   loadHeatmap();
   loadPnlByInstance();
+}
+
+let _entryDiagAt=0,_entryDiagLoading=false;
+function entryDiagInstances(){
+  const selected=S.curInstance||'';
+  if(selected&&/lead-scalper/.test(selected))return[selected];
+  return['btc-5m-lead-scalper','btc-15m-lead-scalper'];
+}
+function parseEntryGateLine(line){
+  const m=String(line||'').match(/^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\].*?WINDOW_BOT asset=(BTC|ETH|SOL|XRP) horizon=(300|900) state=([a-z_]+) source=([^ ]+) reason=([a-z0-9_]+)/);
+  if(!m)return null;
+  const ts=Date.parse(`${m[1]}T${m[2]}Z`);
+  if(!Number.isFinite(ts))return null;
+  const left=String(line).match(/\bt=(\d+)s\b/);
+  return{ts,asset:m[3],horizon:Number(m[4]),state:m[5],source:m[6],reason:m[7],secondsLeft:left?Number(left[1]):null};
+}
+function entryDiagReason(reason){return String(reason||'unknown').replaceAll('_',' ').toUpperCase();}
+function entryDiagPolicy(config,horizon){
+  const hot=config?.config?.strategy?.hot;if(!hot)return'';
+  const suffix=horizon===300?'5m':'15m';
+  const read=(name,fallback)=>{const raw=hot[name]??fallback;if(raw==null||raw==='')return null;const v=Number(raw);return Number.isFinite(v)?v:null;};
+  const entry=read(`lead_lag_scalp_stop_entry_${suffix}_secs`,hot.lead_lag_scalp_stop_entry_secs);
+  const flatten=read(`lead_lag_scalp_flatten_${suffix}_secs`,hot.lead_lag_scalp_flatten_secs);
+  const min=read('lead_lag_scalp_min_price',null),max=read('lead_lag_scalp_max_price',null);
+  const tp=read('lead_lag_scalp_profit_target_pct',null),stop=read('lead_lag_scalp_hard_stop_ticks',null);
+  const fields=[];
+  if(entry!=null)fields.push(`NO NEW ENTRIES ≤${fmtSecs(entry)} LEFT`);
+  if(flatten!=null)fields.push(`FLATTEN ≤${fmtSecs(flatten)} LEFT`);
+  if(min!=null&&max!=null)fields.push(`ASK ${min.toFixed(2)}–${max.toFixed(2)}`);
+  if(tp!=null)fields.push(`MAKER TP +${tp}%`);
+  if(stop!=null)fields.push(`STOP ${stop} TICKS`);
+  return fields.length?`<div class="entry-diag-policy">${fields.map(x=>`<span>${esc(x)}</span>`).join('')}</div>`:'';
+}
+function renderEntryDiagGroup(instance,response,config,now){
+  if(!response||!Array.isArray(response.lines))return`<article class="entry-diag-group"><div class="entry-diag-head"><b>${esc(instance.toUpperCase())}</b><span class="entry-diag-state stale">LOG UNAVAILABLE</span></div><div class="entry-diag-top">No gate data returned for this bot.</div></article>`;
+  const horizon=instance.includes('15m')?900:300,cutoff=now-60000;
+  const parsed=response.lines.map(parseEntryGateLine).filter(x=>x&&x.horizon===horizon);
+  const recent=parsed.filter(x=>x.ts>=cutoff&&x.ts<=now+5000);
+  const counts=new Map();recent.filter(x=>x.state==='no_entry').forEach(x=>counts.set(x.reason,(counts.get(x.reason)||0)+1));
+  const ranked=[...counts.entries()].sort((a,b)=>b[1]-a[1]);
+  const latest=new Map();recent.forEach(x=>{if(!latest.has(x.asset)||latest.get(x.asset).ts<x.ts)latest.set(x.asset,x);});
+  const checks=recent.length,blocked=recent.filter(x=>x.state==='no_entry').length;
+  const mostRecent=parsed.reduce((v,x)=>Math.max(v,x.ts),0),age=mostRecent?Math.max(0,Math.floor((now-mostRecent)/1000)):null;
+  const health=checks?'fresh':age!=null&&age<180?'quiet':'stale';
+  const top=ranked.slice(0,3).map(([reason,n])=>`${entryDiagReason(reason)} · ${n}`).join('  /  ')||'No blocked entry checks recorded';
+  const assets=['BTC','ETH','SOL','XRP'].map(asset=>{
+    const x=latest.get(asset);
+    if(!x)return`<div class="entry-diag-asset missing"><b>${asset}</b><span>NO RECENT GATE LINE</span></div>`;
+    const timing=x.secondsLeft==null?'':` · ${fmtSecs(x.secondsLeft)} LEFT`;
+    return`<div class="entry-diag-asset"><b>${asset}</b><span>${esc(entryDiagReason(x.reason))}${esc(timing)}</span></div>`;
+  }).join('');
+  const detail=checks?`${checks} checks · ${blocked} no-entry gates · remainder are not fills`:age==null?'No gate lines in the log tail':`No gate lines in 60s · last ${age}s ago`;
+  return`<article class="entry-diag-group"><div class="entry-diag-head"><b>${esc(instance.toUpperCase())}</b><span class="entry-diag-state ${health}">${health==='fresh'?'LIVE GATES':health==='quiet'?'QUIET':'STALE'}</span></div><div class="entry-diag-meta">${esc(detail)}</div>${entryDiagPolicy(config,horizon)}<div class="entry-diag-top">TOP BLOCKERS <b>${esc(top)}</b></div><div class="entry-diag-assets">${assets}</div></article>`;
+}
+async function loadEntryGateDiagnostics(force=false){
+  const host=$('entryDiagnostics');if(!host||S.curTab!=='overview'||document.hidden||_entryDiagLoading)return;
+  const now=Date.now();if(!force&&now-_entryDiagAt<25000)return;
+  _entryDiagAt=now;_entryDiagLoading=true;
+  try{
+    const instances=entryDiagInstances();
+    const responses=await Promise.all(instances.map(inst=>Promise.all([
+      apiFetch(`/api/log_tail?instance=${encodeURIComponent(inst)}&lines=400`),
+      apiFetch(`/api/config?name=${encodeURIComponent(inst)}`)
+    ])));
+    const rendered=instances.map((inst,i)=>renderEntryDiagGroup(inst,responses[i][0],responses[i][1],Date.now())).join('');
+    host.innerHTML=rendered||'<div class="entry-diag-empty">No lead-scalper instances selected.</div>';
+    const updated=$('entryDiagnosticsUpdated');if(updated)updated.textContent=`READ-ONLY · LAST 60 SECONDS · UPDATED ${new Date().toLocaleTimeString()}`;
+  }catch(_){host.innerHTML='<div class="entry-diag-empty">Gate feed unavailable. Open Activity logs for the full bot log.</div>';}
+  finally{_entryDiagLoading=false;}
 }
 
 function renderEquityGrid(st){
@@ -2138,6 +2238,49 @@ function renderSourcePnl(d){
   if(!srcs.length){$('sourcePnl').innerHTML='<div class="empty-state" style="padding:16px"><div>No source P&L yet</div></div>';return;}
   const maxAbs=Math.max(1,...srcs.map(s=>Math.abs(s.net)));
   $('sourcePnl').innerHTML=srcs.map(s=>`<div class="src-row"><div class="src-name">${esc(s.source)}</div><div class="src-bar-wrap"><div class="src-bar" style="width:${Math.abs(s.net)/maxAbs*100}%;background:${s.net>=0?'var(--green)':'var(--red)'}"></div></div><div class="src-val ${s.net>=0?'pos':'neg'}">${pnlSign(s.net)}$${fmt(Math.abs(s.net))}</div></div>`).join('');
+}
+
+function renderExitPerformance(r){
+  const host=$('exitPerformance');if(!host)return;
+  if(!r){host.innerHTML='<div class="empty-state" style="padding:16px"><div>Waiting for exit ledger…</div></div>';return;}
+  if(r.error){host.innerHTML=`<div class="empty-state" style="padding:16px"><div>${esc(r.error)}</div></div>`;return;}
+  const groups=r.groups||[];
+  const total=groups.reduce((n,x)=>n+(Number(x.count)||0),0);
+  const head=`<div class="exit-summary">LAST ${Number(r.hours)||24}H · ${total} MATCHED EXITS${r.truncated?' · PARTIAL':''}</div>`;
+  if(!groups.length){host.innerHTML=head+'<div class="empty-state" style="padding:14px">No completed exits in this window.</div>';return;}
+  const instanceRows=(r.by_instance||[]).map(x=>{
+    const net=Number(x.net)||0,fees=Number(x.fees)||0;
+    const wins=Number(x.wins)||0,losses=Number(x.losses)||0,flats=Number(x.flats)||0,count=Number(x.count)||0;
+    const decisions=wins+losses;
+    const wr=decisions?`${(100*wins/decisions).toFixed(1)}%`:'—';
+    const be=x.breakeven_win_pct!=null?`${Number(x.breakeven_win_pct).toFixed(1)}%`:'—';
+    const winLoss=x.avg_win!=null&&x.avg_loss!=null
+      ?`avg +$${fmt(x.avg_win)} / −$${fmt(x.avg_loss)}`
+      :x.avg_win!=null?`avg win +$${fmt(x.avg_win)} · no losses recorded`:'loss / win sample incomplete';
+    return `<div class="exit-row exit-instance" title="${esc(x.instance)} · all matched exit routes">
+      <div class="exit-copy"><strong>${esc(x.instance)} · ALL EXIT ROUTES</strong><small>${count} exits · ${wins}W/${losses}L${flats?`/${flats}F`:''} · WR ${wr} · break-even WR ${be}</small><small>${winLoss}</small></div>
+      <div class="exit-result"><b class="${net>=0?'pos':'neg'}">${pnlSign(net)}$${fmt(Math.abs(net))}</b><small>$${fmt(fees)} fees</small></div>
+    </div>`;
+  }).join('');
+  const rows=groups.map(x=>{
+    const net=Number(x.net)||0,fees=Number(x.fees)||0;
+    const route=(x.route||'unknown').toUpperCase();
+    const horizon=Number(x.horizon_seconds)||0;
+    const segment=`${x.asset||'?'} · ${horizon?`${Math.round(horizon/60)}M`:'unknown window'}`;
+    const wins=Number(x.wins)||0,losses=Number(x.losses)||0,flats=Number(x.flats)||0,count=Number(x.count)||0;
+    const decisions=wins+losses;
+    const actualWr=decisions?`${(100*wins/decisions).toFixed(1)}%`:'—';
+    const beWr=x.breakeven_win_pct!=null&&Number.isFinite(Number(x.breakeven_win_pct))?`${Number(x.breakeven_win_pct).toFixed(1)}%`:'—';
+    const winLoss=x.avg_win!=null&&x.avg_loss!=null
+      ?`avg +$${fmt(x.avg_win)} / −$${fmt(x.avg_loss)}`
+      :x.avg_win!=null?`avg win +$${fmt(x.avg_win)} · no losses recorded`:'loss / win sample incomplete';
+    return `<div class="exit-row" title="${esc(x.instance)} · ${esc(segment)} · ${esc(x.source)} · ${route}">
+      <div class="exit-copy"><strong>${esc(x.instance)} · ${esc(segment)}</strong><span>${esc(x.source)} · ${route}</span><small>${count} exits · ${wins}W/${losses}L${flats?`/${flats}F`:''} · WR ${actualWr} · break-even WR ${beWr}</small><small>${winLoss} · based on matched net P&amp;L</small></div>
+      <div class="exit-result"><b class="${net>=0?'pos':'neg'}">${pnlSign(net)}$${fmt(Math.abs(net))}</b><small>$${fmt(fees)} fees</small></div>
+    </div>`;
+  }).join('');
+  const foot=r.incomplete?`<div class="exit-summary">${Number(r.incomplete)} unmatched exits excluded</div>`:'';
+  host.innerHTML=head+(instanceRows?`<div class="exit-summary">BOT TOTALS · ALL EXIT ROUTES</div>${instanceRows}<div class="exit-summary">BY EXIT REASON / ROUTE</div>`:'')+rows+foot;
 }
 
 function renderTournamentMini(insts){
@@ -2820,11 +2963,42 @@ let _scalperDeskBusy=false;
 function _sdUsd(v){const n=Number(v)||0;return`${n<0?'−':n>0?'+':''}$${Math.abs(n).toFixed(2)}`;}
 function _sdHorizon(v){return Number(v)===300?'5M':Number(v)===900?'15M':`${Math.round(Number(v)/60)}M`;}
 function _sdAge(ts){if(!ts)return'—';const d=new Date(ts);return Number.isNaN(d.getTime())?'—':d.toISOString().slice(11,19)+'Z';}
+function _sdEntryCutoff(bot,horizon){
+  const hz=Number(horizon)||Number((bot.horizons||[])[0])||0;
+  const v=hz===300?(bot.entry_window_secs_5m??bot.entry_window_secs):(bot.entry_window_secs_15m??bot.entry_window_secs);
+  const n=Number(v);return Number.isFinite(n)&&n>0?Math.floor(n):0;
+}
+function _sdGateReason(reason,bot,horizon){
+  const impulseReasons={
+    quote_warmup:'waiting for fresh Binance quotes',
+    quote_stale:'Binance quote feed is stale',
+    short_window_history:'waiting for 250/500 ms history',
+    impulse_warmup:'building one-minute volatility baseline',
+    volatility_flat:'no measurable Binance movement',
+    volatility_unavailable:'volatility baseline unavailable',
+    ofi_warmup:'building order-flow threshold',
+    midpoint_flat:'Binance midpoint did not move',
+    'midpoint_250ms_below_0.10bp':'250 ms move below 0.10 bp',
+    midpoint_500ms_not_confirming:'500 ms move did not confirm',
+    ofi_250ms_below_p90:'250 ms order flow below its rolling 90th percentile',
+    volatility_scaled_move_small:'move too small for current volatility',
+    ofi_500ms_disagrees:'500 ms order flow disagrees',
+    candidate:'impulse candidate detected'
+  };
+  if(impulseReasons[reason])return impulseReasons[reason];
+  if(reason==='entry_cutoff'){
+    const secs=_sdEntryCutoff(bot,horizon);
+    return secs?`entry window closed · ≤${secs}s remain`:'entry window closed';
+  }
+  if(reason==='entry_limit')return'per-window entry cap reached';
+  return String(reason||'unknown').replaceAll('_',' ');
+}
 function _sdStatus(bot){
   if(!bot.running)return'STOPPED';
   if(bot.market_feed_state==='disconnected')return'MARKET DATA OFFLINE';
   if(bot.discovered_markets!=null&&Number(bot.discovered_markets)===0)return'NO MARKETS FOUND';
-  return bot.engine_state?bot.engine_state.replaceAll('_',' '):'RUNNING · PAPER';
+  if(bot.entry_pause?.active)return`LOSS PAUSE · ${fmtSecs(bot.entry_pause.remaining_s||0)}`;
+  return bot.engine_state?bot.engine_state.replaceAll('_',' '):'RUNNING';
 }
 function renderScalperDesk(r){
   const bots=r.bots||[],running=bots.filter(b=>b.running).length;
@@ -2842,17 +3016,44 @@ function renderScalperDesk(r){
     const p=b.positions||[],q=b.open_orders||[],recent=b.recent_orders||[];
     const stats=(b.order_stats||[]).reduce((a,x)=>({orders:a.orders+(Number(x.orders)||0),filled:a.filled+(Number(x.filled)||0),cancelled:a.cancelled+(Number(x.cancelled)||0),rejected:a.rejected+(Number(x.rejected)||0)}),{orders:0,filled:0,cancelled:0,rejected:0});
     const pnl=Number(b.session_net)||0;
+    const exit24=b.exit_24h||{};
+    const exitCount=Number(exit24.count)||0,exitNet=Number(exit24.net)||0;
+    const exitDecisions=(Number(exit24.wins)||0)+(Number(exit24.losses)||0);
+    const exitWr=exitDecisions?`${(100*(Number(exit24.wins)||0)/exitDecisions).toFixed(1)}%`:'—';
+    const exitBe=exit24.breakeven_win_pct==null?'—':`${Number(exit24.breakeven_win_pct).toFixed(1)}%`;
+    const exitDetail=exitCount?`WR ${exitWr} · need ${exitBe}`:'No matched exits yet';
+    const exitAvg=exit24.avg_win!=null&&exit24.avg_loss!=null
+      ?`avg +$${fmt(exit24.avg_win)} / −$${fmt(exit24.avg_loss)}`
+      :exit24.avg_win!=null?`avg win +$${fmt(exit24.avg_win)} · no losses`:'';
+    const exitTitle=`Matched completed exits only · ${Number(exit24.wins)||0}W/${Number(exit24.losses)||0}L · ${exitDetail}${exitAvg?` · ${exitAvg}`:''} · fees ${_sdUsd(exit24.fees)}`;
+    const exitAvailability=exit24.available===false?'UNAVAILABLE':String(exitCount)+' MATCHED';
     const strategy=String(b.strategy||'Bot').toUpperCase();
     const feedState=String(b.market_feed_state||'unknown').toLowerCase();
     const feedFrames=b.market_feed_frames==null?'NO FRAME SAMPLE':`${Number(b.market_feed_frames).toLocaleString()} FRAMES`;
     const discovery=b.discovered_markets==null?'LAST DISCOVERY —':`LAST DISCOVERY ${Number(b.discovered_markets)} MARKETS`;
+    const gate=b.entry_gate||{},gateAge=gate.age_s==null?null:Number(gate.age_s),pause=b.entry_pause||{};
+    const pauseActive=!!pause.active,pauseRemaining=fmtSecs(pause.remaining_s||0);
+    const gateTone=pauseActive?'paused':gateAge==null||gateAge>=180?'stale':gateAge>=60?'quiet':'fresh';
+    const gateBlockers=(gate.top_blockers||[]).map(x=>`${_sdGateReason(String(x.reason||''),b)} · ${Number(x.count)||0}`).join(' / ');
+    const gateAssets=(gate.latest_by_asset||[]).slice(0,4).map(x=>{
+      const state=String(x.state||'unknown').replaceAll('_',' ').toUpperCase();
+      const left=x.seconds_left==null?'':` · ${fmtSecs(x.seconds_left)}`;
+      return`<span class="sd-gate-asset ${['entry','ready'].includes(x.state)?'ready':''}"><b>${esc(x.asset||'?')}</b> ${esc(state)} · ${esc(_sdGateReason(String(x.reason||''),b,x.horizon_seconds))}${esc(left)}</span>`;
+    }).join('');
+    const gateHtml=!b.settlement_only?(pauseActive
+      ?`<div class="sd-gates paused"><div class="sd-gates-head"><span>ENTRY COOLDOWN</span><b>ACTIVE · ${esc(pauseRemaining)}</b></div><div class="sd-gates-summary">New entries paused after ${Number(pause.consecutive_losses)||0} consecutive losses.<small class="sd-gates-note">Automatic entry scanning resumes when this cooldown expires. Existing positions and exits remain under bot management.</small></div></div>`
+      :`<div class="sd-gates ${gateTone}"><div class="sd-gates-head"><span>ENTRY FILTER CHECKS · LAST 60S</span><b>${gateAge==null?'NO RECENT GATE':gateAge<60?'LIVE':`QUIET · ${Math.floor(gateAge)}S`}</b></div><div class="sd-gates-summary">${Number(gate.checks_60s)||0} checks · ${Number(gate.no_entry_60s)||0} filtered · ${gateBlockers?`<small>TOP FILTERS ${esc(gateBlockers)}</small>`:'no blocked checks recorded'}<small class="sd-gates-note">Filtered scans are normal; failed submissions appear in recent order activity.</small></div><div class="sd-gates-assets">${gateAssets||'<span class="sd-empty">No gate rows in the recent log tail</span>'}</div></div>`):'';
     const feedTone=['connected','disconnected'].includes(feedState)?feedState:'unknown';
-    const chips=[...(b.horizons||[]).map(_sdHorizon),`ASSETS ${(b.assets||[]).join('/')||'—'}`,String(b.mode||'unknown').toUpperCase(),String(b.entry_order_mode||'maker').toUpperCase(),
+    const sniperWindows=(b.entry_windows||[]).map(w=>`${_sdHorizon(w.horizon_seconds)} ${Number(w.min_secs)||0}–${Number(w.max_secs)||0}s`).join(' · ')
+      ||`${Number(b.entry_min_secs||0)}–${Number(b.entry_window_secs||0)}s`;
+    const articleSim=!!b.article_simulation;
+    const mode=String(b.mode||'unknown').toLowerCase();
+    const chips=[...(b.horizons||[]).map(_sdHorizon),`ASSETS ${(b.assets||[]).join('/')||'—'}`,...(mode==='paper'?[]:[mode.toUpperCase()]),String(b.entry_order_mode||'maker').toUpperCase(),
       `ENTRY $${Number(b.entry_usd||0).toFixed(2)}`,
       b.settlement_only?`ASK ${Number(b.entry_min_price||0).toFixed(2)}–${Number(b.entry_max_price||0).toFixed(2)}`:`MAX ENTRY ${Number(b.entry_max_price||0).toFixed(2)}`,
-      b.settlement_only?`ENTRY ${Number(b.entry_min_secs||0)}–${Number(b.entry_window_secs||0)}s`:`CB ${Number(b.cb_move_bps||0).toFixed(1)}bp · LEAD ${Number(b.cb_lead_bps||0).toFixed(1)}bp`,
-      b.settlement_only?`CONSERVATIVE EDGE ≥ ${Number(b.settlement_edge_pct||0).toFixed(1)}% · HOLD TO SETTLE`:`TP +${Number(b.target_pct||0).toFixed(0)}% · ${Number(b.hard_stop_ticks||0)>0?`STOP −${Number(b.hard_stop_ticks).toFixed(0)} TICKS`:(Number(b.hard_stop_pct||0)>0?`STOP −${Number(b.hard_stop_pct).toFixed(0)}%`:'STOP OFF')} · REVERSAL ${b.reversal_exit_enabled?'ON':'OFF'}`,
-      b.settlement_only?`MAX 1 / WINDOW`:`MARKET FLATTEN ${Number(b.flatten_secs_5m??b.flatten_secs??0)}s / ${Number(b.flatten_secs_15m??b.flatten_secs??0)}s (5m/15m) · ENTRY CUTOFF ${Number(b.entry_window_secs_5m||90)}s / ${Number(b.entry_window_secs_15m||270)}s · MAX ${Number(b.max_entries_per_window||0)}`];
+      b.settlement_only?`ENTRY ${sniperWindows}`:articleSim?'FIXED UP · >100s LEFT':`CB ${Number(b.cb_move_bps||0).toFixed(1)}bp · LEAD ${Number(b.cb_lead_bps||0).toFixed(1)}bp`,
+      b.settlement_only?`CONSERVATIVE EDGE ≥ ${Number(b.settlement_edge_pct||0).toFixed(1)}% · HOLD TO SETTLE`:articleSim?`TARGET $${Number(b.article_target_price||0.70).toFixed(2)} MAKER`:`TP +${Number(b.target_pct||0).toFixed(0)}% · ${Number(b.hard_stop_ticks||0)>0?`STOP −${Number(b.hard_stop_ticks).toFixed(0)} TICKS`:(Number(b.hard_stop_pct||0)>0?`STOP −${Number(b.hard_stop_pct).toFixed(0)}%`:'STOP OFF')} · REVERSAL ${b.reversal_exit_enabled?'ON':'OFF'}${Number(b.reversal_oracle_confirm_bps||0)>0?` · ORACLE ≥${Number(b.reversal_oracle_confirm_bps).toFixed(2)}bp`:''}`,
+      b.settlement_only?`MAX 1 / WINDOW`:articleSim?`EMERGENCY FAK ≤ ${Number(b.article_emergency_exit_secs||30)}s`:`MARKET FLATTEN ${Number(b.flatten_secs_5m??b.flatten_secs??0)}s / ${Number(b.flatten_secs_15m??b.flatten_secs??0)}s (5m/15m) · ENTRY CUTOFF ${Number(b.entry_window_secs_5m||90)}s / ${Number(b.entry_window_secs_15m||270)}s · MAX ${Number(b.max_entries_per_window||0)}`];
     const posRows=p.length?p.map(x=>{
       const label=`${x.asset||'MARKET'} · ${_sdHorizon(x.horizon_seconds)} · ${x.side||''}`;
       const clock=x.awaiting_settlement?'AWAIT SETTLE':x.seconds_left!=null?`${Math.max(0,Math.floor(x.seconds_left))}s left`:'—';
@@ -2865,20 +3066,23 @@ function renderScalperDesk(r){
     }).join(''):'<div class="sd-empty">No resting orders</div>';
     const activity=recent.length?recent.slice(0,5).map(x=>{
       const amt=Number(x.filled_shares||0)>0?`${Number(x.filled_shares).toFixed(2)} sh filled`:_sdUsd(x.notional_usd);
-      return`<div class="sd-row"><span>${esc(`${String(x.direction||'').toUpperCase()} ${x.side_label||''} · ${x.asset||'MARKET'}`)}<small>${esc(String(x.source||'').replaceAll('_',' '))} · ${esc(x.status||'')} · ${_sdAge(x.ts_created)}</small></span><b>@ ${Number(x.price||0).toFixed(3)}</b><b>${amt}</b></div>`;
+      const reason=String(x.reject_reason||'');
+      return`<div class="sd-row"><span>${esc(`${String(x.direction||'').toUpperCase()} ${x.side_label||''} · ${x.asset||'MARKET'}`)}<small>${esc(String(x.source||'').replaceAll('_',' '))} · ${esc(x.status||'')} · ${_sdAge(x.ts_created)}${reason?` · <span class="sd-reject" title="${esc(reason)}">${esc(reason)}</span>`:''}</small></span><b>@ ${Number(x.price||0).toFixed(3)}</b><b>${amt}</b></div>`;
     }).join(''):'<div class="sd-empty">No recorded orders yet</div>';
     const liveClass=b.running?' running':'';
     const healthIssue=b.market_feed_state==='disconnected'||(b.discovered_markets!=null&&Number(b.discovered_markets)===0);
-    const statusClass=healthIssue?' degraded':liveClass;
-    const status=b.mode==='paper'?'PAPER':String(b.mode||'UNKNOWN').toUpperCase();
-    return`<article class="sd-card"><header class="sd-card-head"><i class="sd-state${liveClass}"></i><div class="sd-title"><strong>${esc(b.name||b.instance)}</strong><small>${esc(strategy)} · ${esc(b.instance)}</small></div><span class="sd-status${statusClass}">${esc(status)} · ${esc(_sdStatus(b))}</span></header>
+    const statusClass=healthIssue?' degraded':pauseActive?' paused':liveClass;
+    const status=mode==='paper'?'MONITORING':mode.toUpperCase();
+    const modeLabel=`Execution mode: ${mode.toUpperCase()}`;
+    return`<article class="sd-card" aria-label="${esc(b.name||b.instance)} · ${esc(modeLabel)}"><header class="sd-card-head"><i class="sd-state${liveClass}"></i><div class="sd-title"><strong>${esc(b.name||b.instance)}</strong><small>${esc(strategy)} · ${esc(b.instance)}</small></div><span class="sd-status${statusClass}" title="${esc(modeLabel)} · ${esc(_sdStatus(b))}" aria-label="${esc(modeLabel)} · ${esc(_sdStatus(b))}">${esc(status)} · ${esc(_sdStatus(b))}</span></header>
       <div class="sd-chips">${chips.map(c=>`<span class="sd-chip">${esc(c)}</span>`).join('')}<span class="sd-chip">CLICK ${_sdUsd(b.entry_usd)}</span></div>
       <div class="sd-feed ${feedTone}"><span><i></i>MARKET DATA</span><b>${esc(feedState.toUpperCase())}</b><small>${esc(discovery)} · ${esc(feedFrames)}</small></div>
-      <div class="sd-metrics"><div class="sd-metric"><small>SESSION NET</small><b class="${pnl>0?'pos':pnl<0?'neg':''}">${_sdUsd(pnl)}</b></div><div class="sd-metric"><small>EXPOSURE / CAP</small><b>${_sdUsd(b.deployed_usd)} / ${_sdUsd(b.max_deployed_usd)}</b></div><div class="sd-metric"><small>POSITIONS / QUOTES</small><b>${p.length} / ${q.length}</b></div><div class="sd-metric"><small>24H FILLS / ORDERS</small><b>${stats.filled} / ${stats.orders}</b></div></div>
+      ${gateHtml}
+      <div class="sd-metrics"><div class="sd-metric"><small>SESSION NET</small><b class="${pnl>0?'pos':pnl<0?'neg':''}">${_sdUsd(pnl)}</b></div><div class="sd-metric" title="${esc(exitTitle)}"><small>24H EXIT NET · ${exitAvailability}</small><b class="${exitNet>0?'pos':exitNet<0?'neg':''}">${exit24.available===false?'—':_sdUsd(exitNet)}</b><em>${esc(exitDetail)}</em></div><div class="sd-metric"><small>EXPOSURE / CAP</small><b>${_sdUsd(b.deployed_usd)} / ${_sdUsd(b.max_deployed_usd)}</b></div><div class="sd-metric"><small>POSITIONS / QUOTES</small><b>${p.length} / ${q.length}</b></div><div class="sd-metric"><small>24H FILLS / ORDERS</small><b>${stats.filled} / ${stats.orders}</b></div></div>
       <div class="sd-block"><div class="sd-block-head"><span>OPEN POSITIONS</span><span>${p.length}</span></div>${posRows}</div>
       <div class="sd-block"><div class="sd-block-head"><span>RESTING ORDERS</span><span>${q.length}</span></div>${quoteRows}</div>
       <div class="sd-block"><div class="sd-block-head"><span>RECENT ORDER ACTIVITY</span><span>LAST ${Math.min(5,recent.length)}</span></div>${activity}</div>
-      ${b.settlement_only?'<div class="sd-empty sd-warn">Late-window position: passive limit entry; filled shares are held for settlement.</div>':''}</article>`;
+      ${b.settlement_only?'<div class="sd-empty sd-warn">Late-window position: passive limit entry; filled shares are held for settlement.</div>':articleSim?'<div class="sd-empty sd-warn">Reference strategy: fixed BTC UP maker entry at $0.49 after the window begins; target is a maker sell at $0.70. Only the final 30-second emergency exit can cross the spread and incur taker fees.</div>':''}</article>`;
   }).join('');
 }
 async function loadScalperDesk(force=false){
@@ -2983,7 +3187,7 @@ function fleetCard(f,t,pnl){
     </div>
     <canvas class="fleet-spark" id="spark-${esc(inst)}" height="34"></canvas>
     <div class="fleet-stats">
-      <div><div class="fleet-stat-lbl">P&L</div><div class="fleet-stat-val ${pnl>=0?'pos':'neg'}">${pnlSign(pnl)}$${fmt(Math.abs(pnl))}</div></div>
+      <div title="Net fill cash flow for this bot's accounting window; excludes open-position marks"><div class="fleet-stat-lbl">FILL FLOW</div><div class="fleet-stat-val ${pnl>=0?'pos':'neg'}">${pnlSign(pnl)}$${fmt(Math.abs(pnl))}</div></div>
       <div><div class="fleet-stat-lbl">W/L</div><div class="fleet-stat-val neutral">${t.wins||0}/${t.losses||0}</div></div>
       <div><div class="fleet-stat-lbl">FILLS</div><div class="fleet-stat-val neutral">${t.fills||0}</div></div>
     </div>
@@ -3492,6 +3696,10 @@ const STRATEGY_DOCS={
   stop_loss_price:'Absolute bid-price stop; zero disables this additional trigger.',
   hard_stop_pct:'Catastrophe loss threshold applied as the final protective stop.',
   lead_lag_scalp_hard_stop_ticks:'Lead scalper exit trigger measured in market ticks below the average entry price. The stop crosses the bid to exit.',
+  lead_lag_scalp_max_secs_remaining_5m:'Do not enter a 5-minute window until its remaining time falls to this value; zero disables the opening delay.',
+  lead_lag_scalp_max_secs_remaining_15m:'Do not enter a 15-minute window until its remaining time falls to this value; zero disables the opening delay.',
+  lead_lag_scalp_impulse_only:'Uses the Binance event-time OFI impulse entry instead of Coinbase lead/lag. The experimental entry path is restricted to BTC 5m PAPER mode; the existing maker exits and hard stop still apply.',
+  lead_lag_scalp_model_value_enabled:'Allows settlement-value entries when no Coinbase lead is present. Disable only for the PAPER Coinbase-lead-only comparison; Coinbase entries keep the existing probability and edge guards.',
   lead_lag_scalp_min_signal_confidence:'Rejects lead-scalper entries below this strategy confidence. Use a higher floor to keep only the strongest signals.',
   lead_lag_scalp_max_entries_per_window:'Maximum accepted lead-scalper entry clips for one asset and market window. The risk layer still enforces the dollar cap.',
   lead_lag_scalp_order_usd:'Dollar amount per lead-scalper entry clip; the risk layer also applies the per-order and per-window caps.',
@@ -3503,6 +3711,7 @@ const STRATEGY_DOCS={
   ride_to_settle_secs:'Inside this remaining-time zone, qualifying positions are held for settlement.',
   smart_exit_mode:'Enables the vote/conviction-aware protective exit path.',
   oracle_reversal_exit:'Exits when the oracle direction reverses after entry.',
+  lead_lag_scalp_reversal_oracle_confirm_bps:'With a positive threshold, a Coinbase reversal exit also requires Chainlink spot to move against the position by this many basis points over two seconds.',
   oracle_panic_exit:'Enables an urgent exit when the oracle moves sharply against the position.',
   momentum_flip_exit:'Exits when model momentum flips to the opposite side.',
   momentum_flip_reverse:'After a momentum-flip exit, also opens the newly favored side.',
@@ -3552,6 +3761,7 @@ function humanKnob(k){
     .replace(/\bms\b/gi,'MS').replace(/\bus\b/gi,'US').toUpperCase();
 }
 function knobGroup(k,qkey){
+  if(/^lead_lag_scalp_max_secs_remaining_/.test(k))return'timing';
   if(/^universe_|blocked_assets$/.test(k))return'universe';
   if(qkey.startsWith('runtime.'))return'system';
   if(qkey.startsWith('wallet.'))return'wallet';
@@ -3600,6 +3810,7 @@ function knobDescription(k,qkey,kind){
 function knobUnit(k){
   if(k.endsWith('_usd')||k.includes('_gap_')&&k.endsWith('_usd'))return'USD';
   if(k.endsWith('_ms'))return'milliseconds';if(k.endsWith('_us'))return'microseconds';
+  if(k.endsWith('_bps'))return'basis points';
   if(k.endsWith('_secs')||k.includes('_secs_'))return'seconds';if(k.endsWith('_minutes'))return'minutes';
   if(k.endsWith('_shares'))return'shares';if(k.endsWith('_ticks'))return'ticks';
   if(k.endsWith('_pct')||k.includes('_delta_pct')||k.includes('_profit_pct'))return'% / ratio as configured';
@@ -4872,6 +5083,38 @@ select{border-radius:0!important;background:#0a0a0a!important;color:var(--text)!
 @media(max-width:1100px){#tabSettlements .settlement-filters{grid-template-columns:repeat(4,minmax(110px,1fr))}.sh-detail-kpis,.sh-context-grid,.sh-signal-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){#tabSettlements .settlement-hero{align-items:flex-start;flex-direction:column;padding:20px}.settlement-hero-note{width:100%!important}#tabSettlements .settlement-filters{grid-template-columns:repeat(2,minmax(0,1fr))}#tabSettlements .settlement-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.sh-detail-overlay{padding:0}.sh-detail-panel{width:100vw;height:100vh;max-height:100vh}.sh-detail-head,.sh-detail-body{padding-left:13px;padding-right:13px}.sh-detail-banner{align-items:flex-start;flex-wrap:wrap}.sh-detail-banner>div{flex-basis:calc(100% - 100px)}.sh-event-list{grid-template-columns:1fr}}
 @media(max-width:430px){#tabSettlements .settlement-hero h1{font-size:27px}#tabSettlements .settlement-filters{grid-template-columns:1fr 1fr;gap:8px}#tabSettlements .settlement-filters label:nth-of-type(10){grid-column:1/-1}.sh-detail-kpis,.sh-context-grid,.sh-signal-grid{grid-template-columns:1fr 1fr}}
+.exit-summary{padding:6px 0;color:var(--text3);font:8px var(--mono);letter-spacing:.4px}
+.exit-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
+.exit-copy{min-width:0;display:flex;flex-direction:column;gap:3px}
+.exit-copy strong{overflow:hidden;color:var(--text);font-size:9px;text-overflow:ellipsis;white-space:nowrap}
+.exit-copy span{overflow:hidden;color:var(--text2);font:8px var(--mono);text-overflow:ellipsis;white-space:nowrap}
+.exit-copy small,.exit-result small{color:var(--text3);font:7px var(--mono)}
+.exit-result{display:flex;flex-direction:column;align-items:flex-end;gap:3px;white-space:nowrap}
+.exit-result b{font:600 10px var(--mono)}.exit-result b.pos{color:var(--green)}.exit-result b.neg{color:var(--red)}
+.entry-diagnostics{margin:12px 0;background:#090909!important}
+.entry-diagnostics>.card-title{margin-bottom:10px}
+.entry-diag-updated{margin-left:auto;color:var(--text3);font:7px var(--mono);letter-spacing:.5px}
+.entry-diag-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.entry-diag-group{min-width:0;padding:10px;border:1px solid #282828;background:#0c0c0c}
+.entry-diag-head{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.entry-diag-head>b{overflow:hidden;color:var(--text);font:600 9px var(--mono);text-overflow:ellipsis;white-space:nowrap}
+.entry-diag-state{flex:0 0 auto;padding:3px 5px;border:1px solid #38533e;color:var(--green);font:7px var(--mono);letter-spacing:.6px}
+.entry-diag-state.quiet{border-color:#55452c;color:var(--gold)}
+.entry-diag-state.stale{border-color:#543133;color:var(--red)}
+.entry-diag-meta{margin-top:7px;color:var(--text3);font:8px var(--mono)}
+.entry-diag-policy{display:flex;gap:4px;flex-wrap:wrap;margin-top:7px}
+.entry-diag-policy span{padding:3px 5px;border:1px solid #333;color:#a4b4aa;background:#101210;font:6px var(--mono);letter-spacing:.25px}
+.entry-diag-top{overflow:hidden;margin-top:8px;padding:7px;background:#11100e;color:var(--orange);font:7px/1.5 var(--mono);text-overflow:ellipsis}
+.entry-diag-top b{color:var(--text2);font-weight:500}
+.entry-diag-assets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;margin-top:7px}
+.entry-diag-asset{min-width:0;padding:6px;border:1px solid #242424;background:#090909}
+.entry-diag-asset>b,.entry-diag-asset>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.entry-diag-asset>b{color:var(--text2);font:600 7px var(--mono)}
+.entry-diag-asset>span{margin-top:4px;color:var(--gold);font:7px var(--mono)}
+.entry-diag-asset.missing>span{color:var(--text3)}
+.entry-diag-empty{grid-column:1/-1;padding:12px;border:1px dashed #333;color:var(--text3);font:8px var(--mono)}
+@media(max-width:780px){.entry-diag-grid{grid-template-columns:1fr}.entry-diag-assets{grid-template-columns:repeat(2,minmax(0,1fr))}.entry-diag-updated{max-width:58%;text-align:right;line-height:1.4}}
+@media(max-width:1300px){#tabOverview .g.tri{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 <div id="cmdPalette" role="dialog" aria-label="Command palette"><div class="cp-box"><input id="cpInput" placeholder="Go to tab or run action… ( ↑↓ / Enter )" oninput="predPaletteFilter(this.value)" onkeydown="if(event.key==='Enter'){const f=$('cpList').querySelector('.cp-item');if(f)predPaletteGo(f);}"><div class="cp-list" id="cpList"></div></div></div>
 </body>

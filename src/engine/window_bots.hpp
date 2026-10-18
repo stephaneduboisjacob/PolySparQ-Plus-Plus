@@ -49,6 +49,7 @@ struct LeadLagInput {
 
 struct LeadLagConfig {
     bool enabled = false;
+    bool model_value_enabled = true;
     int horizon_s = 0; // 0 enables both supported windows (300s and 900s)
     double min_signal_confidence = 0.55;
     double min_cb_move_bps = 0.5;
@@ -65,6 +66,8 @@ struct LeadLagConfig {
     int stop_entry_secs = 45;
     int stop_entry_5m_secs = 90;
     int stop_entry_15m_secs = 270;
+    int max_secs_remaining_5m = 0;  // 0 disables the opening delay
+    int max_secs_remaining_15m = 0; // 0 disables the opening delay
     int max_entries_per_window = 24;
     double rearm_bps = 0.25;
 };

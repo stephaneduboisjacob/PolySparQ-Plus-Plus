@@ -132,9 +132,12 @@ std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
     };
     const int stop_entry_secs = in.horizon_s == 300
         ? cfg.stop_entry_5m_secs : cfg.stop_entry_15m_secs;
+    const int max_secs_remaining = in.horizon_s == 300
+        ? cfg.max_secs_remaining_5m : cfg.max_secs_remaining_15m;
     const bool horizon_allowed = lead_horizon_enabled(cfg.horizon_s, in.horizon_s);
     if (!cfg.enabled || !supported_window_bot_asset(in.asset) ||
         !horizon_allowed ||
+        (max_secs_remaining > 0 && in.secs_left > max_secs_remaining) ||
         in.secs_left <= stop_entry_secs ||
         entries_this_window >= cfg.max_entries_per_window ||
         !in.cb_fresh || !in.oracle_fresh ||
@@ -147,6 +150,8 @@ std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
             if (!cfg.enabled) *reject_reason = "disabled";
             else if (!supported_window_bot_asset(in.asset)) *reject_reason = "asset_mismatch";
             else if (!horizon_allowed) *reject_reason = "horizon_mismatch";
+            else if (max_secs_remaining > 0 && in.secs_left > max_secs_remaining)
+                *reject_reason = "opening_delay";
             else if (in.secs_left <= stop_entry_secs) *reject_reason = "entry_cutoff";
             else if (entries_this_window >= cfg.max_entries_per_window) *reject_reason = "entry_limit";
             else if (!in.cb_fresh) *reject_reason = "coinbase_stale_or_unaligned";
@@ -200,6 +205,8 @@ std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
         direction * in.cb_move_2s_bps >= cfg.min_cb_move_bps &&
         direction * in.cb_move_5s_bps >= -cfg.min_cb_move_5s_bps &&
         direction * lead >= cfg.min_cb_lead_bps;
+    if (!cfg.model_value_enabled && !coinbase_impulse)
+        return reject("model_value_disabled");
     // The fast model can also trigger when it sees conservative value at the
     // current ask. Coinbase lead is an additional early trigger, not a
     // requirement that suppresses every market while spot and Coinbase track.
