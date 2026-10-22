@@ -184,6 +184,21 @@ public:
         std::int64_t placed_ms = 0;
     };
     std::vector<RawOpenOrderRow> load_open_orders_for_instance() noexcept;
+
+    struct PredictionGateSnapshot {
+        std::string condition_id;
+        std::string asset;
+        int horizon_s = 0;
+        std::int64_t window_open_ms = 0;
+        std::int64_t window_close_ms = 0;
+        std::string model_status;
+        std::optional<double> up_probability;
+        std::string model_version;
+        std::string model_basis;
+        std::int64_t age_ms = 0;
+    };
+    std::optional<PredictionGateSnapshot> load_prediction_gate_snapshot(
+        const std::string& condition_id) noexcept;
 private:
     void recover_disconnected(const char* operation,
                              const std::string& reason) noexcept;

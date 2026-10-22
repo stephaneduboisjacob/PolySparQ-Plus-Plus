@@ -382,6 +382,13 @@ struct StrategyHot {
     // net-edge guards before they can place a maker quote.
     bool   lead_lag_scalp_model_value_enabled = true;
     int    lead_lag_scalp_horizon_s = 0;       // 0 = both supported windows
+    // Require a fresh, exact-window snapshot from the Predictions page before automated buys.
+    bool   prediction_page_gate_enabled = false;
+    double prediction_page_min_chance_pct = 60.0;
+    // PAPER-only fixed-share maker entry at T-120s on supported 5m crypto markets.
+    bool   prediction_2m_enabled = false;
+    double prediction_2m_order_shares = 15.0;
+    int    prediction_2m_trigger_grace_ms = 750;
     double lead_lag_scalp_min_signal_confidence = 0.55;
     double lead_lag_scalp_min_model_confidence = 0.20;
     double lead_lag_scalp_min_cb_move_bps = 0.5;

@@ -1730,6 +1730,7 @@ int main(int argc, char** argv) {
     std::unordered_map<std::string, LeadMinExitBlock> lead_min_exit_blocked;
     std::unordered_map<std::string, int64_t> last_article_emergency_attempt_ms;
     std::unordered_map<std::string, int64_t> last_sniper_stop_attempt_ms;
+    std::unordered_map<std::string, int64_t> last_prediction_page_gate_log_ms;
     // Per-token quarantine: a token that returns "Invalid order payload" (opaque
     // CLOB-side rejection) or "no match" (no liquidity) is skipped for a while so
     // the bot stops hammering it and focuses on markets that actually fill — this
@@ -1743,6 +1744,14 @@ int main(int argc, char** argv) {
         auto manual_order = [](const std::string& source) {
             return source.rfind("HUMAN", 0) == 0 || source == "FLATTEN";
         };
+        auto prediction_2m_stop_source = [](const std::string& source) {
+            return source == "PREDICTION_2M_STOP";
+        };
+        const bool prediction_2m_entry =
+            req.source == "PREDICTION_2M_ENTRY" &&
+            cfg.strategy.prediction_2m_enabled;
+        const bool prediction_2m_stop =
+            prediction_2m_stop_source(req.source);
         if (uncertain_order_halt.load() && !manual_order(req.source) &&
             req.source != "DAILY_KILL") {
             vp::OrderResult blocked;
@@ -1756,6 +1765,12 @@ int main(int argc, char** argv) {
         }
         auto autonomous_sell_enabled = [&]() {
             if (manual_order(req.source)) return true;
+            if (prediction_2m_stop_source(req.source))
+                return cfg.strategy.prediction_2m_enabled &&
+                       cfg.runtime.mode == vp::TradeMode::Paper &&
+                       cfg.strategy.stop_loss_mode &&
+                       std::isfinite(cfg.strategy.stop_loss_price) &&
+                       std::abs(cfg.strategy.stop_loss_price - 0.35) < 1e-9;
             if (req.source.rfind("CB_LEAD_SCALP_", 0) == 0)
                 return cfg.strategy.lead_lag_scalp_enabled;
             if (req.source == "ARTICLE_SIM_TP" ||
@@ -1808,10 +1823,120 @@ int main(int argc, char** argv) {
                             req.source.rfind("CB_LEAD_SCALP_",0)==0 ||
                             req.source == "LATE_SETTLEMENT_ENTRY" ||
                             req.source == "LATE_SETTLEMENT_HARD_STOP" ||
+                            req.source == "PREDICTION_2M_ENTRY" ||
                             manual_order(req.source) || req.source == "DAILY_KILL" ||
                             (!cfg.strategy.window_predictor_source.empty() &&
                              req.source == cfg.strategy.window_predictor_source);
         int64_t nowm = vp::Clock::wall_ns() / 1'000'000LL;
+        if (req.source == "PREDICTION_2M_ENTRY") {
+            const int64_t remaining_ms = req.window_close_ms - nowm;
+            const bool allowed_asset = req.asset == "BTC" || req.asset == "ETH" ||
+                                       req.asset == "SOL" || req.asset == "XRP";
+            const double expected_notional =
+                cfg.strategy.prediction_2m_order_shares * req.limit_price;
+            const bool exact_size = std::isfinite(req.size_shares) &&
+                std::abs(req.size_shares - cfg.strategy.prediction_2m_order_shares) < 1e-8 &&
+                std::isfinite(req.size_usd) &&
+                std::abs(req.size_usd - expected_notional) < 1e-8;
+            const bool exact_time = req.window_close_ms > 0 &&
+                std::llabs(remaining_ms - 120'000LL) <=
+                    cfg.strategy.prediction_2m_trigger_grace_ms;
+            if (!prediction_2m_entry || cfg.runtime.mode != vp::TradeMode::Paper ||
+                req.dir != vp::OrderDir::Buy || req.horizon_s != 300 ||
+                !allowed_asset || !exact_size || !exact_time ||
+                req.execution_mode != vp::ExecutionMode::Maker ||
+                !req.maker_fixed_price ||
+                !cfg.strategy.stop_loss_mode ||
+                !cfg.strategy.prediction_page_gate_enabled ||
+                std::abs(cfg.strategy.stop_loss_price - 0.35) > 1e-9 ||
+                !std::isfinite(req.limit_price) || req.limit_price <= 0.0 ||
+                req.limit_price > 0.97 + 1e-9) {
+                vp::OrderResult skipped;
+                skipped.status = "skipped";
+                skipped.terminal = true;
+                skipped.reject_class = vp::OrderResult::RejectClass::RiskCap;
+                skipped.reject_reason = "prediction_2m final guard failed (PAPER, exact market/time/share size, maker, $0.35 stop, or price cap)";
+                if (journal.on_order) journal.on_order(req, skipped);
+                spdlog::warn("PREDICTION_2M state=blocked asset={} horizon={} remaining={}ms shares={:.2f} notional=${:.2f} reason={}",
+                    req.asset, req.horizon_s, remaining_ms, req.size_shares, req.size_usd,
+                    skipped.reject_reason);
+                return skipped;
+            }
+        }
+        if (cfg.strategy.prediction_page_gate_enabled &&
+            req.dir == vp::OrderDir::Buy && !manual_order(req.source)) {
+            const auto snapshot = pg->load_prediction_gate_snapshot(req.condition_id);
+            std::string reason;
+            std::optional<double> page_up_probability;
+            std::int64_t page_age_ms = -1;
+            std::string page_status = "missing";
+            std::string page_version;
+            if (!snapshot) {
+                reason = "prediction_page_snapshot_missing";
+            } else {
+                page_age_ms = snapshot->age_ms;
+                page_status = snapshot->model_status;
+                page_version = snapshot->model_version;
+                if (snapshot->condition_id != req.condition_id ||
+                    snapshot->asset != req.asset ||
+                    snapshot->horizon_s != req.horizon_s ||
+                    std::llabs(snapshot->window_close_ms - req.window_close_ms) > 1000) {
+                    reason = "prediction_page_market_mismatch";
+                } else if (snapshot->age_ms < 0 || snapshot->age_ms > 3000) {
+                    reason = "prediction_page_snapshot_stale";
+                } else if (snapshot->model_status != "ready" ||
+                           !snapshot->up_probability ||
+                           !std::isfinite(*snapshot->up_probability) ||
+                           *snapshot->up_probability < 0.0 ||
+                           *snapshot->up_probability > 1.0) {
+                    reason = "prediction_page_forecast_not_ready";
+                } else {
+                    page_up_probability = *snapshot->up_probability;
+                    const vp::ShareSide page_side = *page_up_probability >= 0.5
+                        ? vp::ShareSide::UP : vp::ShareSide::DOWN;
+                    const double side_chance_pct = 100.0 *
+                        (*page_up_probability >= 0.5
+                            ? *page_up_probability : 1.0 - *page_up_probability);
+                    if (page_side != req.side) {
+                        reason = "prediction_page_side_disagrees";
+                    } else if (side_chance_pct + 1e-9 <
+                               cfg.strategy.prediction_page_min_chance_pct) {
+                        reason = "prediction_page_chance_below_threshold";
+                    }
+                }
+            }
+            if (!reason.empty()) {
+                auto& last_log = last_prediction_page_gate_log_ms[req.condition_id];
+                if (nowm - last_log >= 5000 || last_log == 0) {
+                    last_log = nowm;
+                    const double up_pct = page_up_probability
+                        ? *page_up_probability * 100.0 : -1.0;
+                    spdlog::info(
+                        "PREDICTION_PAGE_GATE state=blocked asset={} horizon={} source={} "
+                        "reason={} order_side={} page_status={} up={:.1f}% age={}ms "
+                        "minimum_side_chance={:.1f}% model={}",
+                        req.asset, req.horizon_s, req.source, reason,
+                        vp::to_string(req.side), page_status, up_pct, page_age_ms,
+                        cfg.strategy.prediction_page_min_chance_pct,
+                        page_version.empty() ? "unavailable" : page_version);
+                }
+                vp::OrderResult skipped;
+                skipped.status = "skipped";
+                skipped.terminal = true;
+                skipped.reject_class = vp::OrderResult::RejectClass::RiskCap;
+                skipped.reject_reason = reason;
+                return skipped;
+            }
+            const double side_chance_pct = 100.0 *
+                (*page_up_probability >= 0.5
+                    ? *page_up_probability : 1.0 - *page_up_probability);
+            spdlog::debug(
+                "PREDICTION_PAGE_GATE state=passed asset={} horizon={} source={} "
+                "side={} side_chance={:.1f}% minimum={:.1f}% age={}ms model={}",
+                req.asset, req.horizon_s, req.source, vp::to_string(req.side),
+                side_chance_pct, cfg.strategy.prediction_page_min_chance_pct,
+                page_age_ms, page_version);
+        }
         if (!exempt) {
             // Skip quarantined tokens (recently rejected) to avoid reject-spam.
             auto qit = token_quarantine_ms.find(req.token_id);
@@ -1837,7 +1962,7 @@ int main(int argc, char** argv) {
         const bool sniper_stop_fak = req.source == "LATE_SETTLEMENT_HARD_STOP" &&
                                     cfg.strategy.late_window_sniper_hard_stop_ticks > 0;
         const bool stop_loss_fak = req.stop_loss_fak_authorized &&
-                                   (lead_stop_fak || sniper_stop_fak) &&
+                                   (lead_stop_fak || sniper_stop_fak || prediction_2m_stop) &&
                                    req.dir == vp::OrderDir::Sell;
         req.execution_mode = stop_loss_fak
             ? vp::ExecutionMode::Taker : vp::ExecutionMode::Maker;
@@ -1876,6 +2001,15 @@ int main(int argc, char** argv) {
             req.maker_reprice_ms = 0;
             req.maker_max_age_ms = 0;
             req.maker_cancel_before_close_ms = 30'000;
+        }
+
+        if (prediction_2m_entry) {
+            // Keep the quote at the strategy's original price until it fills
+            // or the final close guard cancels it; never chase or age it out.
+            req.maker_fixed_price = true;
+            req.maker_reprice_ms = 0;
+            req.maker_max_age_ms = 0;
+            req.maker_cancel_before_close_ms = 1'000;
         }
 
         if (req.dir==vp::OrderDir::Buy &&
@@ -3028,13 +3162,204 @@ int main(int argc, char** argv) {
         vp::Recycler recycler;
         int64_t last_recycler_log_ms=0;
         int64_t last_runtime_status_ms = 0;
+        // Durable intent IDs and this in-memory latch make the 2m checkpoint a
+        // one-shot per market, including across a fast service restart.
+        std::unordered_map<std::string, int64_t> prediction_2m_latched;
+        auto prediction_2m_intent_id = [](const std::string& condition_id) {
+            std::string compact;
+            compact.reserve(32);
+            for (unsigned char ch : condition_id) {
+                if (std::isxdigit(ch)) compact.push_back(static_cast<char>(ch));
+                if (compact.size() == 32) break;
+            }
+            if (compact.size() != 32) return vp::core::make_uuid();
+            compact[12] = '5'; // RFC 4122 name-based version nibble
+            compact[16] = '8'; // RFC 4122 variant
+            return fmt::format("{}-{}-{}-{}-{}", compact.substr(0, 8),
+                compact.substr(8, 4), compact.substr(12, 4),
+                compact.substr(16, 4), compact.substr(20, 12));
+        };
         while (!g_stop.load() && !tui.wants_quit()) {
             int64_t now_ms = vp::Clock::wall_ns() / 1'000'000LL;
             if (now_ms - last_runtime_status_ms >= 2'000) {
                 last_runtime_status_ms = now_ms;
                 write_runtime_status(instance_label, session_id, cfg.runtime.mode,
-                                     cfg.strategy.entry_order_mode,
+                                     cfg.strategy.prediction_2m_enabled
+                                         ? "maker" : cfg.strategy.entry_order_mode,
                                      uncertain_order_halt.load(), state.autopilot.load(), state.daily_kill_fired.load(), now_ms);
+            }
+
+            // Prediction-tab entry is intentionally a separate, one-shot
+            // PAPER strategy. It runs before the heavier per-market sweep so
+            // its decision is made on the first refresh pass at/after T-120s.
+            if (cfg.strategy.prediction_2m_enabled) {
+                struct Candidate {
+                    vp::PmMarket market;
+                    double up_ask = 0.0;
+                    double up_ask_size = 0.0;
+                    double down_ask = 0.0;
+                    double down_ask_size = 0.0;
+                    int64_t up_book_age_ms = INT64_MAX;
+                    int64_t down_book_age_ms = INT64_MAX;
+                };
+                std::vector<Candidate> due;
+                {
+                    std::lock_guard<std::mutex> lk(state.mu);
+                    for (const auto& m : state.markets) {
+                        if (m.horizon_seconds != 300 || m.window_open_ms <= 0 ||
+                            m.window_open_ms > now_ms || m.window_close_ms <= now_ms ||
+                            (m.asset != "BTC" && m.asset != "ETH" &&
+                             m.asset != "SOL" && m.asset != "XRP"))
+                            continue;
+                        const int64_t target_ms = m.window_close_ms - 120'000LL;
+                        if (now_ms < target_ms) continue;
+                        const std::string latch_key = m.condition_id + "|" +
+                            std::to_string(m.window_close_ms);
+                        if (prediction_2m_latched.contains(latch_key)) continue;
+                        prediction_2m_latched.emplace(latch_key, m.window_close_ms);
+                        if (now_ms - target_ms >
+                            cfg.strategy.prediction_2m_trigger_grace_ms) {
+                            spdlog::warn("PREDICTION_2M state=missed asset={} horizon=300 "
+                                         "late_by={}ms grace={}ms condition={}",
+                                m.asset, now_ms - target_ms,
+                                cfg.strategy.prediction_2m_trigger_grace_ms,
+                                m.condition_id.substr(0, 12));
+                            continue;
+                        }
+                        Candidate c;
+                        c.market = m;
+                        if (auto it = state.book_up.find(m.condition_id);
+                            it != state.book_up.end() && it->second) {
+                            const auto ask = it->second->best_ask();
+                            c.up_ask = ask.price;
+                            c.up_ask_size = ask.size;
+                        }
+                        if (auto it = state.book_down.find(m.condition_id);
+                            it != state.book_down.end() && it->second) {
+                            const auto ask = it->second->best_ask();
+                            c.down_ask = ask.price;
+                            c.down_ask_size = ask.size;
+                        }
+                        if (auto it = state.last_book_update_ms.find(m.yes_token_id);
+                            it != state.last_book_update_ms.end())
+                            c.up_book_age_ms = now_ms - it->second;
+                        if (auto it = state.last_book_update_ms.find(m.no_token_id);
+                            it != state.last_book_update_ms.end())
+                            c.down_book_age_ms = now_ms - it->second;
+                        due.push_back(std::move(c));
+                    }
+                }
+                for (auto it = prediction_2m_latched.begin();
+                     it != prediction_2m_latched.end();) {
+                    if (now_ms > it->second + 3'600'000LL)
+                        it = prediction_2m_latched.erase(it);
+                    else
+                        ++it;
+                }
+                for (const auto& c : due) {
+                    const auto& m = c.market;
+                    const auto snapshot = pg->load_prediction_gate_snapshot(m.condition_id);
+                    std::string skip_reason;
+                    if (!snapshot) {
+                        skip_reason = "prediction_snapshot_missing";
+                    } else if (snapshot->condition_id != m.condition_id ||
+                               snapshot->asset != m.asset || snapshot->horizon_s != 300 ||
+                               std::llabs(snapshot->window_open_ms - m.window_open_ms) > 1000 ||
+                               std::llabs(snapshot->window_close_ms - m.window_close_ms) > 1000) {
+                        skip_reason = "prediction_market_mismatch";
+                    } else if (snapshot->age_ms < 0 || snapshot->age_ms > 3000) {
+                        skip_reason = "prediction_snapshot_stale";
+                    } else if (snapshot->model_status != "ready" ||
+                               !snapshot->up_probability ||
+                               !std::isfinite(*snapshot->up_probability) ||
+                               *snapshot->up_probability < 0.0 ||
+                               *snapshot->up_probability > 1.0) {
+                        skip_reason = "prediction_not_ready";
+                    }
+                    if (!skip_reason.empty()) {
+                        spdlog::warn("PREDICTION_2M state=skipped asset={} reason={} "
+                                     "condition={}", m.asset, skip_reason,
+                                     m.condition_id.substr(0, 12));
+                        continue;
+                    }
+                    const double up_probability = *snapshot->up_probability;
+                    if (std::abs(up_probability - 0.5) <= 1e-9) {
+                        spdlog::info("PREDICTION_2M state=skipped asset={} reason=forecast_tie condition={}",
+                                     m.asset, m.condition_id.substr(0, 12));
+                        continue;
+                    }
+                    const vp::ShareSide side = up_probability > 0.5
+                        ? vp::ShareSide::UP : vp::ShareSide::DOWN;
+                    const double ask = side == vp::ShareSide::UP
+                        ? c.up_ask : c.down_ask;
+                    const double ask_size = side == vp::ShareSide::UP
+                        ? c.up_ask_size : c.down_ask_size;
+                    const int64_t book_age_ms = side == vp::ShareSide::UP
+                        ? c.up_book_age_ms : c.down_book_age_ms;
+                    if (!(ask > 0.0) || !(ask_size > 0.0) ||
+                        book_age_ms < 0 || book_age_ms > cfg.strategy.max_book_age_ms) {
+                        spdlog::warn("PREDICTION_2M state=skipped asset={} side={} "
+                                     "reason=executable_book_unavailable ask={:.4f} "
+                                     "depth={:.2f} book_age={}ms",
+                            m.asset, vp::to_string(side), ask, ask_size, book_age_ms);
+                        continue;
+                    }
+                    const double tick = m.tick_size > 0.0 ? m.tick_size : 0.01;
+                    constexpr int ask_offset_ticks = 12;
+                    const auto ask_ticks = static_cast<int64_t>(std::llround(ask / tick));
+                    const auto limit_ticks = ask_ticks - ask_offset_ticks;
+                    const double aligned_ask = ask_ticks * tick;
+                    const double limit = limit_ticks * tick;
+                    if (std::abs(aligned_ask - ask) > tick * 1e-4 || limit_ticks <= 0) {
+                        spdlog::warn("PREDICTION_2M state=skipped asset={} side={} "
+                                     "reason=invalid_tick_or_insufficient_price ask={:.4f} tick={:.4f}",
+                                     m.asset, vp::to_string(side), ask, tick);
+                        continue;
+                    }
+                    if (limit > 0.97 + 1e-9) {
+                        spdlog::warn("PREDICTION_2M state=skipped asset={} side={} "
+                                     "reason=price_above_operator_cap ask={:.4f} limit={:.4f} cap=0.9700",
+                                     m.asset, vp::to_string(side), ask, limit);
+                        continue;
+                    }
+                    vp::OrderRequest req;
+                    req.intent_id = prediction_2m_intent_id(m.condition_id);
+                    req.condition_id = m.condition_id;
+                    req.asset = m.asset;
+                    req.horizon_s = 300;
+                    req.token_id = side == vp::ShareSide::UP
+                        ? m.yes_token_id : m.no_token_id;
+                    req.side = side;
+                    req.dir = vp::OrderDir::Buy;
+                    req.size_shares = cfg.strategy.prediction_2m_order_shares;
+                    req.limit_price = limit;
+                    req.size_usd = req.size_shares * limit;
+                    req.execution_mode = vp::ExecutionMode::Maker;
+                    req.maker_fixed_price = true;
+                    req.window_close_ms = m.window_close_ms;
+                    req.neg_risk = m.neg_risk;
+                    req.tick_size = tick;
+                    req.source = "PREDICTION_2M_ENTRY";
+                    spdlog::info("PREDICTION_2M state=submit asset={} side={} "
+                                 "up_probability={:.1f}% side_probability={:.1f}% "
+                                 "ask={:.4f} offset_ticks=12 limit={:.4f} shares={:.2f} notional=${:.2f} "
+                                 "remaining_ms={} model={} book_age={}ms",
+                        m.asset, vp::to_string(side), up_probability * 100.0,
+                        std::max(up_probability, 1.0 - up_probability) * 100.0,
+                        ask, limit, req.size_shares, req.size_usd,
+                        m.window_close_ms - now_ms,
+                        snapshot->model_version, book_age_ms);
+                    const auto result = do_submit(req);
+                    if (result.accepted) {
+                        spdlog::info("PREDICTION_2M state=accepted asset={} side={} "
+                                     "fill_shares={:.2f} fill_price={:.4f} fee=${:.4f} status={}",
+                            m.asset, vp::to_string(side), result.fill_shares,
+                            result.fill_price, result.fee_usd, result.status);
+                    } else {
+                        spdlog::warn("PREDICTION_2M state=rejected asset={} side={} reason={}",
+                            m.asset, vp::to_string(side), result.reject_reason);
+                    }
+                }
             }
 
             // The first live minute is intentionally incomplete. Reconcile
@@ -6415,10 +6740,13 @@ int main(int argc, char** argv) {
                 auto pos_snap = positions.snapshot();
                 for (const auto& p : pos_snap) {
                     if (p.shares < cfg.strategy.min_position_shares || p.avg_price <= 0) continue;
-                    // Min-hold: a freshly-opened position's bid-marked P&L is mostly the
-                    // spread, not a real adverse move. Don't stop-loss (and reverse) it
-                    // until it's had time to prove out — breaks the instant-stop churn.
-                    if (cfg.strategy.stop_loss_min_hold_secs > 0 &&
+                    const bool prediction_2m_absolute_stop =
+                        cfg.strategy.prediction_2m_enabled &&
+                        cfg.runtime.mode == vp::TradeMode::Paper &&
+                        std::isfinite(cfg.strategy.stop_loss_price) &&
+                        std::abs(cfg.strategy.stop_loss_price - 0.35) < 1e-9;
+                    if (!prediction_2m_absolute_stop &&
+                        cfg.strategy.stop_loss_min_hold_secs > 0 &&
                         now_ms - p.opened_ms <
                             (int64_t)cfg.strategy.stop_loss_min_hold_secs * 1000LL)
                         continue;
@@ -6448,23 +6776,21 @@ int main(int argc, char** argv) {
                             bid = it->second->best_bid().price;
                     }
                     if (bid <= 0) continue;
-                    const bool absolute_price_stop =
-                        std::isfinite(cfg.strategy.stop_loss_price) &&
-                        cfg.strategy.stop_loss_price > 0.0 &&
-                        cfg.strategy.stop_loss_price < 1.0;
-                    double threshold = scalp_managed
-                        ? p.avg_price * (1.0 - cfg.strategy.hard_stop_pct / 100.0)
-                        : (absolute_price_stop
-                              ? cfg.strategy.stop_loss_price
-                              : p.avg_price * (1.0 - cfg.strategy.stop_loss_pct / 100.0));
-                    if (bid > threshold) continue;
+                    const bool absolute_price_stop = prediction_2m_absolute_stop;
+                    double threshold = absolute_price_stop
+                        ? cfg.strategy.stop_loss_price
+                        : scalp_managed
+                            ? p.avg_price * (1.0 - cfg.strategy.hard_stop_pct / 100.0)
+                            : p.avg_price * (1.0 - cfg.strategy.stop_loss_pct / 100.0);
+                    if (absolute_price_stop ? bid >= threshold : bid > threshold)
+                        continue;
 
                     // SMART EXIT: the bid is below the stop threshold, but is the
                     // position actually WRONG, or is the book just dipping? If any
                     // conviction signal (oracle / Coinbase / predictor) still favors
                     // our side, HOLD — 67% of blind stops would have settled WIN.
                     // The hard_stop_pct catastrophe floor fires regardless of votes.
-                    if (cfg.strategy.smart_exit_mode) {
+                    if (cfg.strategy.smart_exit_mode && !absolute_price_stop) {
                         bool catastrophic = bid <= p.avg_price *
                             (1.0 - cfg.strategy.hard_stop_pct / 100.0);
                         if (!catastrophic) {
@@ -6498,7 +6824,8 @@ int main(int argc, char** argv) {
                     req.side            = p.side;
                     req.dir             = vp::OrderDir::Sell;
                     req.size_shares     = 0;  // sell all
-                    req.source          = "STOP_LOSS";
+                    req.source          = absolute_price_stop ? "PREDICTION_2M_STOP" : "STOP_LOSS";
+                    req.stop_loss_fak_authorized = absolute_price_stop;
                     req.window_close_ms = p.window_close_ms;
                     {
                         std::lock_guard<std::mutex> lk(state.mu);

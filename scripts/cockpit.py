@@ -181,6 +181,8 @@ COCKPIT_TUNABLE = {
     "lead_lag_scalp_impulse_only": ("bool",),
     "lead_lag_scalp_impulse_require_value_edge": ("bool",),
     "lead_lag_scalp_model_value_enabled": ("bool",),
+    "prediction_page_gate_enabled": ("bool",),
+    "prediction_page_min_chance_pct": ("float", 0.0, 100.0),
     "lead_lag_scalp_max_secs_remaining_15m": ("int", 0, 899),
     "lead_lag_scalp_max_secs_remaining_5m": ("int", 0, 299),
     "lead_lag_scalp_reversal_oracle_confirm_bps": ("float", 0.0, 100.0),
@@ -2321,6 +2323,104 @@ def api_predictor_trajectory(condition_id=None, limit=200):
     return {"samples": samples, "by_market": by_market}
 
 
+_prediction_gate_schema_lock = threading.Lock()
+_prediction_gate_schema_initialized = False
+
+
+def _ensure_prediction_gate_schema():
+    global _prediction_gate_schema_initialized
+    if _prediction_gate_schema_initialized:
+        return
+    with _prediction_gate_schema_lock:
+        if _prediction_gate_schema_initialized:
+            return
+        with open(os.path.join(ROOT, "sql", "030_prediction_gate_current.sql"),
+                  encoding="utf-8") as source:
+            migration = source.read()
+        pool = get_pool()
+        conn = pool.getconn()
+        try:
+            conn.set_session(readonly=False, autocommit=False)
+            with conn.cursor() as cur:
+                cur.execute(migration)
+            conn.commit()
+            _prediction_gate_schema_initialized = True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            pool.putconn(conn)
+
+
+def _record_prediction_gate_current(board):
+    """Publish exact current-window page forecasts for the bot-side gate."""
+    try:
+        updated_ms = float(board.get("inputs_at") or board.get("generated_at"))
+    except (TypeError, ValueError, OverflowError):
+        return
+    if not math.isfinite(updated_ms) or updated_ms <= 0:
+        return
+    rows = []
+    for card in board.get("cards") or []:
+        if not isinstance(card, dict) or card.get("period") != "CURRENT":
+            continue
+        condition_id = str(card.get("condition_id") or "")
+        asset = str(card.get("asset") or "").upper()
+        try:
+            horizon = int(card.get("horizon_seconds") or 0)
+            opened_ms = float(card.get("window_open"))
+            closed_ms = float(card.get("window_close"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (not condition_id or asset not in ("BTC", "ETH", "SOL", "XRP") or
+                horizon not in (300, 900) or not math.isfinite(opened_ms) or
+                not math.isfinite(closed_ms) or closed_ms <= opened_ms):
+            continue
+        model_status = str(card.get("model_status") or "unknown")
+        raw_probability = card.get("independent_up_probability")
+        if raw_probability is None:
+            raw_probability = card.get("up_probability")
+        try:
+            probability = float(raw_probability) if raw_probability is not None else None
+        except (TypeError, ValueError, OverflowError):
+            probability = None
+        if (probability is None or not math.isfinite(probability) or
+                probability < 0.0 or probability > 1.0 or model_status != "ready"):
+            probability = None
+        rows.append((condition_id, asset, horizon, str(card.get("slug") or ""),
+            datetime.fromtimestamp(opened_ms / 1000.0, timezone.utc),
+            datetime.fromtimestamp(closed_ms / 1000.0, timezone.utc), model_status,
+            probability,
+            str(card.get("independent_model_version") or board.get("independent_model_version") or board.get("model_version") or ""),
+            str(card.get("prediction_basis") or ""),
+            datetime.fromtimestamp(updated_ms / 1000.0, timezone.utc)))
+
+    _ensure_prediction_gate_schema()
+    if not rows:
+        return
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        conn.set_session(readonly=False, autocommit=False)
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(cur, """INSERT INTO vp.prediction_gate_current
+                (condition_id,asset,horizon_seconds,slug,window_open,window_close,
+                 model_status,up_probability,model_version,model_basis,source_updated_at)
+                VALUES %s ON CONFLICT(condition_id) DO UPDATE SET
+                  asset=EXCLUDED.asset,horizon_seconds=EXCLUDED.horizon_seconds,
+                  slug=EXCLUDED.slug,window_open=EXCLUDED.window_open,
+                  window_close=EXCLUDED.window_close,model_status=EXCLUDED.model_status,
+                  up_probability=EXCLUDED.up_probability,model_version=EXCLUDED.model_version,
+                  model_basis=EXCLUDED.model_basis,source_updated_at=EXCLUDED.source_updated_at,
+                  published_at=clock_timestamp()""", rows)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
 # ── Manual-trading prediction board ────────────────────────────────────────
 _manual_prediction_service = None
 _manual_prediction_lock = threading.Lock()
@@ -2554,7 +2654,9 @@ def api_manual_predictions(force=False, after_version=None, wait_s=0):
         wait_s = 0.0
     with _manual_prediction_lock:
         if _manual_prediction_service is None:
-            _manual_prediction_service = PredictionService(q, _public_json, ROOT, _prediction_news)
+            _manual_prediction_service = PredictionService(
+                q, _public_json, ROOT, _prediction_news,
+                gate_writer=_record_prediction_gate_current)
             _manual_prediction_service.start()
     return _manual_prediction_service.snapshot(force, after_version, wait_s)
 
@@ -2789,6 +2891,8 @@ _V3_REGISTRY = [
     _k("Order Execution","maker_max_age_ms","strategy.hot","Maker Max Age (ms)","ms",lo=0,hi=60000,step=50,hint="Entry quote lifetime; expiry cancels without taker fallback."),
     _k("Order Execution","maker_cancel_before_close_ms","strategy.hot","Maker Cancel Before Close (ms)","ms",lo=0,hi=60000,step=250,hint="Pull quotes this long before window close."),
     # Predictor & Digital FV
+    _k("Predictor & Digital Fair Value","prediction_page_gate_enabled","strategy.hot","Prediction Page Gate","",typ="bool",hint="Blocks automatic buys unless the current Predictions page forecast is fresh, agrees with the order side, and meets the configured side-chance floor."),
+    _k("Predictor & Digital Fair Value","prediction_page_min_chance_pct","strategy.hot","Prediction Page Min Side Chance (%)","percentage points",lo=0,hi=100,step=1,hint="Minimum UP or DOWN probability shown by the current Predictions page before an automatic buy can be posted."),
     _k("Predictor & Digital Fair Value","predictor_mode","strategy.hot","Predictor Mode","",typ="bool",hint="Main prediction-model entry path."),
     _k("Predictor & Digital Fair Value","min_predictor_edge","strategy.hot","Min Predictor Edge","",lo=0,hi=0.5,step=0.005,hint="Fee-inclusive edge required."),
     _k("Predictor & Digital Fair Value","min_predictor_conf","strategy.hot","Min Predictor Confidence","",lo=0,hi=1,step=0.01,hint="Model confidence floor."),
@@ -2896,6 +3000,8 @@ def _v3_group_for(key):
         return "WPRED Checkpoints"
     if key.startswith("adaptive_"):
         return "Adaptive Entry"
+    if key.startswith("prediction_page_"):
+        return "Predictor & Digital Fair Value"
     if key.startswith("digital_fv_") or key.startswith("predictor_") or key in ("min_predictor_edge","min_predictor_conf"):
         return "Predictor & Digital Fair Value"
     if key.startswith("maker_") or key in ("entry_order_mode","manual_buy_slippage_pct","manual_buy_slippage_extra","token_quarantine_payload_ms","token_quarantine_no_match_ms","min_position_shares","dust_position_shares","price_history_max_points","price_velocity_lookback_ms","sparkline_points","tick_buffer_max_age_us","tick_buffer_max_entries","max_book_age_ms"):

@@ -109,8 +109,9 @@ def age_board(board, now_ms=None, stale_after_s=SNAPSHOT_STALE_SECONDS):
 
 class PredictionService:
     """One producer for the whole cockpit; readers never wait for network I/O."""
-    def __init__(self, query, public_json, root, news_fn, interval=SERVER_REFRESH_SECONDS):
+    def __init__(self, query, public_json, root, news_fn, interval=SERVER_REFRESH_SECONDS, gate_writer=None):
         self.query, self.public_json, self.root, self.news_fn = query, public_json, root, news_fn
+        self.gate_writer = gate_writer
         self.interval = max(MIN_REFRESH_GAP_SECONDS, float(interval))
         self._lock = threading.Condition()
         self._stop = threading.Event()
@@ -178,6 +179,11 @@ class PredictionService:
             try:
                 board = build_board(self.query, self.public_json, self.root,
                                     lambda: self._news, resolve=False)
+                if self.gate_writer:
+                    try:
+                        self.gate_writer(board)
+                    except Exception:
+                        pass  # A database outage must not take down the Predictions page.
                 with self._lock:
                     self._board, self._error = board, None
                     self._last_success_ms = int(time.time()*1000)

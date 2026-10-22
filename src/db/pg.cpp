@@ -799,6 +799,44 @@ std::vector<Pg::RawOpenOrderRow> Pg::load_open_orders_for_instance() noexcept {
     }
     return out;
 }
+std::optional<Pg::PredictionGateSnapshot> Pg::load_prediction_gate_snapshot(
+        const std::string& condition_id) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        pqxx::work tx{*conn_};
+        const auto rows = tx.exec_params(
+            "SELECT condition_id, asset, horizon_seconds, "
+            "(extract(epoch FROM window_open)*1000)::bigint, "
+            "(extract(epoch FROM window_close)*1000)::bigint, model_status, "
+            "up_probability, model_version, model_basis, "
+            "(extract(epoch FROM (clock_timestamp()-source_updated_at))*1000)::bigint "
+            "FROM vp.prediction_gate_current WHERE condition_id=$1",
+            condition_id);
+        tx.commit();
+        if (rows.empty()) return std::nullopt;
+        const auto& row = rows.front();
+        PredictionGateSnapshot snapshot;
+        snapshot.condition_id = row[0].as<std::string>();
+        snapshot.asset = row[1].as<std::string>();
+        snapshot.horizon_s = row[2].as<int>();
+        snapshot.window_open_ms = row[3].as<std::int64_t>();
+        snapshot.window_close_ms = row[4].as<std::int64_t>();
+        snapshot.model_status = row[5].as<std::string>();
+        if (!row[6].is_null()) snapshot.up_probability = row[6].as<double>();
+        snapshot.model_version = row[7].as<std::string>();
+        snapshot.model_basis = row[8].as<std::string>();
+        snapshot.age_ms = row[9].as<std::int64_t>();
+        return snapshot;
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("load_prediction_gate_snapshot", e.what());
+        spdlog::debug("prediction page gate snapshot unavailable: {}", e.what());
+        return std::nullopt;
+    } catch (const std::exception& e) {
+        spdlog::debug("prediction page gate snapshot unavailable: {}", e.what());
+        return std::nullopt;
+    }
+}
+
 } // namespace vp
 
 std::string vp::Pg::market_reference_key(const std::string& cid) noexcept {

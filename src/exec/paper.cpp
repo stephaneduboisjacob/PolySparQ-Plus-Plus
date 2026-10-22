@@ -68,7 +68,8 @@ OrderResult PaperExecutor::submit(
     const bool authorized_stop_fak =
         req.stop_loss_fak_authorized &&
         (req.source == "CB_LEAD_SCALP_HARD_STOP" ||
-         req.source == "LATE_SETTLEMENT_HARD_STOP") &&
+         req.source == "LATE_SETTLEMENT_HARD_STOP" ||
+         req.source == "PREDICTION_2M_STOP") &&
         req.dir == OrderDir::Sell;
     if (req.execution_mode == ExecutionMode::Taker && !authorized_stop_fak) {
         r.status = "rejected";

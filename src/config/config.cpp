@@ -6,6 +6,7 @@
 #include <simdjson.h>
 #include <stdexcept>
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -511,6 +512,16 @@ Config Config::load(const std::string& path) {
     s.lead_lag_scalp_model_value_enabled = get_or<bool>(
         st, "lead_lag_scalp_model_value_enabled", s.lead_lag_scalp_model_value_enabled);
     s.lead_lag_scalp_horizon_s = get_or<int>(st, "lead_lag_scalp_horizon_s", s.lead_lag_scalp_horizon_s);
+    s.prediction_page_gate_enabled = get_or<bool>(
+        st, "prediction_page_gate_enabled", s.prediction_page_gate_enabled);
+    s.prediction_page_min_chance_pct = get_or<double>(
+        st, "prediction_page_min_chance_pct", s.prediction_page_min_chance_pct);
+    s.prediction_2m_enabled = get_or<bool>(
+        st, "prediction_2m_enabled", s.prediction_2m_enabled);
+    s.prediction_2m_order_shares = get_or<double>(
+        st, "prediction_2m_order_shares", s.prediction_2m_order_shares);
+    s.prediction_2m_trigger_grace_ms = get_or<int>(
+        st, "prediction_2m_trigger_grace_ms", s.prediction_2m_trigger_grace_ms);
     s.lead_lag_scalp_min_signal_confidence = get_or<double>(
         st, "lead_lag_scalp_min_signal_confidence", s.lead_lag_scalp_min_signal_confidence);
     s.lead_lag_scalp_min_model_confidence = get_or<double>(
@@ -735,6 +746,16 @@ Config Config::load(const std::string& path) {
         if (!s.predictor_mode)
             throw std::runtime_error("Coinbase lead/lag scalp requires predictor_mode=true for independent model confirmation");
     }
+    if (!(s.prediction_page_min_chance_pct >= 0.0 &&
+          s.prediction_page_min_chance_pct <= 100.0))
+        throw std::runtime_error("prediction_page_min_chance_pct must be 0..100");
+    if (!std::isfinite(s.prediction_2m_order_shares) ||
+        s.prediction_2m_order_shares <= 0.0 ||
+        s.prediction_2m_trigger_grace_ms < 0 ||
+        s.prediction_2m_trigger_grace_ms > 2000)
+        throw std::runtime_error("invalid prediction_2m sizing or trigger grace");
+    if (s.prediction_2m_enabled && c.runtime.mode != TradeMode::Paper)
+        throw std::runtime_error("prediction_2m_enabled is PAPER-only");
     if (s.late_window_sniper_enabled) {
         if (!(s.late_window_sniper_min_secs >= 1 &&
               s.late_window_sniper_min_secs < s.late_window_sniper_max_secs &&
