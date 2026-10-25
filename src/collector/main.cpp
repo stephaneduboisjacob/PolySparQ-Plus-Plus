@@ -29,6 +29,7 @@
 #include <fmt/format.h>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <functional>
@@ -170,12 +171,12 @@ int main(int argc, char** argv) {
                                   m.target_price, m.window_open_ms, m.window_close_ms,
                                   m.yes_token_id, m.no_token_id, m.question, m.slug,
                                   m.settlement_window_s, m.reference_is_binance);
-            });
+            }, vp::PersistSource::MarketMetadata);
             if (!cstate.disk_full.load() &&
                 cfg.data_collection.window_events_enabled && m.window_open_ms > 0) {
                 persist_q.push([pg=pg.get(), cid=m.condition_id]() noexcept {
                     pg->insert_window_event(cid, "opened", "");
-                });
+                }, vp::PersistSource::WindowEvent);
             }
         }
 
@@ -204,7 +205,7 @@ int main(int argc, char** argv) {
                                     side=sit->second, bb, ba]() noexcept {
                         std::vector<vp::PriceLevel> empty;
                         pg->insert_book_snapshot(cid, tok, side, empty, empty, bb, ba);
-                    });
+                    }, vp::PersistSource::PolymarketBookSnapshot);
                 }
             },
             [&cstate, &persist_q, &cfg, pg=pg.get()]
@@ -215,7 +216,7 @@ int main(int argc, char** argv) {
                     pg->insert_pm_trade(tu.condition_id, tu.token_id,
                                         tu.side_label,
                                         tu.price, tu.size, tu.exchange_ms);
-                });
+                }, vp::PersistSource::PolymarketPublicTrade);
             });
         pm_md->start();
         {
@@ -253,7 +254,7 @@ int main(int argc, char** argv) {
                                     qty=t.qty, maker=t.buyer_is_maker,
                                     exch_ms=t.exchange_ms]() noexcept {
                         pg->insert_binance_tick(sym, price, qty, maker, exch_ms);
-                    });
+                    }, vp::PersistSource::BinanceTick);
                 }
             });
         binance->start();
@@ -306,7 +307,7 @@ int main(int argc, char** argv) {
                             persist_q.push([pg, cid,
                                             p=std::move(seed_payload)]() noexcept {
                                 pg->insert_window_event(cid, "first_oracle_seed", p);
-                            });
+                            }, vp::PersistSource::WindowEvent);
                         }
                     }
 
@@ -319,7 +320,7 @@ int main(int argc, char** argv) {
                         persist_q.push([pg, asset=t.asset, price=t.price,
                                         ts_ms=t.ts_ms]() noexcept {
                             pg->insert_oracle_tick(asset, price, ts_ms);
-                        });
+                        }, vp::PersistSource::OracleTick);
                     }
                 });
             rtds->start();
@@ -352,7 +353,7 @@ int main(int argc, char** argv) {
                                     persist_q.push([pg=pg.get(), asset=std::string(sym),
                                                     price=px, ts_ms]() noexcept {
                                         pg->insert_coinbase_tick(asset, price, ts_ms);
-                                    });
+                                    }, vp::PersistSource::CoinbaseTick);
                                 }
                             } catch (...) {}
                         }
@@ -370,22 +371,26 @@ int main(int argc, char** argv) {
         std::int64_t last_discover_ms = vp::Clock::wall_ns() / 1'000'000LL;
         std::int64_t last_disk_check_ms = 0;
         std::int64_t last_persist_queue_check_ms = 0;
-        size_t last_persist_queue_rejected = 0;
+        std::array<size_t, vp::kPersistSourceCount> last_rejected_by_source{};
         constexpr std::int64_t kDiscoverIntervalMs = 3 * 60 * 1000LL; // 3 min
 
         while (!g_stop.load()) {
             std::int64_t now_ms = vp::Clock::wall_ns() / 1'000'000LL;
             if (now_ms - last_persist_queue_check_ms >= 30'000) {
                 last_persist_queue_check_ms = now_ms;
-                const size_t rejected = persist_q.rejected_pushes();
-                if (rejected > last_persist_queue_rejected) {
-                    spdlog::warn(
-                        "persistence queue rejected {} writes since last report "
-                        "(total={}, pending={})",
-                        rejected - last_persist_queue_rejected, rejected,
-                        persist_q.size());
+                const auto rejected_by_source = persist_q.rejected_by_source();
+                for (size_t i = 0; i < rejected_by_source.size(); ++i) {
+                    const size_t rejected = rejected_by_source[i];
+                    if (rejected > last_rejected_by_source[i]) {
+                        spdlog::warn(
+                            "persistence queue source={} rejected {} writes "
+                            "since last report (total={}, pending={})",
+                            vp::persist_source_name(static_cast<vp::PersistSource>(i)),
+                            rejected - last_rejected_by_source[i], rejected,
+                            persist_q.size());
+                    }
+                    last_rejected_by_source[i] = rejected;
                 }
-                last_persist_queue_rejected = rejected;
             }
 
             // ── Feature snapshots (predictor output) ──
@@ -472,7 +477,7 @@ int main(int argc, char** argv) {
                     persist_q.push([pg=pg.get(), cid=m.condition_id,
                                     j=std::move(json)]() noexcept {
                         pg->insert_feature(cid, j, 1);
-                    });
+                    }, vp::PersistSource::FeatureSnapshot);
                 }
             }
 
@@ -513,13 +518,13 @@ int main(int argc, char** argv) {
                                               m.target_price, m.window_open_ms, m.window_close_ms,
                                               m.yes_token_id, m.no_token_id, m.question, m.slug,
                                               m.settlement_window_s, m.reference_is_binance);
-                        });
+                        }, vp::PersistSource::MarketMetadata);
                         if (!cstate.disk_full.load() &&
                             cfg.data_collection.window_events_enabled &&
                             m.window_open_ms > 0) {
                             persist_q.push([pg=pg.get(), cid=m.condition_id]() noexcept {
                                 pg->insert_window_event(cid, "opened", "");
-                            });
+                            }, vp::PersistSource::WindowEvent);
                         }
                     }
                 }

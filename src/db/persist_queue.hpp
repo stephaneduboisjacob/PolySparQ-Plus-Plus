@@ -3,12 +3,56 @@
 // Multiple feed callbacks push items (non-blocking, drops on overflow).
 // One writer thread pops items and calls the corresponding Pg method.
 // Thread-safe.
+#include <array>
+#include <cstddef>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <queue>
+#include <string_view>
 
 namespace vp {
+
+enum class PersistSource : std::size_t {
+    Unclassified,
+    MarketMetadata,
+    WindowEvent,
+    PolymarketBookSnapshot,
+    PolymarketPublicTrade,
+    OracleTick,
+    BinanceTick,
+    CoinbaseTick,
+    FeatureSnapshot,
+    ImpulseShadow,
+    Signal,
+    PositionSnapshot,
+    StrategyRun,
+    Count,
+};
+
+inline constexpr std::size_t kPersistSourceCount =
+    static_cast<std::size_t>(PersistSource::Count);
+
+constexpr std::string_view persist_source_name(PersistSource source) noexcept {
+    switch (source) {
+    case PersistSource::MarketMetadata: return "market_metadata";
+    case PersistSource::WindowEvent: return "window_event";
+    case PersistSource::PolymarketBookSnapshot: return "pm_book_snapshot";
+    case PersistSource::PolymarketPublicTrade: return "pm_public_trade";
+    case PersistSource::OracleTick: return "oracle_tick";
+    case PersistSource::BinanceTick: return "binance_tick";
+    case PersistSource::CoinbaseTick: return "coinbase_tick";
+    case PersistSource::FeatureSnapshot: return "feature_snapshot";
+    case PersistSource::ImpulseShadow: return "impulse_shadow";
+    case PersistSource::Signal: return "signal";
+    case PersistSource::PositionSnapshot: return "position_snapshot";
+    case PersistSource::StrategyRun: return "strategy_run";
+    case PersistSource::Unclassified:
+    case PersistSource::Count:
+        return "unclassified";
+    }
+    return "unclassified";
+}
 
 template<typename T>
 class BoundedQueue {
@@ -16,10 +60,14 @@ public:
     explicit BoundedQueue(size_t max = 2000) : max_(max) {}
 
     // Push item; returns false and discards if full.
-    bool push(T item) {
+    bool push(T item, PersistSource source = PersistSource::Unclassified) {
         std::lock_guard<std::mutex> lk(mu_);
         if (shutdown_ || q_.size() >= max_) {
             ++rejected_pushes_;
+            const auto source_index = static_cast<std::size_t>(source);
+            ++rejected_by_source_[source_index < rejected_by_source_.size()
+                                      ? source_index
+                                      : static_cast<std::size_t>(PersistSource::Unclassified)];
             return false;
         }
         q_.push(std::move(item));
@@ -71,6 +119,11 @@ public:
         return rejected_pushes_;
     }
 
+    std::array<size_t, kPersistSourceCount> rejected_by_source() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return rejected_by_source_;
+    }
+
     bool is_shutdown() const {
         std::lock_guard<std::mutex> lk(mu_);
         return shutdown_;
@@ -83,6 +136,7 @@ private:
     std::queue<T>           q_;
     size_t                  max_;
     size_t                  rejected_pushes_ = 0;
+    std::array<size_t, kPersistSourceCount> rejected_by_source_{};
     bool                    shutdown_ = false;
 };
 
