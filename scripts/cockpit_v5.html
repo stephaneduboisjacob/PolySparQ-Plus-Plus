@@ -80,6 +80,23 @@ h1{font-size:22px;font-weight:700;letter-spacing:-.02em}
 .v4-hero-toolbar{display:flex;justify-content:flex-end;margin:-7px 0 10px}
 .v4-art-strip{height:58px;width:100%;object-fit:cover;object-position:center;border:1px solid var(--line);border-radius:10px;display:block;margin:12px 0;opacity:.88}
 .v4-feature-art{width:100%;height:118px;object-fit:cover;border-radius:10px;display:block;margin:0 0 12px;border:1px solid var(--line)}
+  .market-tape-panel{margin-bottom:12px}
+  .market-tape-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}
+  .market-tape-note{color:var(--mut);font-size:11px;line-height:1.5;margin-top:3px}
+  .market-tape-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  .market-tape-card{min-width:0;padding:12px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,rgba(22,30,43,.92),rgba(13,18,25,.96))}
+  .market-tape-card .head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .market-tape-card .market-name{font-weight:700;font-size:12px}
+  .market-tape-card .market-phase{font-size:9px;color:var(--dim);margin-top:2px}
+  .market-tape-chart{display:block;width:100%;height:70px;margin:7px 0 3px;overflow:visible}
+  .market-tape-chart polyline{fill:none;stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+  .market-tape-chart circle{stroke:var(--panel);stroke-width:1.5}
+  .market-tape-axis{display:flex;justify-content:space-between;color:var(--dim);font-size:9px;margin-top:-2px}
+  .market-tape-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px 10px;margin-top:8px}
+  .market-tape-stats span{display:block;color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.06em}
+  .market-tape-stats b{display:block;color:var(--text);font-family:var(--mono);font-size:11px;margin-top:2px}
+  @media(max-width:900px){.market-tape-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media(max-width:560px){.market-tape-grid{grid-template-columns:1fr}.market-tape-head{align-items:center}.market-tape-note{font-size:10px}}
 h2.sec{font-size:13px;font-weight:650;margin:20px 0 10px;display:flex;align-items:center;gap:8px}
 h2.sec .cnt{color:var(--dim);font-weight:400;font-size:11px}
 /* cards + grids */
@@ -489,6 +506,10 @@ pre,code{font-family:var(--mono)}
   <!-- ══════ MARKETS ══════ -->
   <section class="view" id="v-markets">
     <div class="v4-hero"><img class="v4-hero-art" src="/assets_v4/markets-hero.webp?v=5.1" alt="Market structure artwork"><div class="v4-hero-copy"><div class="v4-kicker">Market intelligence</div><div class="v4-title">Markets in motion</div><div class="v4-desc">Current and upcoming windows, with prediction context and the live book where available.</div></div><img class="v4-hero-full-logo" src="/assets_v4/polysparq_logo_full_with_name.webp?v=5.3" alt="PolySparQ++"></div>
+    <div class="card market-tape-panel">
+      <div class="market-tape-head"><div><h2 class="sec" style="margin-top:0">Window tape <span class="cnt">current market · stored CLOB snapshots</span></h2><div class="market-tape-note">UP-side midpoint movement and recorded public trades for each current window. Empty tape can mean local capture is disabled or that this market has not been tracked yet. Descriptive history only, not a forecast or trade signal.</div></div><button class="ghost" onclick="loadMarkets()" title="Refresh markets and stored tape">↻ Refresh</button></div>
+      <div class="market-tape-grid" id="mktTape"><div class="empty">Loading current-window tape…</div></div>
+    </div>
     <div class="grid g3" id="mktAll"></div>
   </section>
 
@@ -944,10 +965,51 @@ function renderMarkets(elId,cards,withGates){
     <div class="mrow"><span>Ask</span><b>${ask!=null?(100*ask).toFixed(1)+'¢':'—'}</b></div>
     </div>`}).join('')||'<div class="empty">no markets</div>';
 }
+let marketTapeRequest=0;
+function marketTapeChart(samples,asset,move){
+  const pts=(Array.isArray(samples)?samples:[]).map(p=>({bucket:Number(p?.[0]),mid:Number(p?.[1])})).filter(p=>Number.isFinite(p.bucket)&&Number.isFinite(p.mid));
+  if(!pts.length)return '<div class="empty">No stored book samples in this window.</div>';
+  const lo=Math.min(...pts.map(p=>p.mid)),hi=Math.max(...pts.map(p=>p.mid)),span=hi-lo||0.000001;
+  const first=pts[0].bucket,last=pts[pts.length-1].bucket,xspan=last-first||1;
+  const coords=pts.map(p=>({x:5+(p.bucket-first)*230/xspan,y:57-(p.mid-lo)*45/span}));
+  const color=move==null?'#4d9fff':move>=0?'#2ecc8f':'#ff4d5f';
+  const groups=[];let group=[];
+  pts.forEach((p,i)=>{if(i&&p.bucket-pts[i-1].bucket>1){if(group.length)groups.push(group);group=[]}group.push(coords[i])});
+  if(group.length)groups.push(group);
+  const lines=groups.filter(g=>g.length>1).map(g=>`<polyline points="${g.map(p=>`${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}" stroke="${color}"></polyline>`).join('');
+  const dots=coords.map(p=>`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="1.8" fill="${color}"></circle>`).join('');
+  return `<svg class="market-tape-chart" viewBox="0 0 240 64" role="img" aria-label="Stored UP midpoint history for ${esc(asset)}">${lines}${dots}</svg><div class="market-tape-axis"><span>First stored bucket</span><span>Latest stored bucket</span></div>`;
+}
+function renderMarketTapeCard(card,m){
+  const move=m?.move_cents==null?null:Number(m.move_cents),change=move==null?'—':`${move>0?'+':''}${move.toFixed(1)}¢`;
+  const cls=move==null?'':move>0?'pos':move<0?'neg':'';
+  const bookAge=m?.book_age_s==null?'Unavailable':`${Number(m.book_age_s).toFixed(1)}s`;
+  const first=m?.first_up_mid==null?'—':`${(Number(m.first_up_mid)*100).toFixed(1)}¢`;
+  const latest=m?.latest_up_mid==null?'—':`${(Number(m.latest_up_mid)*100).toFixed(1)}¢`;
+  const trades=m?`${Number(m.trade_count||0).toLocaleString()} · $${Number(m.notional_usd||0).toFixed(2)}`:'—';
+  const chart=m?marketTapeChart(m.up_midpoints,card.asset,move):'<div class="empty">Window tape is not available for this market.</div>';
+  return `<article class="market-tape-card"><div class="head"><div><div class="market-name">${esc(card.asset||'Market')} · ${Number(card.horizon_seconds||0)/60}m</div><div class="market-phase">Current window · UP midpoint</div></div><span class="tag ${cls}">${esc(change)}</span></div>${chart}<div class="market-tape-stats"><div><span>Move · first to latest</span><b class="${cls}">${esc(change)}</b></div><div><span>Latest book age</span><b>${esc(bookAge)}</b></div><div><span>First / latest midpoint</span><b>${esc(first)} / ${esc(latest)}</b></div><div><span>Public prints · both outcomes</span><b>${esc(trades)}</b></div></div></article>`;
+}
+async function loadMarketTape(currentCards){
+  const target=$('mktTape'),request=++marketTapeRequest;
+  const cards=(currentCards||[]).filter(c=>c.period==='CURRENT'&&c.condition_id);
+  if(!cards.length){target.innerHTML='<div class="empty">No current market windows with a condition ID.</div>';return}
+  target.innerHTML='<div class="empty">Loading stored market tape…</div>';
+  try{
+    const ids=[...new Set(cards.map(c=>c.condition_id))];
+    const data=await jf('/api/v5/market-motion?condition_ids='+encodeURIComponent(ids.join(',')));
+    if(request!==marketTapeRequest)return;
+    if(data.error)throw new Error(data.error);
+    const byId=new Map((data.markets||[]).map(m=>[m.condition_id,m]));
+    cards.sort((a,b)=>Math.abs(Number(byId.get(b.condition_id)?.move_cents||0))-Math.abs(Number(byId.get(a.condition_id)?.move_cents||0)));
+    target.innerHTML=cards.map(c=>renderMarketTapeCard(c,byId.get(c.condition_id))).join('')||'<div class="empty">No current market tape recorded yet.</div>';
+  }catch(e){if(request===marketTapeRequest)target.innerHTML=`<div class="empty">Recorded market tape unavailable: ${esc(e.message)}</div>`}
+}
 async function loadMarkets(){try{S.pred=await jf('/api/manual_predictions');const cards=(S.pred.cards||[]).flatMap(c=>[c,c.next_window].filter(Boolean));
   const pins=JSON.parse(localStorage.getItem('v3pins')||'[]');
   cards.sort((a,b)=>pins.includes(b.condition_id)-pins.includes(a.condition_id));
   $('mktAll').innerHTML=cards.map(c=>renderPinCard(c,pins.includes(c.condition_id))).join('')||'<div class="empty">no markets</div>';
+  loadMarketTape(cards.filter(c=>c.period==='CURRENT'));
   $('mktAll').querySelectorAll('[data-pin]').forEach(el=>el.onclick=()=>{const cid=el.dataset.pin;let p=JSON.parse(localStorage.getItem('v3pins')||'[]');p=p.includes(cid)?p.filter(x=>x!==cid):[...p,cid];localStorage.setItem('v3pins',JSON.stringify(p));loadMarkets()});
 }catch(e){console.error(e);toast(e.message,'err')}}
 function renderPinCard(c,pinned){

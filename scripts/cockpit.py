@@ -3784,6 +3784,94 @@ def api_markets(limit=40):
     return {"markets": rows}
 
 
+def api_v5_market_motion(condition_ids_raw=""):
+    """Read-only in-window movement from the stored CLOB tape for cockpit V5.
+
+    This is descriptive telemetry only. It does not feed strategy decisions or
+    infer missing book observations as zero movement.
+    """
+    condition_ids = []
+    for raw in str(condition_ids_raw or "").split(","):
+        cid = raw.strip()
+        if not cid:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", cid):
+            return {"markets": [], "error": "invalid condition id"}
+        if cid not in condition_ids:
+            condition_ids.append(cid)
+        if len(condition_ids) > 16:
+            return {"markets": [], "error": "at most 16 condition ids are supported"}
+    if not condition_ids:
+        return {"markets": [], "server_ts": int(time.time() * 1000)}
+
+    rows = q("""
+        SELECT m.condition_id, m.asset, m.horizon_seconds,
+               first_book.ts AS first_book_ts,
+               first_book.midprice::float8 AS first_up_mid,
+               latest_book.ts AS latest_book_ts,
+               latest_book.midprice::float8 AS latest_up_mid,
+               COALESCE(tape.trade_count, 0)::int AS trade_count,
+               COALESCE(tape.notional_usd, 0)::float8 AS notional_usd,
+               tape.last_trade_ts,
+               motion.path AS up_midpoints
+        FROM vp.pm_markets m
+        LEFT JOIN LATERAL (
+            SELECT ts, midprice FROM vp.pm_book_snapshots
+            WHERE condition_id=m.condition_id AND side_label='UP'
+              AND ts >= m.window_open AND ts <= LEAST(now(), m.window_close)
+              AND midprice IS NOT NULL
+            ORDER BY ts ASC LIMIT 1
+        ) first_book ON true
+        LEFT JOIN LATERAL (
+            SELECT ts, midprice FROM vp.pm_book_snapshots
+            WHERE condition_id=m.condition_id AND side_label='UP'
+              AND ts >= m.window_open AND ts <= LEAST(now(), m.window_close)
+              AND midprice IS NOT NULL
+            ORDER BY ts DESC LIMIT 1
+        ) latest_book ON true
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS trade_count,
+                   SUM(price * size)::float8 AS notional_usd,
+                   MAX(ts) AS last_trade_ts
+            FROM vp.pm_trades
+            WHERE condition_id=m.condition_id
+              AND ts >= m.window_open AND ts <= LEAST(now(), m.window_close)
+        ) tape ON true
+        LEFT JOIN LATERAL (
+            SELECT json_agg(json_build_array(b.bucket_index, b.midprice)
+                            ORDER BY b.bucket_index) AS path
+            FROM (
+                SELECT floor(extract(epoch FROM ts) / 15)::bigint AS bucket_index,
+                       AVG(midprice)::float8 AS midprice
+                FROM vp.pm_book_snapshots
+                WHERE condition_id=m.condition_id AND side_label='UP'
+                  AND ts >= m.window_open AND ts <= LEAST(now(), m.window_close)
+                  AND midprice IS NOT NULL
+                GROUP BY 1
+                ORDER BY 1
+            ) b
+        ) motion ON true
+        WHERE m.condition_id = ANY(%s::text[])
+    """, (condition_ids,))
+
+    now_ms = int(time.time() * 1000)
+    for row in rows:
+        first = row.get("first_up_mid")
+        latest = row.get("latest_up_mid")
+        row["move_cents"] = (round((float(latest) - float(first)) * 100.0, 3)
+                              if first is not None and latest is not None else None)
+        row["book_span_s"] = (
+            max(0.0, (int(row["latest_book_ts"]) - int(row["first_book_ts"])) / 1000.0)
+            if row.get("first_book_ts") is not None and row.get("latest_book_ts") is not None
+            else None)
+        row["book_age_s"] = (
+            max(0.0, (now_ms - int(row["latest_book_ts"])) / 1000.0)
+            if row.get("latest_book_ts") is not None else None)
+        row["up_midpoints"] = row.get("up_midpoints") or []
+    return {"markets": rows, "server_ts": now_ms,
+            "method": "UP midpoint from first stored in-window book to latest; 15-second buckets; public trades from stored tape"}
+
+
 # Mobile market data is proxied by the cockpit so the app uses the same trusted
 # venue endpoints as the trading service and never needs exchange credentials.
 _mobile_gamma_cache = {}
@@ -7504,6 +7592,7 @@ ROUTES = {
                                            int(qs.get("limit", ["240"])[0])),
     "/api/prices": lambda qs: api_prices(),
     "/api/markets": lambda qs: api_markets(int(qs.get("limit", ["40"])[0])),
+    "/api/v5/market-motion": lambda qs: api_v5_market_motion(qs.get("condition_ids", [""])[0]),
     "/api/mobile/markets": lambda qs: api_mobile_market_search(
         qs.get("q", [""])[0], qs.get("limit", ["30"])[0], qs.get("offset", ["0"])[0]),
     "/api/mobile/market": lambda qs: api_mobile_market_detail(qs.get("condition_id", [""])[0]),
