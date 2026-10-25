@@ -33,6 +33,7 @@
 #include <csignal>
 #include <functional>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -46,6 +47,14 @@ constexpr int kPredictorRecent1mBars = 10080;          // 7 days
 constexpr int kPredictorRecent1mOhlcvBars = 10080;     // 7 days
 constexpr int kPredictorLong60mBars = 24 * 365 * 5;    // 5 years
 void on_sig(int) { g_stop.store(true); }
+double available_space_mb() noexcept {
+    try {
+        const auto space = std::filesystem::space(".");
+        return static_cast<double>(space.available) / (1024.0 * 1024.0);
+    } catch (...) {
+        return -1.0;
+    }
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -108,6 +117,7 @@ int main(int argc, char** argv) {
     // Lightweight state shared between feed callbacks and refresh thread
     struct CollectorState {
         std::mutex mu;
+        std::atomic<bool> disk_full{false};
         std::vector<vp::PmMarket> markets;
         // Per-asset price maps (keyed by "BTC"/"ETH"/"SOL"/"XRP")
         std::unordered_map<std::string, double> asset_price;
@@ -161,7 +171,8 @@ int main(int argc, char** argv) {
                                   m.yes_token_id, m.no_token_id, m.question, m.slug,
                                   m.settlement_window_s, m.reference_is_binance);
             });
-            if (cfg.data_collection.window_events_enabled && m.window_open_ms > 0) {
+            if (!cstate.disk_full.load() &&
+                cfg.data_collection.window_events_enabled && m.window_open_ms > 0) {
                 persist_q.push([pg=pg.get(), cid=m.condition_id]() noexcept {
                     pg->insert_window_event(cid, "opened", "");
                 });
@@ -171,8 +182,10 @@ int main(int argc, char** argv) {
         // Polymarket CLOB market-data WebSocket (order books + trades)
         pm_md = std::make_unique<vp::PolymarketMD>(
             cfg.polymarket.clob_ws_url,
-            [&cstate, &persist_q, &last_snap_ms, pg=pg.get()]
+            [&cstate, &persist_q, &last_snap_ms, &cfg, pg=pg.get()]
             (const vp::PolymarketMD::BookUpdate& bu) {
+                if (cstate.disk_full.load() ||
+                    !cfg.data_collection.book_snapshots_enabled) return;
                 auto cit = cstate.token_to_cond.find(bu.token_id);
                 if (cit == cstate.token_to_cond.end()) return;
                 auto sit = cstate.token_to_side.find(bu.token_id);
@@ -194,7 +207,10 @@ int main(int argc, char** argv) {
                     });
                 }
             },
-            [&persist_q, pg=pg.get()](const vp::PolymarketMD::TradeUpdate& tu) {
+            [&cstate, &persist_q, &cfg, pg=pg.get()]
+            (const vp::PolymarketMD::TradeUpdate& tu) {
+                if (cstate.disk_full.load() ||
+                    !cfg.data_collection.pm_trades_enabled) return;
                 persist_q.push([pg, tu]() noexcept {
                     pg->insert_pm_trade(tu.condition_id, tu.token_id,
                                         tu.side_label,
@@ -231,7 +247,8 @@ int main(int argc, char** argv) {
                 std::string asset = asset_key;
                 candle_store.on_tick(asset, t.price, t.qty, t.buyer_is_maker, t.exchange_ms);
                 // Persist Binance tick
-                if (cfg.data_collection.binance_ticks_enabled) {
+                if (!cstate.disk_full.load() &&
+                    cfg.data_collection.binance_ticks_enabled) {
                     persist_q.push([pg, sym=t.symbol, price=t.price,
                                     qty=t.qty, maker=t.buyer_is_maker,
                                     exch_ms=t.exchange_ms]() noexcept {
@@ -281,7 +298,8 @@ int main(int argc, char** argv) {
                         }
                         oracle_buf.add(t.asset, open_ts_s, t.price);
                         oracle_seeded_windows.insert({t.asset, open_ms});
-                        if (cfg.data_collection.window_events_enabled) {
+                        if (!cstate.disk_full.load() &&
+                            cfg.data_collection.window_events_enabled) {
                             std::string seed_payload = fmt::format(
                                 R"({{"price":{},"ts_ms":{},"source":"chainlink_rtds"}})",
                                 t.price, open_ms);
@@ -296,7 +314,8 @@ int main(int argc, char** argv) {
                     oracle_buf.add(t.asset, (double)t.ts_ms / 1000.0, t.price);
 
                     // Persist oracle tick
-                    if (cfg.data_collection.oracle_ticks_enabled) {
+                    if (!cstate.disk_full.load() &&
+                        cfg.data_collection.oracle_ticks_enabled) {
                         persist_q.push([pg, asset=t.asset, price=t.price,
                                         ts_ms=t.ts_ms]() noexcept {
                             pg->insert_oracle_tick(asset, price, ts_ms);
@@ -328,7 +347,8 @@ int main(int argc, char** argv) {
                                     if (std::string(sym) == "BTC") cstate.cb_asset_price[sym] = px;
                                     else if (std::string(sym) == "ETH") cstate.cb_asset_price[sym] = px;
                                 }
-                                if (cfg.data_collection.coinbase_ticks_enabled) {
+                                if (!cstate.disk_full.load() &&
+                                    cfg.data_collection.coinbase_ticks_enabled) {
                                     persist_q.push([pg=pg.get(), asset=std::string(sym),
                                                     price=px, ts_ms]() noexcept {
                                         pg->insert_coinbase_tick(asset, price, ts_ms);
@@ -348,13 +368,14 @@ int main(int argc, char** argv) {
     std::thread refresh_th([&] {
         std::int64_t last_feature_ms = 0;
         std::int64_t last_discover_ms = vp::Clock::wall_ns() / 1'000'000LL;
+        std::int64_t last_disk_check_ms = 0;
         constexpr std::int64_t kDiscoverIntervalMs = 3 * 60 * 1000LL; // 3 min
 
         while (!g_stop.load()) {
             std::int64_t now_ms = vp::Clock::wall_ns() / 1'000'000LL;
 
             // ── Feature snapshots (predictor output) ──
-            if (cfg.data_collection.features_enabled &&
+            if (!cstate.disk_full.load() && cfg.data_collection.features_enabled &&
                 (now_ms - last_feature_ms) >= cfg.data_collection.features_write_interval_ms) {
                 last_feature_ms = now_ms;
 
@@ -479,12 +500,37 @@ int main(int argc, char** argv) {
                                               m.yes_token_id, m.no_token_id, m.question, m.slug,
                                               m.settlement_window_s, m.reference_is_binance);
                         });
-                        if (cfg.data_collection.window_events_enabled && m.window_open_ms > 0) {
+                        if (!cstate.disk_full.load() &&
+                            cfg.data_collection.window_events_enabled &&
+                            m.window_open_ms > 0) {
                             persist_q.push([pg=pg.get(), cid=m.condition_id]() noexcept {
                                 pg->insert_window_event(cid, "opened", "");
                             });
                         }
                     }
+                }
+            }
+
+            if (now_ms - last_disk_check_ms >=
+                    std::max(1, cfg.data_collection.disk_check_interval_ms)) {
+                last_disk_check_ms = now_ms;
+                const double free_mb = available_space_mb();
+                const bool was_full = cstate.disk_full.load();
+                if (free_mb >= 0 &&
+                    free_mb < static_cast<double>(cfg.data_collection.disk_space_kill_mb)) {
+                    if (!was_full) {
+                        cstate.disk_full.store(true);
+                        spdlog::critical(
+                            "DISK FULL: {} MB free - suspending configured collector writes",
+                            static_cast<int>(free_mb));
+                    }
+                } else if (was_full && free_mb >=
+                        static_cast<double>(cfg.data_collection.disk_space_kill_mb) *
+                            std::max(1.0, cfg.data_collection.disk_recovery_multiplier)) {
+                    cstate.disk_full.store(false);
+                    spdlog::info(
+                        "DISK RECOVERY: {} MB free - configured collection resumed",
+                        static_cast<int>(free_mb));
                 }
             }
 
