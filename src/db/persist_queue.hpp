@@ -18,7 +18,10 @@ public:
     // Push item; returns false and discards if full.
     bool push(T item) {
         std::lock_guard<std::mutex> lk(mu_);
-        if (shutdown_ || q_.size() >= max_) return false;
+        if (shutdown_ || q_.size() >= max_) {
+            ++rejected_pushes_;
+            return false;
+        }
         q_.push(std::move(item));
         cv_.notify_one();
         return true;
@@ -60,6 +63,14 @@ public:
         return q_.size();
     }
 
+    // Number of non-blocking writes rejected because the queue was full or
+    // shut down. This exposes market-data loss without making feed callbacks
+    // block behind the database writer.
+    size_t rejected_pushes() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return rejected_pushes_;
+    }
+
     bool is_shutdown() const {
         std::lock_guard<std::mutex> lk(mu_);
         return shutdown_;
@@ -71,6 +82,7 @@ private:
     std::condition_variable space_cv_;
     std::queue<T>           q_;
     size_t                  max_;
+    size_t                  rejected_pushes_ = 0;
     bool                    shutdown_ = false;
 };
 

@@ -369,10 +369,24 @@ int main(int argc, char** argv) {
         std::int64_t last_feature_ms = 0;
         std::int64_t last_discover_ms = vp::Clock::wall_ns() / 1'000'000LL;
         std::int64_t last_disk_check_ms = 0;
+        std::int64_t last_persist_queue_check_ms = 0;
+        size_t last_persist_queue_rejected = 0;
         constexpr std::int64_t kDiscoverIntervalMs = 3 * 60 * 1000LL; // 3 min
 
         while (!g_stop.load()) {
             std::int64_t now_ms = vp::Clock::wall_ns() / 1'000'000LL;
+            if (now_ms - last_persist_queue_check_ms >= 30'000) {
+                last_persist_queue_check_ms = now_ms;
+                const size_t rejected = persist_q.rejected_pushes();
+                if (rejected > last_persist_queue_rejected) {
+                    spdlog::warn(
+                        "persistence queue rejected {} writes since last report "
+                        "(total={}, pending={})",
+                        rejected - last_persist_queue_rejected, rejected,
+                        persist_q.size());
+                }
+                last_persist_queue_rejected = rejected;
+            }
 
             // ── Feature snapshots (predictor output) ──
             if (!cstate.disk_full.load() && cfg.data_collection.features_enabled &&
