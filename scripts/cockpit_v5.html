@@ -95,6 +95,14 @@ h1{font-size:22px;font-weight:700;letter-spacing:-.02em}
   .market-tape-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px 10px;margin-top:8px}
   .market-tape-stats span{display:block;color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.06em}
   .market-tape-stats b{display:block;color:var(--text);font-family:var(--mono);font-size:11px;margin-top:2px}
+  .capture-profile-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  .capture-profile{min-width:0;padding:12px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,rgba(22,30,43,.92),rgba(13,18,25,.96))}
+  .capture-profile-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+  .capture-profile-name{font-size:12px;font-weight:700;overflow-wrap:anywhere}
+  .capture-flag-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid var(--line);color:var(--mut);font-size:11px}
+  .capture-profile-source{margin-top:6px;color:var(--dim);font-size:9px;line-height:1.4}
+  @media(max-width:900px){.capture-profile-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media(max-width:560px){.capture-profile-grid{grid-template-columns:1fr}.capture-profile{padding:14px}.capture-flag-row{font-size:12px}}
   @media(max-width:900px){.market-tape-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   @media(max-width:560px){.market-tape-grid{grid-template-columns:1fr}.market-tape-head{align-items:center}.market-tape-note{font-size:10px}}
 h2.sec{font-size:13px;font-weight:650;margin:20px 0 10px;display:flex;align-items:center;gap:8px}
@@ -618,6 +626,7 @@ pre,code{font-family:var(--mono)}
   <!-- ══════ FEEDS ══════ -->
   <section class="view" id="v-feeds">
     <div class="v4-hero"><img class="v4-hero-art" src="/assets_v4/feeds-hero.webp?v=5.1" alt="Market feed signal artwork"><div class="v4-hero-copy"><div class="v4-kicker">Data quality · freshness</div><div class="v4-title">Feed Quality</div><div class="v4-desc">Connected sources are only useful when their updates are current and coherent.</div></div><img class="v4-hero-full-logo" src="/assets_v4/polysparq_logo_full_with_name.webp?v=5.3" alt="PolySparQ++"></div>
+    <div class="card" style="margin-bottom:12px"><h2 class="sec" style="margin-top:0">Prediction-market capture <span class="cnt">profile-file settings · running instances</span></h2><div id="captureNotice" class="market-tape-note" style="margin:0 0 8px">Checking capture profile settings…</div><div id="captureProfiles" class="capture-profile-grid"><div class="empty">Loading profile settings…</div></div></div>
     <div class="card"><table id="tFeeds"><thead><tr><th>source</th><th>key</th><th class="num">last tick age</th><th class="num">ticks (1h)</th><th>integrity</th></tr></thead><tbody></tbody></table></div>
   </section>
 
@@ -1432,8 +1441,21 @@ async function forceSell(i){
 }
 async function loadFeeds(){
   try{const f=await jf('/api/v3/feeds');
+    const captureSupported=Array.isArray(f.capture_profiles),profiles=captureSupported?f.capture_profiles:[];
+    const flag=value=>value===true?'<span class="pill win">ON</span>':value===false?'<span class="pill stop">OFF</span>':'<span class="pill">UNKNOWN</span>';
+    $('captureProfiles').innerHTML=!captureSupported?'<div class="empty">This cockpit server does not report capture-profile status.</div>':profiles.map(p=>`<article class="capture-profile"><div class="capture-profile-head"><span class="capture-profile-name">${esc(p.instance)}</span><span class="pill ${p.config_readable?'ok':'loss'}">${p.config_readable?'FILE READABLE':'READ FAILED'}</span></div><div class="capture-flag-row"><span>CLOB book snapshots</span>${flag(p.book_snapshots_enabled)}</div><div class="capture-flag-row"><span>Public trade capture</span>${flag(p.pm_trades_enabled)}</div><div class="capture-profile-source">Profile-file values only · process-loaded values are not verified here.</div></article>`).join('')||'<div class="empty">No active bot profiles reported.</div>';
+    const bookOff=profiles.length>0&&profiles.every(p=>p.book_snapshots_enabled===false),tradesOff=profiles.length>0&&profiles.every(p=>p.pm_trades_enabled===false),unknown=profiles.some(p=>!p.config_readable||p.book_snapshots_enabled==null||p.pm_trades_enabled==null);
+    const notices=[];
+    if(bookOff)notices.push('No running profile file enables book snapshots; the Window tape chart may stay empty.');
+    if(tradesOff)notices.push('No running profile file enables public-trade capture; print counts may stay at zero.');
+    if(!captureSupported)notices.push('Capture-profile status is absent from the server response; the cockpit service needs the updated API loaded.');
+    else if(!profiles.length)notices.push('No running profile settings were reported.');
+    if(unknown)notices.push('At least one profile setting is unknown or unreadable.');
+    if(captureSupported)notices.push('These are values from profile files, not confirmation of settings already loaded by each process.');
+    $('captureNotice').className='market-tape-note'+(bookOff||tradesOff||unknown||!captureSupported?' warn-panel':'');
+    $('captureNotice').textContent=notices.join(' ');
     $('tFeeds').querySelector('tbody').innerHTML=(f.feeds||[]).map(x=>`<tr><td>${esc(x.source)}</td><td>${esc(x.key)}</td><td class="num">${x.age_s!=null?x.age_s.toFixed(0)+'s':'—'}</td><td class="num">${x.n1h}</td><td><span class="pill ${x.ok?'win':'loss'}">${x.ok?'FRESH':'STALE/GAPPY'}</span></td></tr>`).join('')||`<tr><td colspan="5"><div style="text-align:center;padding:6px"><img src="/assets_v4/empty-feed.webp?v=5.1" style="max-width:280px;width:70%;border-radius:10px;opacity:.9"><div class="empty" style="padding:4px">no feed data in window</div></div></td></tr>`;
-  }catch(e){console.error(e);toast(e.message,'err')}
+  }catch(e){$('captureNotice').className='market-tape-note warn-panel';$('captureNotice').textContent='Capture status unavailable: '+e.message;$('captureProfiles').innerHTML='<div class="empty">Profile capture status could not be loaded.</div>';console.error(e);toast(e.message,'err')}
 }
 async function loadAnalyticsScreen(){
   const scope=S.inst;

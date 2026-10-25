@@ -661,6 +661,9 @@ def invalidate_runtime_caches():
         val = globals().get(name)
         if isinstance(val, list) and val:
             val[0] = 0.0
+    capture_cache = globals().get("_capture_profiles_cache")
+    if isinstance(capture_cache, list) and capture_cache:
+        capture_cache[0] = 0.0
 
 
 # ── Plan tiers: per-plan bot quota + allowed AI models (secrets/plan_models.json)
@@ -7363,6 +7366,45 @@ def api_v3_alerts():
     return {"alerts": alerts[:50], "server_ts": int(time.time() * 1000)}
 
 
+_capture_profiles_cache = [0.0, None]  # (built_monotonic, profile-file flags)
+
+
+def api_v3_capture_profiles():
+    """Return only the two non-secret capture switches from running profiles.
+
+    These are values read from the profile files, not a claim about the
+    settings already loaded by a running process.
+    """
+    now = time.monotonic()
+    cached = _capture_profiles_cache[1]
+    if cached is not None and now - _capture_profiles_cache[0] < 10.0:
+        return [dict(row) for row in cached]
+    active = bot_status_detail().get("instances_running") or []
+    profiles = []
+    for instance in sorted({str(name) for name in active
+                            if re.fullmatch(r"[A-Za-z0-9_-]{1,100}", str(name))}):
+        path = _instance_config_file(instance)
+        row = {"instance": instance, "config_readable": False,
+               "book_snapshots_enabled": None, "pm_trades_enabled": None}
+        try:
+            with open(path, "rb") as source:
+                data_collection = tomllib.load(source).get("data_collection", {})
+            if not isinstance(data_collection, dict):
+                data_collection = {}
+            row["book_snapshots_enabled"] = (
+                data_collection.get("book_snapshots_enabled")
+                if isinstance(data_collection.get("book_snapshots_enabled"), bool) else None)
+            row["pm_trades_enabled"] = (
+                data_collection.get("pm_trades_enabled")
+                if isinstance(data_collection.get("pm_trades_enabled"), bool) else None)
+            row["config_readable"] = True
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+        profiles.append(row)
+    _capture_profiles_cache[0], _capture_profiles_cache[1] = time.monotonic(), profiles
+    return [dict(row) for row in profiles]
+
+
 def api_v3_feeds():
     feeds = []
     for source, table, keycol in (("Oracle", "oracle_ticks", "asset"),
@@ -7374,7 +7416,8 @@ def api_v3_feeds():
             age = max(0, (time.time() * 1000 - row["last_ts"]) / 1000) if row.get("last_ts") else None
             feeds.append({"source": source, "key": row["key"], "age_s": age,
                           "n1h": row["n1h"], "ok": age is not None and age < 10})
-    return {"feeds": feeds, "server_ts": int(time.time() * 1000)}
+    return {"feeds": feeds, "capture_profiles": api_v3_capture_profiles(),
+            "server_ts": int(time.time() * 1000)}
 
 
 def api_v3_latency():
