@@ -13,6 +13,7 @@
 #include "core/clock.hpp"
 #include "core/types.hpp"
 #include "core/oracle_buffer.hpp"
+#include "collector/book_snapshot_capture.hpp"
 #include "db/pg.hpp"
 #include "db/persist_queue.hpp"
 #include "engine/candle_store.hpp"
@@ -143,6 +144,7 @@ int main(int argc, char** argv) {
 
     // Rate limiter for book snapshot persistence (1 Hz per token)
     std::unordered_map<std::string, std::int64_t> last_snap_ms;
+    vp::BookSnapshotAccumulator book_snapshot_accumulator;
 
     // Boostrap: initial market discovery + feed startup
     std::thread bootstrap_th([&] {
@@ -183,28 +185,34 @@ int main(int argc, char** argv) {
         // Polymarket CLOB market-data WebSocket (order books + trades)
         pm_md = std::make_unique<vp::PolymarketMD>(
             cfg.polymarket.clob_ws_url,
-            [&cstate, &persist_q, &last_snap_ms, &cfg, pg=pg.get()]
+            [&cstate, &persist_q, &last_snap_ms, &book_snapshot_accumulator,
+             &cfg, pg=pg.get()]
             (const vp::PolymarketMD::BookUpdate& bu) {
-                if (cstate.disk_full.load() ||
-                    !cfg.data_collection.book_snapshots_enabled) return;
                 auto cit = cstate.token_to_cond.find(bu.token_id);
                 if (cit == cstate.token_to_cond.end()) return;
                 auto sit = cstate.token_to_side.find(bu.token_id);
                 if (sit == cstate.token_to_side.end()) return;
-                // Rate-limited persist: 1 snapshot/token/s
-                // Note: only snapshot messages give us the true top-of-book.
-                // Delta updates carry only changed levels, so best_bid/ask may be stale.
-                // Full OrderBook tracking is done by the main polypulse binary.
+                if (!book_snapshot_accumulator.apply(bu)) return;
+                if (cstate.disk_full.load() ||
+                    !cfg.data_collection.book_snapshots_enabled) return;
+                // Rate-limit full-book persistence to 1 snapshot/token/s.
+                // Keep the complete sorted sides here; Pg clamps stored depth
+                // to the configured 0..20 levels while retaining the true BBO.
                 std::int64_t now_ms = vp::Clock::wall_ns() / 1'000'000LL;
                 auto& last = last_snap_ms[bu.token_id];
                 if (now_ms - last >= 1000) {
+                    auto snapshot = book_snapshot_accumulator.snapshot(bu.token_id);
+                    if (!snapshot) return;
                     last = now_ms;
-                    double bb = bu.bids.empty() ? 0 : bu.bids[0].price;
-                    double ba = bu.asks.empty() ? 0 : bu.asks[0].price;
+                    double bb = snapshot->best_bid;
+                    double ba = snapshot->best_ask;
                     persist_q.push([pg, cid=cit->second, tok=bu.token_id,
-                                    side=sit->second, bb, ba]() noexcept {
-                        std::vector<vp::PriceLevel> empty;
-                        pg->insert_book_snapshot(cid, tok, side, empty, empty, bb, ba);
+                                    side=sit->second, bb, ba,
+                                    bids=std::move(snapshot->bids),
+                                    asks=std::move(snapshot->asks),
+                                    levels=cfg.data_collection.book_snapshot_levels]() noexcept {
+                        pg->insert_book_snapshot(cid, tok, side, bids, asks,
+                                                 bb, ba, levels);
                     }, vp::PersistSource::PolymarketBookSnapshot);
                 }
             },
