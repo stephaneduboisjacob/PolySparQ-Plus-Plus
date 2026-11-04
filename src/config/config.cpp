@@ -1080,7 +1080,9 @@ Config Config::load(const std::string& path) {
     }
     if (s.coinbase_confluence_paper_enabled) {
         const bool maker_mode = s.coinbase_confluence_maker_enabled;
-        const double order_usd = maker_mode
+        const bool exact_shares = maker_mode ||
+            s.coinbase_confluence_order_shares != 0.0;
+        const double order_usd = exact_shares
             ? s.coinbase_confluence_order_shares *
                 s.coinbase_confluence_max_price
             : s.coinbase_confluence_order_usd;
@@ -1122,18 +1124,19 @@ Config Config::load(const std::string& path) {
             (s.coinbase_confluence_horizon_s == 900 &&
              !has_confluence_horizon(900)) ||
             !std::isfinite(order_usd) || order_usd <= 0.0 ||
-            (!maker_mode && order_usd > 4.67) ||
-            (maker_mode &&
+            (!exact_shares && order_usd > 4.67) ||
+            (exact_shares &&
              (!std::isfinite(s.coinbase_confluence_order_shares) ||
               s.coinbase_confluence_order_shares <= 0.0 ||
               s.coinbase_confluence_order_shares > 1000.0 ||
-              s.coinbase_confluence_horizon_s != 900 ||
+              s.coinbase_confluence_order_shares + 1e-9 <
+                  r.clob_min_shares_fallback)) ||
+            (maker_mode &&
+             (s.coinbase_confluence_horizon_s != 900 ||
               s.coinbase_confluence_maker_offset_ticks < 1 ||
               s.coinbase_confluence_maker_offset_ticks > 5 ||
               s.coinbase_confluence_maker_max_age_ms < 500 ||
-              s.coinbase_confluence_maker_max_age_ms > 120000 ||
-              !std::isfinite(s.max_per_window_usd) ||
-              s.max_per_window_usd + 1e-9 < order_usd)) ||
+              s.coinbase_confluence_maker_max_age_ms > 120000)) ||
             !std::isfinite(s.coinbase_confluence_max_price) ||
             s.coinbase_confluence_max_price <= 0.0 ||
             s.coinbase_confluence_max_price > 0.90 ||

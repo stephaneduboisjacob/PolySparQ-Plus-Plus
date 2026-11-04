@@ -396,11 +396,11 @@ struct StrategyHot {
     int    coinbase_confluence_horizon_s = 0;   // 0 = 5m and 15m
     int    coinbase_confluence_min_elapsed_pct = 20; // 20, 40, 60, or 80
     double coinbase_confluence_order_usd = 4.65;
-    // Isolated PAPER maker challenger. When enabled, use an exact share count
-    // and quote passively below the observed ask; taker profiles keep the
-    // legacy USD clip above.
+    // When maker mode is enabled, use an exact share count and quote
+    // passively below the ask. A positive share count also selects exact-size
+    // PAPER taker execution; zero keeps the legacy USD clip.
     bool   coinbase_confluence_maker_enabled = false;
-    double coinbase_confluence_order_shares = 0.0;
+    double coinbase_confluence_order_shares = 0.0; // optional exact PAPER clip for maker or taker
     int    coinbase_confluence_maker_offset_ticks = 1;
     int    coinbase_confluence_maker_max_age_ms = 5500; // PAPER quote lifetime: 0.5s to 120s
     double coinbase_confluence_max_price = 0.90;

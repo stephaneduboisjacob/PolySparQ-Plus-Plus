@@ -43,6 +43,16 @@ double visible_queue_ahead(const OrderBook& book, OrderDir dir, double price,
     }
     return total;
 }
+double executable_ask_shares(const OrderBook& book, double limit_price) {
+    double total = 0.0;
+    for (const auto& level : book.copy_asks()) {
+        if (!std::isfinite(level.price) || level.price <= 0.0 ||
+            level.price > limit_price + 1e-9) break;
+        if (std::isfinite(level.size) && level.size > 0.0)
+            total += std::floor(level.size * 100.0 + 1e-9) / 100.0;
+    }
+    return total;
+}
 } // namespace
 PaperExecutor::PaperExecutor(Positions& pos, Journal j,
                              double max_order_usd, double max_deployed_usd,
@@ -157,6 +167,8 @@ OrderResult PaperExecutor::submit(
         const OrderBook* book = book_lookup(req.condition_id, req.side);
         if (!book) { r.reject_reason = "no book for market/side"; goto done; }
         double exec_price = 0;
+        double exact_confluence_fee = 0.0;
+        bool has_exact_confluence_fee = false;
         if (req.dir == OrderDir::Buy) {
             auto a = book->best_ask();
             const bool has_ask = a.price > 0 && a.size > 0;
@@ -166,15 +178,26 @@ OrderResult PaperExecutor::submit(
                  req.source == "PENNEY_HUSTLER_ENTRY") &&
                 req.execution_mode != ExecutionMode::Taker;
             const auto b = book->best_bid();
+            const bool exact_confluence_taker_shares =
+                req.source == "COINBASE_CONFLUENCE_PAPER_ENTRY" &&
+                req.execution_mode == ExecutionMode::Taker &&
+                req.size_shares > 0.0;
             if (req.source == "COINBASE_CONFLUENCE_PAPER_ENTRY" &&
                 (!has_ask || b.price <= 0.0 || a.price > 0.90 + 1e-9 ||
                  a.price < b.price || a.price - b.price > 0.08 + 1e-9 ||
-                 a.size * a.price + 1e-9 < req.size_usd ||
+                 (exact_confluence_taker_shares
+                     ? (!std::isfinite(req.size_shares) ||
+                        req.size_shares < clob_min_shares_fallback_ - 1e-9 ||
+                        !std::isfinite(req.limit_price) || req.limit_price <= 0.0 ||
+                        req.size_shares * req.limit_price > req.size_usd + 1e-8 ||
+                        executable_ask_shares(*book, req.limit_price) + 1e-9 <
+                            req.size_shares)
+                     : a.size * a.price + 1e-9 < req.size_usd) ||
                  req.limit_price > 0.90 + 1e-9 || req.fee_rate + 1e-9 < 0.07 ||
                  req.fee_exponent != 1)) {
                 r.reject_class = OrderResult::RejectClass::RiskCap;
                 r.reject_reason =
-                    "Coinbase confluence PAPER guard requires ask<=0.90, spread<=0.08, full top-level depth, and 7% fees";
+                    "Coinbase confluence PAPER guard requires ask<=0.90, spread<=0.08, enough displayed depth through the limit, and 7% fees";
                 goto done;
             }
             if (req.source == "COINBASE_CONFLUENCE_PAPER_MAKER_ENTRY" &&
@@ -302,27 +325,54 @@ OrderResult PaperExecutor::submit(
                                               exec_price, req.limit_price);
                 goto done;
             }
-            r.fill_shares = req.size_usd / exec_price;
-            r.fill_shares = std::floor(r.fill_shares*100.0)/100.0;
-            // CLOB minimum: 5 shares. Bump up shares if below minimum instead of
-            // rejecting — but stay within max_order_usd cap.
-            const double clob_min_shares = std::max(0.0, clob_min_shares_fallback_);
-            if (r.fill_shares < clob_min_shares) {
-                double needed_usd = clob_min_shares * exec_price;
-                if (needed_usd <= std::min(req.size_usd,max_order_usd_) + 1e-9) {
-                    r.fill_shares = clob_min_shares;
-                } else {
+            if (exact_confluence_taker_shares) {
+                double remaining = req.size_shares;
+                double total_cost = 0.0;
+                for (const auto& level : book->copy_asks()) {
+                    if (!std::isfinite(level.price) || level.price <= 0.0 ||
+                        level.price > req.limit_price + 1e-9) break;
+                    if (!std::isfinite(level.size) || level.size <= 0.0) continue;
+                    const double available =
+                        std::floor(level.size * 100.0 + 1e-9) / 100.0;
+                    const double take = std::min(remaining, available);
+                    if (take <= 0.0) continue;
+                    total_cost += take * level.price;
+                    exact_confluence_fee += req.fee_rate * level.price *
+                        (1.0 - level.price) * take;
+                    remaining -= take;
+                    if (remaining <= 1e-8) break;
+                }
+                if (remaining > 1e-8) {
                     r.reject_reason = fmt::format(
-                        "CLOB min {:.2f} shares: ${:.2f} @ {:.3f} buys {:.0f}sh; need ${:.2f} > cap ${:.2f}",
-                        clob_min_shares, req.size_usd, exec_price, r.fill_shares,
-                        needed_usd, max_order_usd_);
+                        "insufficient ask depth for exact {:.2f}-share clip",
+                        req.size_shares);
                     goto done;
                 }
+                r.fill_shares = req.size_shares;
+                exec_price = total_cost / r.fill_shares;
+                has_exact_confluence_fee = true;
+            } else {
+                r.fill_shares = req.size_usd / exec_price;
+                r.fill_shares = std::floor(r.fill_shares*100.0)/100.0;
+                // CLOB minimum: 5 shares. Bump up shares if below minimum instead of
+                // rejecting — but stay within max_order_usd cap.
+                const double clob_min_shares = std::max(0.0, clob_min_shares_fallback_);
+                if (r.fill_shares < clob_min_shares) {
+                    double needed_usd = clob_min_shares * exec_price;
+                    if (needed_usd <= std::min(req.size_usd,max_order_usd_) + 1e-9) {
+                        r.fill_shares = clob_min_shares;
+                    } else {
+                        r.reject_reason = fmt::format(
+                            "CLOB min {:.2f} shares: ${:.2f} @ {:.3f} buys {:.0f}sh; need ${:.2f} > cap ${:.2f}",
+                            clob_min_shares, req.size_usd, exec_price, r.fill_shares,
+                            needed_usd, max_order_usd_);
+                        goto done;
+                    }
+                }
+                // Conservative top-of-book FAK: do not invent unlimited fills.
+                r.fill_shares = std::min(r.fill_shares,std::floor(a.size*100.0)/100.0);
+                if (r.fill_shares <= 0) { r.reject_reason="no executable ask depth"; goto done; }
             }
-            // Conservative top-of-book FAK: do not invent unlimited fills at
-            // the best ask. Deeper levels require a separate execution walk.
-            r.fill_shares = std::min(r.fill_shares,std::floor(a.size*100.0)/100.0);
-            if (r.fill_shares <= 0) { r.reject_reason="no executable ask depth"; goto done; }
         } else { // SELL — reserve inventory for passive orders, otherwise fill at bid
             auto b = book->best_bid();
             if (req.execution_mode == ExecutionMode::Taker &&
@@ -422,7 +472,9 @@ OrderResult PaperExecutor::submit(
         r.order_price = exec_price;
         r.order_shares = r.fill_shares;
         // Compute taker fee: rate * p^exp * (1-p)^exp * shares
-        {
+        if (has_exact_confluence_fee) {
+            r.fee_usd = exact_confluence_fee;
+        } else {
             double p = exec_price;
             double pe = 1.0;
             for (int i = 0; i < req.fee_exponent; ++i) pe *= p;

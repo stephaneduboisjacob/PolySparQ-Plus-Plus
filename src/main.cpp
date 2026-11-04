@@ -2288,9 +2288,17 @@ int main(int argc, char** argv) {
                     : req.source == "COINBASE_CONFLUENCE_PAPER_ENTRY" &&
                       req.execution_mode == vp::ExecutionMode::Taker &&
                       !req.maker_fixed_price &&
-                      std::abs(req.size_usd - cfg.strategy
-                          .coinbase_confluence_order_usd) <= 1e-8 &&
-                      req.size_shares == 0.0 && req.fee_rate + 1e-9 >= 0.07);
+                      std::abs(req.size_usd -
+                          (cfg.strategy.coinbase_confluence_order_shares > 0.0
+                              ? cfg.strategy.coinbase_confluence_order_shares *
+                                    cfg.strategy.coinbase_confluence_max_price
+                              : cfg.strategy.coinbase_confluence_order_usd)) <= 1e-8 &&
+                      (cfg.strategy.coinbase_confluence_order_shares > 0.0
+                          ? std::isfinite(req.size_shares) &&
+                                std::abs(req.size_shares - cfg.strategy
+                                    .coinbase_confluence_order_shares) <= 1e-8
+                          : req.size_shares == 0.0) &&
+                      req.fee_rate + 1e-9 >= 0.07);
             if (!exact_paper_order) {
                 vp::OrderResult blocked;
                 blocked.status = "rejected";
@@ -7650,7 +7658,7 @@ int main(int argc, char** argv) {
                                 req.size_shares = 5.0;
                             }
                             if (from_cb_confluence) {
-                                if (cfg.strategy.coinbase_confluence_maker_enabled) {
+                                if (cfg.strategy.coinbase_confluence_order_shares > 0.0) {
                                     req.size_shares = cfg.strategy
                                         .coinbase_confluence_order_shares;
                                     req.size_usd = req.size_shares * cfg.strategy

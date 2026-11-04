@@ -1,7 +1,8 @@
 #pragma once
-// Paper-trading executor. Takers use executable top-of-book depth; passive
-// makers require public trade prints and an estimated queue ahead. All order
-// updates are persisted via the journal callback.
+// Paper-trading executor. Generic takers use executable top-of-book depth;
+// exact Coinbase confluence PAPER takers walk displayed asks through their
+// limit. Passive makers require public prints and estimated queue ahead.
+// All order updates are persisted via the journal callback.
 #include "core/types.hpp"
 #include "exec/positions.hpp"
 #include "market/orderbook.hpp"
@@ -26,7 +27,7 @@ struct OrderRequest {
     ShareSide   side = ShareSide::UP;
     OrderDir    dir  = OrderDir::Buy;
     double      size_usd = 0;       // for buys
-    double      size_shares = 0;    // sells; internal maker replacement may pin remaining buy shares
+    double      size_shares = 0;    // sells; exact PAPER confluence buys; internal maker replacements
     std::string source;             // HUMAN_KEYPRESS | RULE | LLM
     double      limit_price = 0;    // 0 => market
     std::int64_t window_close_ms = 0;

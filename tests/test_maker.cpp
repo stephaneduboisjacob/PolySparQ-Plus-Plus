@@ -118,6 +118,54 @@ int main() {
     assert(std::fabs(cb_positions.total_deployed_usd() - 17.8) < 1e-9);
     assert(std::fabs(cb_events.back().fee_usd) < 1e-9);
 
+    // Exact Coinbase confluence taker sizing must consume displayed ask depth
+    // across levels, price the result at VWAP, and charge fees per level.
+    Positions cb_taker_positions;
+    std::vector<OrderResult> cb_taker_events;
+    PaperExecutor cb_taker_exec(cb_taker_positions,
+        Journal{[&](const OrderRequest&, const OrderResult& r) {
+            cb_taker_events.push_back(r);
+        }, {}, {}}, 18.0, 200.0, 50.0, 1.0, 5.0);
+    OrderBook cb_taker_book;
+    cb_taker_book.apply_snapshot({{0.85, 150}}, {{0.87, 10}, {0.88, 10}});
+    auto cb_taker_lookup = [&](const std::string&, ShareSide) -> const OrderBook* {
+        return &cb_taker_book;
+    };
+    OrderRequest cb_taker;
+    cb_taker.source = "COINBASE_CONFLUENCE_PAPER_ENTRY";
+    cb_taker.condition_id = "cb-taker-20";
+    cb_taker.asset = "BTC";
+    cb_taker.horizon_s = 900;
+    cb_taker.token_id = "cb-taker-token";
+    cb_taker.side = ShareSide::UP;
+    cb_taker.dir = OrderDir::Buy;
+    cb_taker.execution_mode = ExecutionMode::Taker;
+    cb_taker.size_usd = 18.0;
+    cb_taker.size_shares = 20.0;
+    cb_taker.limit_price = 0.90;
+    cb_taker.fee_rate = 0.07;
+    cb_taker.fee_exponent = 1;
+    const auto cb_taker_fill = cb_taker_exec.submit(cb_taker, cb_taker_lookup);
+    assert(cb_taker_fill.accepted && cb_taker_fill.status == "filled");
+    assert(std::fabs(cb_taker_fill.fill_shares - 20.0) < 1e-9);
+    assert(std::fabs(cb_taker_fill.fill_price - 0.875) < 1e-9);
+    const double expected_cb_taker_fee =
+        0.07 * (0.87 * 0.13 * 10.0 + 0.88 * 0.12 * 10.0);
+    assert(std::fabs(cb_taker_fill.fee_usd - expected_cb_taker_fee) < 1e-9);
+    assert(std::fabs(cb_taker_positions.total_deployed_usd() - 17.50) < 1e-9);
+
+    Positions cb_thin_positions;
+    PaperExecutor cb_thin_exec(cb_thin_positions, {}, 18.0, 200.0, 50.0, 1.0, 5.0);
+    OrderBook cb_thin_book;
+    cb_thin_book.apply_snapshot({{0.85, 150}}, {{0.87, 10}, {0.88, 9}, {0.91, 100}});
+    auto cb_thin_lookup = [&](const std::string&, ShareSide) -> const OrderBook* {
+        return &cb_thin_book;
+    };
+    cb_taker.condition_id = "cb-taker-20-insufficient-depth";
+    const auto cb_thin_fill = cb_thin_exec.submit(cb_taker, cb_thin_lookup);
+    assert(!cb_thin_fill.accepted && cb_thin_fill.status == "rejected");
+    assert(cb_thin_positions.snapshot().empty());
+
     Positions cb_ttl_positions;
     PaperExecutor cb_ttl_exec(cb_ttl_positions, {}, 18.0, 200.0, 50.0, 1.0, 5.0);
     cb_maker.condition_id = "cb-maker-ttl";
