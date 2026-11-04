@@ -59,3 +59,11 @@ book_snapshots_enabled = false
 # Levels saved per side when snapshots are enabled: 0 keeps BBO/summary only; 20 keeps full depth.
 book_snapshot_levels = 20
 pm_trades_enabled = false
+
+[spot_feeds]
+# Read-only Kraken / Gemini / OKX spot BBO feeds. They are collected for
+# Predictions chart research and do not enter strategy or execution logic.
+enabled = true
+kraken_ws_url = "ws://127.0.0.1:9105"
+gemini_ws_url = "ws://127.0.0.1:9106"
+okx_ws_url = "ws://127.0.0.1:9107"

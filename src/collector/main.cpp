@@ -19,6 +19,7 @@
 #include "engine/candle_store.hpp"
 #include "engine/predictor.hpp"
 #include "feeds/binance.hpp"
+#include "feeds/spot_exchange_ws.hpp"
 #include "feeds/polymarket_md.hpp"
 #include "feeds/polymarket_rest.hpp"
 #include "feeds/polymarket_rtds.hpp"
@@ -141,6 +142,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<vp::PolymarketMD>  pm_md;
     std::unique_ptr<vp::BinanceFeed>   binance;
     std::unique_ptr<vp::PolymarketRtds> rtds;
+    std::vector<std::unique_ptr<vp::SpotExchangeFeed>> spot_exchange_feeds;
 
     // Rate limiter for book snapshot persistence (1 Hz per token)
     std::unordered_map<std::string, std::int64_t> last_snap_ms;
@@ -286,6 +288,48 @@ int main(int argc, char** argv) {
                 }
             });
         binance->start();
+
+        if (cfg.spot_feeds.enabled) {
+            auto persist_spot_tick = [&cstate, &persist_q, pg=pg.get()]
+                (const vp::SpotExchangeTick& tick) {
+                static std::array<std::array<std::atomic<std::int64_t>, 4>, 3> last_write{};
+                const std::size_t venue_index = tick.venue == "kraken" ? 0 :
+                                                tick.venue == "gemini" ? 1 :
+                                                tick.venue == "okx" ? 2 : 3;
+                const std::size_t asset_index = tick.asset == "BTC" ? 0 :
+                                                tick.asset == "ETH" ? 1 :
+                                                tick.asset == "SOL" ? 2 :
+                                                tick.asset == "XRP" ? 3 : 4;
+                if (venue_index >= 3 || asset_index >= 4 || cstate.disk_full.load()) return;
+                const auto now_ms = vp::Clock::wall_ns() / 1'000'000LL;
+                auto& slot = last_write[venue_index][asset_index];
+                auto previous = slot.load(std::memory_order_relaxed);
+                if (now_ms - previous < 1000 ||
+                    !slot.compare_exchange_strong(previous, now_ms,
+                                                  std::memory_order_relaxed)) return;
+                persist_q.push([pg, venue=tick.venue, asset=tick.asset, pair=tick.pair,
+                                price=tick.price, bid=tick.bid, bid_size=tick.bid_size,
+                                ask=tick.ask, ask_size=tick.ask_size,
+                                source_ms=tick.exchange_ts_ms,
+                                received_ms=tick.received_ts_ms]() noexcept {
+                    pg->insert_spot_exchange_tick(venue, asset, pair, price, bid,
+                                                  bid_size, ask, ask_size,
+                                                  source_ms, received_ms);
+                }, vp::PersistSource::SpotExchangeTick);
+            };
+            spot_exchange_feeds.push_back(std::make_unique<vp::SpotExchangeFeed>(
+                "kraken", cfg.spot_feeds.kraken_ws_url,
+                std::vector<std::string>{"BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"},
+                persist_spot_tick));
+            spot_exchange_feeds.push_back(std::make_unique<vp::SpotExchangeFeed>(
+                "gemini", cfg.spot_feeds.gemini_ws_url,
+                std::vector<std::string>{"BTC-USD"}, persist_spot_tick));
+            spot_exchange_feeds.push_back(std::make_unique<vp::SpotExchangeFeed>(
+                "okx", cfg.spot_feeds.okx_ws_url,
+                std::vector<std::string>{"BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT"},
+                persist_spot_tick));
+            for (auto& feed : spot_exchange_feeds) feed->start();
+        }
 
         // Polymarket RTDS oracle feed
         if (cfg.polymarket.rtds_enabled && !cfg.polymarket.rtds_ws_url.empty()) {
@@ -595,14 +639,15 @@ int main(int argc, char** argv) {
 
     // Clean shutdown
     spdlog::info("shutdown: stopping feeds...");
-    persist_q.shutdown();
     if (bootstrap_th.joinable()) bootstrap_th.join();
     refresh_th.join();
     coinbase_th.join();
-    persist_th.join();
     if (binance) binance->stop();
+    for (auto& feed : spot_exchange_feeds) if (feed) feed->stop();
     if (pm_md)   pm_md->stop();
     if (rtds)    rtds->stop();
+    persist_q.shutdown();
+    persist_th.join();
 
     spdlog::info("clean shutdown");
     return 0;

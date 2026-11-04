@@ -3,7 +3,7 @@
 #include <array>
 #include <string_view>
 namespace vp {
-inline constexpr std::array<std::string_view, 456> known_config_keys = {
+inline constexpr std::array<std::string_view, 460> known_config_keys = {
     "binance.enabled",
     "binance.futures_ws_url",
     "binance.streams",
@@ -78,6 +78,10 @@ inline constexpr std::array<std::string_view, 456> known_config_keys = {
     "runtime.mode",
     "runtime.position_snapshot_interval_ms",
     "runtime.wallet_balance_refresh_ms",
+    "spot_feeds.enabled",
+    "spot_feeds.gemini_ws_url",
+    "spot_feeds.kraken_ws_url",
+    "spot_feeds.okx_ws_url",
     "strategy.hot.adaptive_conf_trend_min",
     "strategy.hot.adaptive_max_secs_left",
     "strategy.hot.adaptive_min_secs_left",

@@ -149,6 +149,11 @@ Config Config::load(const std::string& path) {
                 if (auto s = v.value<std::string>()) c.binance.streams.push_back(*s);
         }
     }
+    auto* sf = tbl["spot_feeds"].as_table();
+    c.spot_feeds.enabled = get_or<bool>(sf, "enabled", true);
+    c.spot_feeds.kraken_ws_url = get_or<std::string>(sf, "kraken_ws_url", c.spot_feeds.kraken_ws_url);
+    c.spot_feeds.gemini_ws_url = get_or<std::string>(sf, "gemini_ws_url", c.spot_feeds.gemini_ws_url);
+    c.spot_feeds.okx_ws_url = get_or<std::string>(sf, "okx_ws_url", c.spot_feeds.okx_ws_url);
     auto* po = tbl["polygon"].as_table();
     c.polygon.rpc_url = get_or<std::string>(po, "rpc_url", "");
     auto* lm = tbl["llm"].as_table();
@@ -1280,6 +1285,8 @@ void Config::dump_summary() const {
     spdlog::info("  pm clob ws   : configured={}", !polymarket.clob_ws_url.empty());
     spdlog::info("  binance ws   : enabled={} configured={} ({} streams)",
                  binance.enabled, !binance.ws_url.empty(), binance.streams.size());
+    spdlog::info("  spot feeds   : {} (Kraken, Gemini, OKX; observational)",
+                 spot_feeds.enabled ? "ON" : "OFF");
     spdlog::info("  llm          : endpoint_configured={} (model={}, enabled={})", !llm.url.empty(), llm.model, llm.enabled);
     spdlog::info("  limits       : ${:.2f}/order  ${:.2f}/window  ${:.2f} deployed  share<={:.2f}",
                  risk.max_order_usd, risk.max_per_window_usd, risk.max_deployed_usd, strategy.hard_share_price_ceil);

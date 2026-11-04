@@ -152,6 +152,13 @@ public:
                              std::int64_t ts_ms) noexcept;
     void insert_coinbase_tick(const std::string& asset, double price,
                               std::int64_t ts_ms) noexcept;
+    void insert_spot_exchange_tick(const std::string& venue,
+                                  const std::string& asset,
+                                  const std::string& pair,
+                                  double price, double bid, double bid_size,
+                                  double ask, double ask_size,
+                                  std::int64_t exchange_ts_ms,
+                                  std::int64_t received_ts_ms) noexcept;
     void insert_window_event(const std::string& condition_id,
                              const std::string& event_type,
                              const std::string& payload_json) noexcept;

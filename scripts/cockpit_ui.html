@@ -1487,15 +1487,16 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
       <header class="pred-reference-head"><div><small>LIVE PRICE REFERENCE</small><h2 id="predictionReferenceTitle">BTC · LIVE SOURCE TRACE</h2><span id="predictionReferenceWindow">SELECTING ACTIVE MARKET WINDOW</span></div><div class="pred-reference-head-actions"><span id="predictionReferenceStreamStatus" data-state="stale" role="status" aria-live="polite">COCKPIT SSE CONNECTING</span><label for="predictionReferenceAsset">CHART ASSET<select id="predictionReferenceAsset" aria-label="Choose the asset shown in the live source chart" onchange="setPredictionReferenceAsset(this.value)"><option>BTC</option><option>ETH</option><option>SOL</option><option>XRP</option></select></label></div></header>
       <div id="predictionReferenceWindowStatus" role="status" aria-live="polite">Loading actual source ticks for the selected window…</div>
     <div id="predictionReferenceQuotes"></div>
-      <section id="predictionTradeQuotes" class="pred-share-strip" aria-label="Live five minute Polymarket share prices">
-        <header class="pred-share-strip-head"><div><small>5 MIN · POLYMARKET SHARES</small><strong id="predictionTradeMarketLabel">BTC · LIVE MARKET</strong></div><span id="predictionTradeMarketState" class="pred-share-market-state" data-state="waiting" role="status" aria-live="polite">WAITING FOR LIVE QUOTES</span></header>
+      <section id="predictionTradeQuotes" class="pred-share-strip" aria-label="Live Polymarket share prices for the selected window">
+        <header class="pred-share-strip-head"><div><small>SELECTED WINDOW · POLYMARKET SHARES</small><strong id="predictionTradeMarketLabel">BTC · LIVE MARKET</strong></div><span id="predictionTradeMarketState" class="pred-share-market-state" data-state="waiting" role="status" aria-live="polite">WAITING FOR LIVE QUOTES</span></header>
         <div id="predictionTradeSides" class="pred-share-sides"></div>
       </section>
-      <div class="pred-reference-chart-toolbar"><div class="pred-reference-range" role="group" aria-label="Chart time range"><span>SHOW</span><button type="button" data-ref-range="30000" aria-pressed="false" onclick="setPredictionReferenceRange(30000)">30 SEC</button><button type="button" data-ref-range="60000" aria-pressed="true" onclick="setPredictionReferenceRange(60000)">1 MIN</button><button type="button" data-ref-range="180000" aria-pressed="false" onclick="setPredictionReferenceRange(180000)">3 MIN</button><button type="button" data-ref-range="0" aria-pressed="false" onclick="setPredictionReferenceRange(0)">FULL WINDOW</button></div><span id="predictionReferenceDirectStatus" class="pred-reference-chart-live" data-state="stale">DIRECT PRICE FEEDS CONNECTING</span></div>
+      <div class="pred-reference-chart-toolbar"><div class="pred-reference-range" role="group" aria-label="Prediction market length"><span>MARKET</span><button type="button" data-ref-horizon="300" aria-pressed="true" onclick="setPredictionReferenceHorizon(300)">5 MIN</button><button type="button" data-ref-horizon="900" aria-pressed="false" onclick="setPredictionReferenceHorizon(900)">15 MIN</button></div><div class="pred-reference-range" role="group" aria-label="Chart time range"><span>SHOW</span><button type="button" data-ref-range="30000" aria-pressed="false" onclick="setPredictionReferenceRange(30000)">30 SEC</button><button type="button" data-ref-range="60000" aria-pressed="false" onclick="setPredictionReferenceRange(60000)">1 MIN</button><button type="button" data-ref-range="180000" aria-pressed="false" onclick="setPredictionReferenceRange(180000)">3 MIN</button><button type="button" data-ref-range="0" aria-pressed="true" onclick="setPredictionReferenceRange(0)">FULL WINDOW</button></div><span id="predictionReferenceDirectStatus" class="pred-reference-chart-live" data-state="stale">DIRECT PRICE FEEDS CONNECTING</span></div>
       <div id="predictionReferenceChart" class="pred-reference-chart"><div class="pred-reference-chart-empty" role="status" aria-live="polite">Waiting for fresh oracle and exchange ticks…</div></div>
+      <div id="predictionReferenceForecast" class="pred-reference-forecast" aria-live="polite"></div>
       <div id="predictionReferenceChartStats" class="pred-reference-chart-stats" aria-label="Price movement over the selected chart range"></div>
       <div id="predictionReferenceInspector" class="pred-reference-inspector" role="note">Move over the chart to inspect exact source prices and timestamps.</div>
-      <p class="pred-reference-note">The chart prefers direct Chainlink, Coinbase, and Binance WebSocket ticks; the cockpit stream remains the fallback. Source timestamps are preserved, and missing stretches stay visibly broken. Upstream publish cadence and connection health set the real update speed.</p>
+      <p class="pred-reference-note">Spot lines show percent move from the window opening reference; UP and DOWN use their own share-price scale. Kraken, Gemini and OKX are public BBO observations (Gemini currently covers BTC-USD). Source timestamps remain separate from local receipt times; missing stretches stay visibly broken.</p>
     </section>
     <div class="pred-board-heading"><div><h2>Forecast windows</h2><span id="predictionBoardCount" aria-live="polite">Loading live markets…</span></div><div class="pred-focus-actions" id="predictionFocusActions" hidden><button type="button" class="pred-share-focus" onclick="sharePredictionFocus()" aria-label="Share this focused prediction market">SHARE FOCUS ↗</button><button type="button" class="pred-show-all" id="predictionShowAll" onclick="resetPredictionFocus()" aria-label="Reset prediction filters to all assets and all windows">SHOW ALL MARKETS</button></div></div>
     <div id="manualPredictionGrid" class="pred-grid"><div class="strategy-empty pred-empty">Waiting for the first independent forecast…</div></div>
@@ -1966,7 +1967,7 @@ const S={paused:false,refreshing:false,activityRefreshing:false,curInstance:'',c
   data:{},activity:{},prices:{},prevFillTs:0,token:null,configRaw:'',configEdits:{},curConfig:'',configFingerprint:'',configRuntimeStatus:{state:'checking'},
   instNames:{},chartObj:null,candleSeries:null,pnlChartObj:null,pnlSeries:{},
   execution:{},executionRefreshing:false,fetchMs:null,paintMs:null,lastLoopAt:0,lastSseAt:0,lastServerTs:0,sseReconnecting:false,
-  predictionTrails:{},predictionPulseTrails:{},predictionReferenceSamples:{},predictionReferenceDirectPrices:{},predictionReferenceSockets:null,predictionReferenceRangeMs:60000,predictionReferencePaintTimer:null,predictionReferenceResizeTimer:null,predictionReferenceDirectUiAt:0,predictionReferenceAsset:'BTC',predictionReferenceWindow:null,predictionReferenceTimeline:null,predictionReferenceFetchAt:0,predictionReferenceRequest:null,predictionReferenceApiUnavailable:false,predictionPulseHorizon:300,predictionPulseLookback:60,predictionPulseThreshold:2,predictionPulseSort:'asset',
+  predictionTrails:{},predictionPulseTrails:{},predictionReferenceSamples:{},predictionReferenceDirectPrices:{},predictionReferenceSockets:null,predictionReferenceRangeMs:0,predictionReferencePaintTimer:null,predictionReferenceResizeTimer:null,predictionReferenceDirectUiAt:0,predictionReferenceAsset:'BTC',predictionReferenceHorizon:300,predictionReferenceWindow:null,predictionReferenceTimeline:null,predictionReferenceFetchAt:0,predictionReferenceRequest:null,predictionReferenceApiUnavailable:false,predictionPulseHorizon:300,predictionPulseLookback:60,predictionPulseThreshold:2,predictionPulseSort:'asset',
   predAsset:'BTC',predWindows:new Set(['300:CURRENT','300:NEXT','900:CURRENT','900:NEXT']),
   predRequestController:null,predForceQueued:false,predRequestForced:false,predDisplayHidden:false,
   predRetryMs:0,predBoardReceivedAt:0,predSnapshotAgeAtReceive:0,manualPredLoading:false};
@@ -1989,6 +1990,8 @@ try{
   if(['ALL','BTC','ETH','SOL','XRP'].includes(savedAsset))S.predAsset=savedAsset;
   const savedReferenceAsset=localStorage.getItem('predictionReferenceAsset');
   if(['BTC','ETH','SOL','XRP'].includes(savedReferenceAsset))S.predictionReferenceAsset=savedReferenceAsset;
+  const savedReferenceHorizon=Number(localStorage.getItem('predictionReferenceHorizon'));
+  if([300,900].includes(savedReferenceHorizon))S.predictionReferenceHorizon=savedReferenceHorizon;
 }catch(e){console.debug('Prediction preferences unavailable',e);}
 const initialPredictionFocus=readPredictionFocusFromUrl();
 if(initialPredictionFocus){S.predAsset=initialPredictionFocus.asset;S.predWindows=new Set([initialPredictionFocus.key]);S.curTab='manualpred';syncPredictionFilters();}
@@ -2223,6 +2226,9 @@ const PREDICTION_REFERENCE_SOURCES=[
   {key:'oracle',label:'CHAINLINK',color:'#74e1b1',maxAge:5},
   {key:'coinbase',label:'COINBASE',color:'#81baff',maxAge:5},
   {key:'binance',label:'BINANCE',color:'#f2bd72',maxAge:5},
+  {key:'kraken',label:'KRAKEN',color:'#b69aff',maxAge:5},
+  {key:'gemini',label:'GEMINI',color:'#ff92c7',maxAge:5,assets:['BTC']},
+  {key:'okx',label:'OKX',color:'#f28876',maxAge:5},
 ];
 function predictionReferencePrice(value,asset){
   if(value==null||!Number.isFinite(Number(value)))return'—';
@@ -2245,10 +2251,15 @@ function predictionReferenceFallbackTimestamp(value){
 }
 function predictionReferenceQuoteHtml(asset,fallback={}){
   const quote=S.prices?.[asset]||{},timestamps=fallback.input_timestamps||{};
+  const persisted=S.predictionReferenceTimeline?.asset===asset?S.predictionReferenceTimeline.latest||{}:{};
+  const savedQuote=key=>persisted[key]||{};
   const meta={
     oracle:{value:quote.oracle??fallback.spot,age:quote.oracle_age_s??fallback.reference_age_s,ts:quote.oracle_ts_ms??predictionReferenceFallbackTimestamp(timestamps.chainlink_spot??fallback.reference_price_ts)},
     coinbase:{value:quote.coinbase??fallback.coinbase_price,age:quote.coinbase_age_s??fallback.coinbase_age_s,ts:quote.coinbase_ts_ms??predictionReferenceFallbackTimestamp(timestamps.coinbase)},
     binance:{value:quote.binance??fallback.binance_price,age:quote.binance_age_s??fallback.binance_age_s,ts:quote.binance_ts_ms??predictionReferenceFallbackTimestamp(timestamps.binance)},
+    kraken:{value:savedQuote('kraken').price,age:savedQuote('kraken').age_ms==null?null:Number(savedQuote('kraken').age_ms)/1000,ts:savedQuote('kraken').ts_ms},
+    gemini:{value:savedQuote('gemini').price,age:savedQuote('gemini').age_ms==null?null:Number(savedQuote('gemini').age_ms)/1000,ts:savedQuote('gemini').ts_ms},
+    okx:{value:savedQuote('okx').price,age:savedQuote('okx').age_ms==null?null:Number(savedQuote('okx').age_ms)/1000,ts:savedQuote('okx').ts_ms},
   };
   const oracle=meta.oracle.value;
   return`<div class="pred-reference-quotes" data-pred-reference-asset="${esc(asset)}" aria-label="Live reference prices for ${esc(asset)}">${PREDICTION_REFERENCE_SOURCES.map(source=>{
@@ -2263,6 +2274,7 @@ function predictionReferenceLivePrices(streamPrices=S.prices){
   for(const asset of ['BTC','ETH','SOL','XRP']){
     const stream=streamPrices?.[asset]||{},card=(S.predictionBoard?.cards||[]).find(item=>item.asset===asset)||{},timestamps=card.input_timestamps||{};
     const direct=S.predictionReferenceDirectPrices?.[asset]||{};
+    const persisted=S.predictionReferenceTimeline?.asset===asset?(S.predictionReferenceTimeline.latest||{}):{};
     const ts=(streamKey,timestampKey)=>stream[streamKey]??predictionReferenceFallbackTimestamp(timestamps[timestampKey]);
     const age=(streamKey,cardValue,timestampKey)=>{
       if(stream[streamKey]!=null)return stream[streamKey];
@@ -2274,6 +2286,9 @@ function predictionReferenceLivePrices(streamPrices=S.prices){
     const liveValue=(key,fallback)=>directTick(key)?.value??fallback;
     const liveTimestamp=(key,fallback)=>directTick(key)?.ts_ms??fallback;
     const liveAge=(key,fallback)=>{const tick=directTick(key);return tick?Math.max(0,(now-Number(tick.ts_ms))/1000):fallback;};
+    const persistedValue=key=>persisted[key]&&Number(persisted[key].age_ms)<=15000?persisted[key].price:null;
+    const persistedAge=key=>persisted[key]?.age_ms==null?null:Math.max(0,Number(persisted[key].age_ms)/1000);
+    const persistedTimestamp=key=>persisted[key]?.ts_ms??null;
     result[asset]={
       ...stream,
       oracle:liveValue('oracle',stream.oracle??card.spot??null),
@@ -2285,15 +2300,24 @@ function predictionReferenceLivePrices(streamPrices=S.prices){
       binance:liveValue('binance',stream.binance??card.binance_price??null),
       binance_age_s:liveAge('binance',age('binance_age_s','binance_age_s','binance')),
       binance_ts_ms:liveTimestamp('binance',ts('binance_ts_ms','binance')),
+      kraken:liveValue('kraken',persistedValue('kraken')),
+      kraken_age_s:liveAge('kraken',persistedAge('kraken')),
+      kraken_ts_ms:liveTimestamp('kraken',persistedTimestamp('kraken')),
+      gemini:liveValue('gemini',persistedValue('gemini')),
+      gemini_age_s:liveAge('gemini',persistedAge('gemini')),
+      gemini_ts_ms:liveTimestamp('gemini',persistedTimestamp('gemini')),
+      okx:liveValue('okx',persistedValue('okx')),
+      okx_age_s:liveAge('okx',persistedAge('okx')),
+      okx_ts_ms:liveTimestamp('okx',persistedTimestamp('okx')),
     };
   }
   return result;
 }
 function predictionReferenceDirectStatus(){
   const state=S.predictionReferenceSockets,output=$('predictionReferenceDirectStatus');if(!output)return;
-  const labels=['oracle','coinbase','binance'].map(key=>`${key==='oracle'?'CL':key==='coinbase'?'CB':'BN'} ${state?.states?.[key]==='live'?'LIVE':state?.states?.[key]==='connecting'?'CONNECTING':'FALLBACK'}`);
+  const labels=[['oracle','CL'],['coinbase','CB'],['binance','BN'],['kraken','KR'],['gemini','GM'],['okx','OKX']].map(([key,label])=>`${label} ${state?.states?.[key]==='live'?'LIVE':state?.states?.[key]==='connecting'?'CONNECTING':state?.states?.[key]==='unsupported'?'N/A':'FALLBACK'}`);
   output.textContent=`DIRECT ${labels.join(' · ')}`;
-  output.dataset.state=state&&labels.every(label=>label.endsWith('LIVE'))?'live':state?'partial':'stale';
+  output.dataset.state=state&&labels.filter(label=>!label.endsWith('N/A')).every(label=>label.endsWith('LIVE'))?'live':state?'partial':'stale';
 }
 function stopPredictionReferenceSockets(){
   const state=S.predictionReferenceSockets;if(!state)return;
@@ -2309,16 +2333,23 @@ function startPredictionReferenceSockets(){
   const asset=S.predictionReferenceAsset||'BTC',previous=S.predictionReferenceSockets;
   if(previous&&!previous.closed&&previous.asset===asset)return;
   stopPredictionReferenceSockets();
-  const state=S.predictionReferenceSockets={asset,closed:false,sockets:{},states:{oracle:'connecting',coinbase:'connecting',binance:'connecting'},attempts:{oracle:0,coinbase:0,binance:0},retryTimers:{},heartbeats:{}};
+  const sourceKeys=['oracle','coinbase','binance','kraken','gemini','okx'];
+  const state=S.predictionReferenceSockets={asset,closed:false,sockets:{},states:Object.fromEntries(sourceKeys.map(key=>[key,'connecting'])),attempts:Object.fromEntries(sourceKeys.map(key=>[key,0])),retryTimers:{},heartbeats:{}};
   predictionReferenceDirectStatus();
+  const symbols={BTC:{kraken:'BTC/USD',okx:'BTC-USDT',binance:'btcusdt'},ETH:{kraken:'ETH/USD',okx:'ETH-USDT',binance:'ethusdt'},SOL:{kraken:'SOL/USD',okx:'SOL-USDT',binance:'solusdt'},XRP:{kraken:'XRP/USD',okx:'XRP-USDT',binance:'xrpusdt'}}[asset];
   const specs={
     oracle:{url:'wss://ws-live-data.polymarket.com',connect:socket=>{socket.send(JSON.stringify({action:'subscribe',subscriptions:[{topic:'crypto_prices_chainlink',type:'*',filters:''}]}));state.heartbeats.oracle=setInterval(()=>{if(socket.readyState===WebSocket.OPEN)socket.send('PING');},5000);}},
     coinbase:{url:'wss://advanced-trade-ws.coinbase.com',connect:socket=>socket.send(JSON.stringify({type:'subscribe',product_ids:[`${asset}-USD`],channel:'ticker'}))},
-    binance:{url:`wss://stream.binance.com:9443/ws/${({BTC:'btcusdt',ETH:'ethusdt',SOL:'solusdt',XRP:'xrpusdt'})[asset]}@trade`,connect:()=>{}}
+    binance:{url:`wss://stream.binance.com:9443/ws/${symbols.binance}@trade`,connect:()=>{}},
+    kraken:{url:'wss://ws.kraken.com/v2',connect:socket=>socket.send(JSON.stringify({method:'subscribe',params:{channel:'ticker',symbol:[symbols.kraken],event_trigger:'bbo',snapshot:true},req_id:1}))},
+    gemini:{url:'wss://ws.gemini.com',assets:['BTC'],connect:socket=>socket.send(JSON.stringify({id:'1',method:'subscribe',params:['btcusd@bookTicker']}))},
+    okx:{url:'wss://ws.okx.com/ws/v5/public',connect:socket=>socket.send(JSON.stringify({op:'subscribe',args:[{channel:'books5',instId:symbols.okx}]}))}
   };
   const connect=source=>{
     if(state.closed||S.predictionReferenceSockets!==state)return;
-    const spec=specs[source];state.states[source]='connecting';predictionReferenceDirectStatus();
+    const spec=specs[source];
+    if(spec.assets&&!spec.assets.includes(asset)){state.states[source]='unsupported';predictionReferenceDirectStatus();return;}
+    state.states[source]='connecting';predictionReferenceDirectStatus();
     let socket;
     try{socket=new WebSocket(spec.url);state.sockets[source]=socket;}catch(error){schedule(source);return;}
     socket.onopen=()=>{if(state.closed)return;state.attempts[source]=0;state.states[source]='live';try{spec.connect(socket);}catch(error){socket.close();}predictionReferenceDirectStatus();};
@@ -2333,9 +2364,25 @@ function startPredictionReferenceSockets(){
           if(ticker.product_id!==`${asset}-USD`)continue;
           const price=Number(ticker.price),ts=Date.parse(ticker.time||message.timestamp||'');if(Number.isFinite(price)&&price>0)recordPredictionReferenceDirectTick(asset,'coinbase',price,Number.isFinite(ts)?ts:Date.now());
         }
-      }else{
+      }else if(source==='binance'){
         const trade=message.data||message,price=Number(trade.p),ts=Number(trade.T||trade.E);
         if(Number.isFinite(price)&&price>0)recordPredictionReferenceDirectTick(asset,'binance',price,Number.isFinite(ts)&&ts>0?ts:Date.now());
+      }else if(source==='kraken'){
+        if(message.channel!=='ticker')return;
+        for(const quote of message.data||[]){
+          if(String(quote.symbol||'').toUpperCase()!==symbols.kraken)continue;
+          const bid=Number(quote.bid),ask=Number(quote.ask),ts=Date.parse(quote.timestamp||'');
+          if(bid>0&&ask>=bid)recordPredictionReferenceDirectTick(asset,'kraken',(bid+ask)/2,Number.isFinite(ts)?ts:Date.now());
+        }
+      }else if(source==='gemini'){
+        const quote=message.data||message,stream=String(message.stream||'');
+        if(!stream.includes('bookTicker')&&quote.b==null)return;
+        const bid=Number(quote.b),ask=Number(quote.a),rawTs=Number(quote.E||quote.T||message.timestamp),ts=rawTs>1e14?rawTs/1e6:rawTs;
+        if(bid>0&&ask>=bid)recordPredictionReferenceDirectTick(asset,'gemini',(bid+ask)/2,Number.isFinite(ts)&&ts>0?ts:Date.now());
+      }else if(source==='okx'){
+        if(message.arg?.channel!=='books5')return;
+        const book=(message.data||[])[0],bid=Number(book?.bids?.[0]?.[0]),ask=Number(book?.asks?.[0]?.[0]),ts=Number(book?.ts);
+        if(bid>0&&ask>=bid)recordPredictionReferenceDirectTick(asset,'okx',(bid+ask)/2,Number.isFinite(ts)&&ts>0?ts:Date.now());
       }
     }catch(error){}}
     socket.onerror=()=>{state.states[source]='fallback';predictionReferenceDirectStatus();};
@@ -2346,7 +2393,7 @@ function startPredictionReferenceSockets(){
     const delay=Math.min(8000,750*2**Math.min(state.attempts[source]++,4));
     state.retryTimers[source]=setTimeout(()=>{state.retryTimers[source]=null;connect(source);},delay);
   };
-  connect('oracle');connect('coinbase');connect('binance');
+  sourceKeys.forEach(connect);
 }
 function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
   const ts=Number(timestamp),now=Date.now();if(!Number.isFinite(ts)||ts<=0||now-ts>15000||ts-now>5000)return;
@@ -2381,7 +2428,9 @@ function updatePredictionReferenceDisplays(prices=S.prices){
   const topQuotes=$('predictionReferenceQuotes');
   if(topQuotes&&!topQuotes.querySelector('.pred-reference-quotes'))topQuotes.innerHTML=predictionReferenceQuoteHtml(S.predictionReferenceAsset||'BTC');
   const select=$('predictionReferenceAsset');if(select)select.value=S.predictionReferenceAsset||'BTC';
-  const title=$('predictionReferenceTitle');if(title)title.textContent=`${S.predictionReferenceAsset||'BTC'} · LIVE SOURCE TRACE`;
+  const horizon=Number(S.predictionReferenceHorizon)||300;
+  document.querySelectorAll('[data-ref-horizon]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.refHorizon)===horizon)));
+  const title=$('predictionReferenceTitle');if(title)title.textContent=`${S.predictionReferenceAsset||'BTC'} · ${horizon/60}M LIVE SOURCE TRACE`;
   document.querySelectorAll('.pred-reference-quotes[data-pred-reference-asset]').forEach(group=>{
     const asset=group.dataset.predReferenceAsset,quote=livePrices?.[asset]||{},fallbackOracle=group.querySelector('[data-ref-value="oracle"]')?.dataset.refFallback;
     const oracle=quote.oracle??(fallbackOracle===''?null:fallbackOracle);
@@ -2408,8 +2457,18 @@ function setPredictionReferenceAsset(asset){
   S.predictionReferenceAsset=asset;
   try{localStorage.setItem('predictionReferenceAsset',asset);}catch(e){}
   const select=$('predictionReferenceAsset');if(select)select.value=asset;
-  const title=$('predictionReferenceTitle');if(title)title.textContent=`${asset} · LIVE WINDOW TRACE`;
+  const title=$('predictionReferenceTitle');if(title)title.textContent=`${asset} · ${Number(S.predictionReferenceHorizon)/60}M WINDOW TRACE`;
   updatePredictionReferenceDisplays(S.prices);
+  refreshPredictionReferenceWindow(true);
+}
+function setPredictionReferenceHorizon(horizon){
+  const value=Number(horizon);if(![300,900].includes(value))return;
+  S.predictionReferenceHorizon=value;
+  try{localStorage.setItem('predictionReferenceHorizon',String(value));}catch(e){}
+  document.querySelectorAll('[data-ref-horizon]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.refHorizon)===value)));
+  S.predictionReferenceRequest?.controller?.abort();
+  S.predictionReferenceWindow=null;S.predictionReferenceTimeline=null;S.predictionReferenceFetchAt=0;
+  renderPredictionTradePanel();
   refreshPredictionReferenceWindow(true);
 }
 function capturePredictionReferenceSample(prices=S.prices,receivedAt=Date.now()){
@@ -2430,17 +2489,14 @@ function capturePredictionReferenceSample(prices=S.prices,receivedAt=Date.now())
   }
 }
 function predictionReferenceSelectedWindow(board=S.predictionBoard){
-  const asset=S.predictionReferenceAsset||'BTC',now=Date.now();
+  const asset=S.predictionReferenceAsset||'BTC',horizon=Number(S.predictionReferenceHorizon)||300,now=Date.now();
   const all=(board?.cards||[]).flatMap(card=>[card,card?.next_window].filter(Boolean))
-    .filter(card=>card.asset===asset&&Number.isFinite(Number(card.window_open))&&Number.isFinite(Number(card.window_close))&&Number(card.window_close)>Number(card.window_open));
+    .filter(card=>card.asset===asset&&Number(card.horizon_seconds)===horizon&&Number.isFinite(Number(card.window_open))&&Number.isFinite(Number(card.window_close))&&Number(card.window_close)>Number(card.window_open));
   if(!all.length)return null;
-  const enabled=all.filter(card=>!S.predWindows?.size||S.predWindows.has(`${Number(card.horizon_seconds)}:${card.period}`));
-  const candidates=enabled.length?enabled:all;
-  const current=candidates.filter(card=>Number(card.window_open)<=now&&now<Number(card.window_close))
-    .sort((a,b)=>Number(a.horizon_seconds)-Number(b.horizon_seconds));
+  const current=all.filter(card=>Number(card.window_open)<=now&&now<Number(card.window_close));
   if(current.length)return current[0];
-  return candidates.filter(card=>Number(card.window_open)>now).sort((a,b)=>Number(a.window_open)-Number(b.window_open))[0]||
-    candidates.sort((a,b)=>Number(b.window_close)-Number(a.window_close))[0];
+  return all.filter(card=>Number(card.window_open)>now).sort((a,b)=>Number(a.window_open)-Number(b.window_open))[0]||
+    all.sort((a,b)=>Number(b.window_close)-Number(a.window_close))[0];
 }
 function mergePredictionReferenceWindowSeries(data,window){
   const asset=String(data.asset||window.asset),stored=S.predictionReferenceSamples[asset]||(S.predictionReferenceSamples[asset]={});
@@ -2452,19 +2508,33 @@ function mergePredictionReferenceWindowSeries(data,window){
     }
     stored[source.key]=[...byTime.values()].sort((a,b)=>a.t-b.t).slice(-1200);
   }
+  for(const side of ['up','down']){
+    const byTime=new Map((stored[`poly_${side}`]||[]).map(point=>[Number(point.t),point]));
+    for(const point of data.share_series?.[side]||[]){
+      const t=Number(point.ts_ms),value=Number(point.price);
+      if(Number.isFinite(t)&&Number.isFinite(value)&&value>=0&&value<=1&&t>=Number(window.window_open)&&t<=Number(window.window_close))byTime.set(t,{t,value});
+    }
+    stored[`poly_${side}`]=[...byTime.values()].sort((a,b)=>a.t-b.t).slice(-1500);
+  }
+  updatePredictionReferenceDisplays(S.prices);
 }
 function updatePredictionReferenceWindowStatus(){
   const status=$('predictionReferenceWindowStatus');if(!status)return;
   if(S.predictionReferenceApiUnavailable){status.textContent='PERSISTED TICKS NEED COCKPIT PROCESS RESTART · LIVE STREAM POINTS SHOWN';return;}
   if(S.predictionReferenceError){status.textContent='WINDOW TRACE REFRESH FAILED · '+String(S.predictionReferenceError).slice(0,100);return;}
-  const data=S.predictionReferenceTimeline,counts=data?.series?PREDICTION_REFERENCE_SOURCES.map(source=>`${(data.series[source.key]||[]).length} ${source.label.split(' ').at(-1)}`).join(' · '):'';
-  if(data){const partial=Object.keys(data.errors||{}).length>0;status.textContent=`${partial?'PARTIAL SOURCE HISTORY':'WINDOW TICKS LOADED'} · ${counts} · ${new Date(Number(data.server_ts_ms)||Date.now()).toLocaleTimeString()}`;return;}
+  const data=S.predictionReferenceTimeline,counts=data?.series?PREDICTION_REFERENCE_SOURCES.map(source=>`${(data.series[source.key]||[]).length} ${source.label}`).join(' · '):'';
+  if(data){const partial=Object.keys(data.errors||{}).length>0,shares=data.share_series?` · UP/DOWN ${(data.share_series.up||[]).length}/${(data.share_series.down||[]).length}`:'';status.textContent=`${partial?'PARTIAL HISTORY':'WINDOW DATA'} · ${counts}${shares} · ${new Date(Number(data.server_ts_ms)||Date.now()).toLocaleTimeString()}`;return;}
   status.textContent='LOADING ACTUAL SOURCE TICKS FOR THIS WINDOW';
 }
 async function refreshPredictionReferenceWindow(force=false,board=S.predictionBoard){
   if(S.curTab!=='manualpred')return;
   const card=predictionReferenceSelectedWindow(board),asset=S.predictionReferenceAsset||'BTC';
-  if(!card){const label=$('predictionReferenceWindow');if(label)label.textContent='NO ACTIVE WINDOW IN THE FORECAST SNAPSHOT';updatePredictionReferenceWindowStatus();return;}
+  if(!card){
+    S.predictionReferenceRequest?.controller?.abort();S.predictionReferenceRequest=null;
+    S.predictionReferenceWindow=null;S.predictionReferenceTimeline=null;
+    const label=$('predictionReferenceWindow');if(label)label.textContent=`NO ${Number(S.predictionReferenceHorizon)/60}-MIN WINDOW IN THE FORECAST SNAPSHOT`;
+    renderPredictionReferenceChart();updatePredictionReferenceWindowStatus();return;
+  }
   const open=Number(card.window_open),close=Number(card.window_close),horizon=Number(card.horizon_seconds),period=card.period||'CURRENT';
   const key=`${asset}:${horizon}:${open}:${close}`;
   const changed=S.predictionReferenceWindow?.key!==key;
@@ -2497,91 +2567,151 @@ async function refreshPredictionReferenceWindow(force=false,board=S.predictionBo
     if(S.predictionReferenceWindow?.key===key){updatePredictionReferenceWindowStatus();renderPredictionReferenceChart();}
   }
 }
+function predictionReferenceDecimate(points,limit=1400){
+  if(points.length<=limit)return points;
+  const bucketSize=Math.max(1,Math.ceil(points.length/(limit/4))),reduced=[];
+  for(let start=0;start<points.length;start+=bucketSize){
+    const bucket=points.slice(start,start+bucketSize);if(bucket.length<=4){reduced.push(...bucket);continue;}
+    let low=bucket[0],high=bucket[0];
+    for(const point of bucket){if(point.value<low.value)low=point;if(point.value>high.value)high=point;}
+    const picked=[bucket[0],low,high,bucket.at(-1)].sort((a,b)=>a.t-b.t);
+    for(const point of picked)if(reduced.at(-1)?.t!==point.t)reduced.push(point);
+  }
+  return reduced;
+}
+function renderPredictionReferenceForecast(){
+  const target=$('predictionReferenceForecast');if(!target)return;
+  const card=predictionReferenceSelectedWindow();
+  if(!card){target.innerHTML='<span class="pred-reference-forecast-empty">PREDICTOR · WAITING FOR SELECTED WINDOW</span>';return;}
+  const probability=Number(card.independent_up_probability??card.up_probability),direction=String(card.independent_direction??card.direction??'WAIT').toUpperCase();
+  const validProbability=Number.isFinite(probability)&&probability>=0&&probability<=1;
+  const side=direction==='UP'?'up':direction==='DOWN'?'down':'wait';
+  const period=card.period==='NEXT'?'NEXT WINDOW':'LIVE WINDOW';
+  const label=validProbability?`${(probability*100).toFixed(1)}% UP PROBABILITY`:'UP PROBABILITY UNAVAILABLE';
+  target.innerHTML=`<div class="pred-reference-forecast-call ${side}"><small>POLYSPARQ PREDICTOR · ${Number(card.horizon_seconds)/60} MIN · ${period}</small><strong>MODEL TENDENCY <b>${esc(direction)}</b></strong></div><div class="pred-reference-forecast-probability"><small>INDEPENDENT FORECAST</small><strong>${label}</strong><span>${esc(card.independent_model_version||card.model_version||card.prediction_basis||'MODEL VERSION UNAVAILABLE')}</span></div><div class="pred-reference-forecast-open"><small>WINDOW OPEN REFERENCE</small><strong>${predictionReferencePrice(S.predictionReferenceTimeline?.open_reference?.price,card.asset)}</strong><span>${esc(S.predictionReferenceTimeline?.open_reference?.source||'Awaiting selected-window reference')}</span></div>`;
+}
 function renderPredictionReferenceChart(){
   const target=$('predictionReferenceChart');if(!target)return;
   const asset=S.predictionReferenceAsset||'BTC',now=Date.now(),window=S.predictionReferenceWindow;
-  if(!window){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">Waiting for the active prediction window…</div>';return;}
+  renderPredictionReferenceForecast();
+  if(!window){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">Waiting for the selected prediction window…</div>';return;}
   const start=Number(window.window_open),close=Number(window.window_close),windowEnd=Math.min(now,close),rangeMs=Math.max(0,Number(S.predictionReferenceRangeMs)||0);
   const viewportStart=rangeMs?Math.max(start,windowEnd-rangeMs):start,duration=Math.max(1,windowEnd-viewportStart);
-  if(windowEnd<start){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">This window has not opened. Live source prices remain above.</div>';return;}
-  const sourceSeries=S.predictionReferenceSamples[asset]||{};
-  const samplesBySource=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,(sourceSeries[source.key]||[]).filter(point=>point.t>=viewportStart&&point.t<=windowEnd).sort((a,b)=>a.t-b.t)]));
-  const data=S.predictionReferenceTimeline,openRef=data?.open_reference,closeRef=data?.close_reference;
-  const showOpen=viewportStart<=start+1000&&openRef?.price!=null,showClose=closeRef?.price!=null&&Number(closeRef.ts_ms)>=viewportStart&&Number(closeRef.ts_ms)<=windowEnd;
-  const allValues=[...PREDICTION_REFERENCE_SOURCES.flatMap(source=>samplesBySource[source.key].map(point=>point.value)),...(showOpen?[Number(openRef.price)]:[]),...(showClose?[Number(closeRef.price)]:[])].filter(value=>Number.isFinite(value)&&value>0);
-  if(!allValues.length){const message=now<start?'This market window has not opened yet. The live source prices remain above.':'Waiting for the first recorded source tick in this window…';target.innerHTML=`<div class="pred-reference-chart-empty" role="status" aria-live="polite">${message}</div>`;return;}
-  const compact=target.clientWidth<680,W=compact?540:1440,H=390,L=compact?106:112,R=compact?210:240,T=28,B=58,PW=W-L-R,PH=H-T-B;
-  let low=Math.min(...allValues),high=Math.max(...allValues);
-  const pad=Math.max((high-low)*.12,Math.abs((high+low)/2)*.000002,asset==='XRP' ? 0.00001 : 0.01);
-  low-=pad;high+=pad;
-  const x=t=>L+Math.max(0,Math.min(1,(t-viewportStart)/duration))*PW,y=value=>T+(high-value)/(high-low)*PH;
-  const grid=Array.from({length:7},(_,index)=>{const frac=index/6,yy=T+frac*PH,value=high-frac*(high-low);return`<line x1="${L}" y1="${yy.toFixed(1)}" x2="${W-R}" y2="${yy.toFixed(1)}"/><text x="${L-10}" y="${(yy+4).toFixed(1)}" text-anchor="end">${predictionReferencePrice(value,asset)}</text>`;}).join('');
+  if(windowEnd<start){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">This window has not opened yet. Live venue prices are shown above.</div>';return;}
+  const sourceSeries=S.predictionReferenceSamples[asset]||{},openRef=S.predictionReferenceTimeline?.open_reference,closeRef=S.predictionReferenceTimeline?.close_reference;
+  const rawBySource=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,(sourceSeries[source.key]||[]).filter(point=>point.t>=viewportStart&&point.t<=windowEnd).sort((a,b)=>a.t-b.t)]));
+  const rawAnchorCandidates=PREDICTION_REFERENCE_SOURCES.flatMap(source=>(sourceSeries[source.key]||[]).filter(point=>point.t>=start&&point.t<=windowEnd).map(point=>({source:source.key,...point}))).sort((a,b)=>a.t-b.t);
+  const explicitOpen=Number(openRef?.price),anchorPrice=Number.isFinite(explicitOpen)&&explicitOpen>0?explicitOpen:(rawAnchorCandidates[0]?.value||null);
+  const anchorSource=Number.isFinite(explicitOpen)&&explicitOpen>0?(openRef?.source||'window opening reference'):(rawAnchorCandidates.length?'first available in-window feed':'opening reference unavailable');
+  const samplesBySource=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,rawBySource[source.key].map(point=>({...point,move_pct:anchorPrice?(point.value/anchorPrice-1)*100:null}))]));
+  const visibleShares=Object.fromEntries(['up','down'].map(side=>[side,(sourceSeries[`poly_${side}`]||[]).filter(point=>point.t>=viewportStart&&point.t<=windowEnd).sort((a,b)=>a.t-b.t)]));
+  const openingShares=Object.fromEntries(['up','down'].map(side=>[side,(sourceSeries[`poly_${side}`]||[]).filter(point=>point.t>=start&&point.t<=windowEnd).sort((a,b)=>a.t-b.t)[0]||null]));
+  const allMoves=PREDICTION_REFERENCE_SOURCES.flatMap(source=>samplesBySource[source.key].map(point=>point.move_pct).filter(Number.isFinite));
+  if(closeRef?.price!=null&&anchorPrice)allMoves.push((Number(closeRef.price)/anchorPrice-1)*100);
+  const hasShares=visibleShares.up.length>0||visibleShares.down.length>0;
+  if(!allMoves.length&&!hasShares){
+    const message=now<start?'This market window has not opened yet.':'Waiting for the first spot or Polymarket book observation in this window…';
+    target.innerHTML=`<div class="pred-reference-chart-empty" role="status" aria-live="polite">${message}</div>`;return;
+  }
+  const compact=target.clientWidth<760,W=compact?720:1680,H=compact?720:760,L=compact?74:112,R=compact?24:224,plotRight=W-R,PW=plotRight-L;
+  const priceTop=compact?52:58,priceBottom=compact?330:360,shareTop=compact?410:448,shareBottom=compact?625:675;
+  let low=allMoves.length?Math.min(...allMoves,0):-.5,high=allMoves.length?Math.max(...allMoves,0):.5;
+  const pad=Math.max((high-low)*.14,.035);low-=pad;high+=pad;
+  const x=t=>L+Math.max(0,Math.min(1,(t-viewportStart)/duration))*PW;
+  const yMove=value=>priceTop+(high-value)/(high-low)*(priceBottom-priceTop);
+  const yShare=value=>shareTop+(1-Math.max(0,Math.min(1,value)))*(shareBottom-shareTop);
   const clock=t=>new Date(t).toLocaleTimeString([],{timeZone:'UTC',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
-  const timeTickCount=compact?4:7;
-  const timeTicks=Array.from({length:timeTickCount},(_,index)=>{const fraction=index/(timeTickCount-1),xx=L+fraction*PW,ts=viewportStart+fraction*duration,anchor=index===0?'start':index===timeTickCount-1?'end':'middle';return`<line class="pred-reference-time-grid" x1="${xx.toFixed(1)}" y1="${T}" x2="${xx.toFixed(1)}" y2="${H-B}"/><text class="pred-reference-time" x="${xx.toFixed(1)}" y="${H-15}" text-anchor="${anchor}">${clock(ts)}</text>`;}).join('');
-  const stages=[['OPEN',0],['20%',.2],['40%',.4],['60%',.6],['80%',.8],['CLOSE',1]];
-  const ticks=stages.map(([label,fraction])=>{const ts=start+fraction*(close-start);if(ts<viewportStart||ts>windowEnd)return'';const xx=x(ts);return`<line class="pred-reference-stage" x1="${xx.toFixed(1)}" y1="${T}" x2="${xx.toFixed(1)}" y2="${H-B}"/><text class="pred-reference-stage-label" x="${xx.toFixed(1)}" y="${T-10}" text-anchor="${fraction===0?'start':fraction===1?'end':'middle'}">${label}</text>`;}).join('');
-  const svgSeries=PREDICTION_REFERENCE_SOURCES.map(source=>{
-    const samples=samplesBySource[source.key],intervals=samples.slice(1).map((point,index)=>point.t-samples[index].t).filter(value=>value>0).sort((a,b)=>a-b);
-    const median=intervals.length?intervals[Math.floor(intervals.length/2)]:0,gapLimit=Math.max(3500,Math.min(30000,median*4||3500));
-    let path='',previous=null;
-    for(const point of samples){
-      const move=!previous||point.t-previous.t>gapLimit;
-      path+=`${move?'M':' L'}${x(point.t).toFixed(1)} ${y(point.value).toFixed(1)}`;previous=point;
-    }
-    const last=samples.at(-1),latestAgeRaw=predictionReferenceLivePrices()[asset]?.[`${source.key}_age_s`],latestAge=latestAgeRaw==null?NaN:Number(latestAgeRaw);
-    return`<path class="pred-reference-line ${source.key}" d="${path}" data-fresh="${Number.isFinite(latestAge)&&latestAge<=source.maxAge?'true':'false'}"/>${last?`<circle class="pred-reference-dot ${source.key}" data-source="${source.key}" cx="${x(last.t).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="${compact?5:6}"/>`:''}`;
+  const priceGrid=Array.from({length:6},(_,index)=>{
+    const fraction=index/5,yy=priceTop+fraction*(priceBottom-priceTop),value=high-fraction*(high-low);
+    return`<line class="pred-reference-grid-line" x1="${L}" y1="${yy.toFixed(1)}" x2="${plotRight}" y2="${yy.toFixed(1)}"/><text class="pred-reference-axis" x="${L-10}" y="${(yy+4).toFixed(1)}" text-anchor="end">${value>0?'+':''}${value.toFixed(2)}%</text>`;
   }).join('');
-  const latestLabels=PREDICTION_REFERENCE_SOURCES.map(source=>({source,last:samplesBySource[source.key].at(-1)})).filter(item=>item.last).map(item=>({...item,targetY:y(item.last.value)})).sort((a,b)=>a.targetY-b.targetY);
-  const labelGap=compact?26:30,minLabelY=T+12,maxLabelY=H-B-7;
-  latestLabels.forEach((item,index)=>item.labelY=Math.max(index?latestLabels[index-1].labelY+labelGap:minLabelY,item.targetY));
-  for(let index=latestLabels.length-1;index>=0;index--)latestLabels[index].labelY=Math.min(latestLabels[index].labelY,index===latestLabels.length-1?maxLabelY:latestLabels[index+1].labelY-labelGap);
-  const edgeLabels=latestLabels.map(({source,last,labelY})=>{const cx=x(last.t),cy=y(last.value),labelX=W-R+8;return`<path class="pred-reference-leader ${source.key}" d="M${cx.toFixed(1)} ${cy.toFixed(1)} L${(labelX-6).toFixed(1)} ${labelY.toFixed(1)}"/><circle class="pred-reference-edge-dot ${source.key}" cx="${(labelX-6).toFixed(1)}" cy="${labelY.toFixed(1)}" r="3.5"/><text class="pred-reference-edge-label ${source.key}" x="${labelX.toFixed(1)}" y="${(labelY+4).toFixed(1)}">${source.key==='oracle'?'CHAINLINK':source.label} ${predictionReferencePrice(last.value,asset)}</text>`;}).join('');
-  const official=(reference,label,kind)=>{
-    const value=Number(reference?.price);if(!Number.isFinite(value)||value<=0)return'';
-    const yy=y(value),time=reference.ts_ms?new Date(Number(reference.ts_ms)).toISOString():'timestamp unavailable';
-    const refX=Number(reference.ts_ms)|| (kind==='open'?start:close),x1=kind==='open'?L:x(Math.max(viewportStart,refX)),x2=kind==='open'?x(windowEnd):W-R;
-    if(kind==='close'&&refX<viewportStart)return'';
-    return`<line class="pred-reference-official ${kind}" x1="${x1.toFixed(1)}" y1="${yy.toFixed(1)}" x2="${Math.max(x1,x2).toFixed(1)}" y2="${yy.toFixed(1)}"><title>${label} ${predictionReferencePrice(value,asset)} · ${time}</title></line><text class="pred-reference-official-label ${kind}" x="${kind==='open'?L+5:W-R-4}" y="${(yy-5).toFixed(1)}" text-anchor="${kind==='open'?'start':'end'}">${label} ${predictionReferencePrice(value,asset)}</text>`;
+  const shareGrid=[0,0.25,0.5,0.75,1].map(value=>{
+    const yy=yShare(value),label=`${Math.round(value*100)}¢`;
+    return`<line class="pred-reference-grid-line ${value===.5?'mid':''}" x1="${L}" y1="${yy.toFixed(1)}" x2="${plotRight}" y2="${yy.toFixed(1)}"/><text class="pred-reference-axis" x="${L-10}" y="${(yy+4).toFixed(1)}" text-anchor="end">${label}</text>`;
+  }).join('');
+  const timeTickCount=compact?5:8;
+  const timeTicks=Array.from({length:timeTickCount},(_,index)=>{
+    const fraction=index/(timeTickCount-1),xx=L+fraction*PW,ts=viewportStart+fraction*duration,anchor=index===0?'start':index===timeTickCount-1?'end':'middle';
+    return`<line class="pred-reference-time-grid" x1="${xx.toFixed(1)}" y1="${priceTop}" x2="${xx.toFixed(1)}" y2="${shareBottom}"/><text class="pred-reference-time" x="${xx.toFixed(1)}" y="${H-20}" text-anchor="${anchor}">${clock(ts)}</text>`;
+  }).join('');
+  const stages=[['OPEN',0],['20%',.2],['40%',.4],['60%',.6],['80%',.8],['CLOSE',1]];
+  const stageLines=stages.map(([label,fraction])=>{
+    const ts=start+fraction*(close-start);if(ts<viewportStart||ts>windowEnd)return'';
+    const xx=x(ts);return`<line class="pred-reference-stage" x1="${xx.toFixed(1)}" y1="${priceTop}" x2="${xx.toFixed(1)}" y2="${shareBottom}"/><text class="pred-reference-stage-label" x="${xx.toFixed(1)}" y="${priceTop-12}" text-anchor="${fraction===0?'start':fraction===1?'end':'middle'}">${label}</text>`;
+  }).join('');
+  const linePath=(points,valueFn)=>{
+    const reduced=predictionReferenceDecimate(points),intervals=reduced.slice(1).map((point,index)=>point.t-reduced[index].t).filter(value=>value>0).sort((a,b)=>a-b);
+    const median=intervals.length?intervals[Math.floor(intervals.length/2)]:0,gapLimit=Math.max(2500,Math.min(15000,median*4||2500));
+    let path='',previous=null;
+    for(const point of reduced){const move=!previous||point.t-previous.t>gapLimit;path+=`${move?'M':' L'}${x(point.t).toFixed(1)} ${valueFn(point).toFixed(1)}`;previous=point;}
+    return path;
   };
-  const seriesCounts=PREDICTION_REFERENCE_SOURCES.map(source=>`${source.label} ${samplesBySource[source.key].length}`).join(', ');
-  const aria=`${asset} ${window.horizon/60}-minute ${window.period==='NEXT'?'upcoming':'current'} window from ${new Date(start).toISOString()} to ${new Date(close).toISOString()}. ${seriesCounts}. Official open ${openRef?.price==null?'unavailable':predictionReferencePrice(openRef.price,asset)}; official close ${closeRef?.price==null?'unavailable':predictionReferencePrice(closeRef.price,asset)}. Missing spans are not connected.`;
-  target.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(aria)}"><title>${esc(aria)}</title><g class="pred-reference-grid">${grid}${timeTicks}</g>${ticks}${showOpen?official(openRef,'OPEN REF','open'):''}${showClose?official(closeRef,'CLOSE REF','close'):''}${svgSeries}${edgeLabels}<g id="predictionReferenceCursor" visibility="hidden"><line id="predictionReferenceCursorLine" class="pred-reference-cursor-line" y1="${T}" y2="${H-B}"/><circle id="predictionReferenceCursorOracle" class="pred-reference-cursor oracle" r="5"/><circle id="predictionReferenceCursorCoinbase" class="pred-reference-cursor coinbase" r="5"/><circle id="predictionReferenceCursorBinance" class="pred-reference-cursor binance" r="5"/></g></svg>`;
+  const spotLines=PREDICTION_REFERENCE_SOURCES.map(source=>{
+    const points=samplesBySource[source.key].filter(point=>Number.isFinite(point.move_pct));
+    const path=linePath(points,point=>yMove(point.move_pct)),last=points.at(-1),age=predictionReferenceLivePrices()[asset]?.[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
+    return path?`<path class="pred-reference-line ${source.key}" d="${path}" data-fresh="${fresh}"/>${last?`<circle class="pred-reference-dot ${source.key}" cx="${x(last.t).toFixed(1)}" cy="${yMove(last.move_pct).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
+  }).join('');
+  const shareLines=['up','down'].map(side=>{
+    const points=visibleShares[side],path=linePath(points,point=>yShare(point.value)),last=points.at(-1);
+    return path?`<path class="pred-reference-share-line ${side}" d="${path}"/>${last?`<circle class="pred-reference-share-dot ${side}" cx="${x(last.t).toFixed(1)}" cy="${yShare(last.value).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
+  }).join('');
+  const shareOpenLines=['up','down'].map(side=>{
+    const point=openingShares[side];return point?`<line class="pred-reference-share-open ${side}" x1="${L}" y1="${yShare(point.value).toFixed(1)}" x2="${plotRight}" y2="${yShare(point.value).toFixed(1)}"><title>${side.toUpperCase()} opening midpoint ${(point.value*100).toFixed(1)}¢</title></line>`:'';
+  }).join('');
+  const closeMove=closeRef?.price!=null&&anchorPrice?(Number(closeRef.price)/anchorPrice-1)*100:null;
+  const closeLine=closeMove!=null&&Number.isFinite(closeMove)?`<line class="pred-reference-close-line" x1="${x(Math.max(viewportStart,Number(closeRef.ts_ms)||close)).toFixed(1)}" y1="${yMove(closeMove).toFixed(1)}" x2="${plotRight}" y2="${yMove(closeMove).toFixed(1)}"><title>Window close reference ${predictionReferencePrice(closeRef.price,asset)}</title></line>`:'';
+  const priceLabel=`${asset} MOVE FROM OPEN · ${anchorPrice?predictionReferencePrice(anchorPrice,asset):'OPEN REFERENCE UNAVAILABLE'}`;
+  const aria=`${asset} ${window.horizon/60}-minute ${window.period==='NEXT'?'upcoming':'current'} window. Spot venues are percent from ${anchorSource}; Polymarket UP and DOWN midpoints use a 0 to 100 cent axis. ${PREDICTION_REFERENCE_SOURCES.map(source=>`${source.label} ${samplesBySource[source.key].length} ticks`).join(', ')}.`;
+  const cursorDots=PREDICTION_REFERENCE_SOURCES.map(source=>`<circle id="predictionReferenceCursor${source.key[0].toUpperCase()+source.key.slice(1)}" class="pred-reference-cursor ${source.key}" r="5" visibility="hidden"/>`).join('');
+  target.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(aria)}"><title>${esc(aria)}</title><g class="pred-reference-grid">${priceGrid}${shareGrid}${timeTicks}</g>${stageLines}<line class="pred-reference-zero-line" x1="${L}" y1="${yMove(0).toFixed(1)}" x2="${plotRight}" y2="${yMove(0).toFixed(1)}"/><text class="pred-reference-panel-title" x="${L}" y="${priceTop-25}">${esc(priceLabel)}</text><text class="pred-reference-panel-title" x="${L}" y="${shareTop-23}">POLYMARKET UP / DOWN · SHARE MIDPOINTS FROM FIRST BOOK SNAPSHOT</text><text class="pred-reference-panel-unit" x="${plotRight}" y="${shareTop-23}" text-anchor="end">PRICE IN CENTS · 0–100¢</text>${closeLine}${spotLines}${shareOpenLines}${shareLines}<g id="predictionReferenceCursor" visibility="hidden"><line id="predictionReferenceCursorLine" class="pred-reference-cursor-line" y1="${priceTop}" y2="${shareBottom}"/>${cursorDots}<circle id="predictionReferenceCursorUp" class="pred-reference-cursor share up" r="5" visibility="hidden"/><circle id="predictionReferenceCursorDown" class="pred-reference-cursor share down" r="5" visibility="hidden"/></g></svg>`;
   const stats=$('predictionReferenceChartStats');
-  if(stats){stats.innerHTML=PREDICTION_REFERENCE_SOURCES.map(source=>{
-    const samples=samplesBySource[source.key];if(!samples.length)return`<div class="pred-reference-stat ${source.key}" data-empty="true"><b>${source.label}</b><span>NO TICKS IN VIEW</span></div>`;
-    const first=samples[0].value,last=samples.at(-1).value,delta=last-first,pct=first?(delta/first)*100:0,lo=Math.min(...samples.map(point=>point.value)),hi=Math.max(...samples.map(point=>point.value)),sign=delta>0?'+':'';
-    return`<div class="pred-reference-stat ${source.key}"><b>${source.key==='oracle'?'CHAINLINK':source.label}</b><span>MOVE ${sign}${predictionReferencePrice(delta,asset)} · ${sign}${pct.toFixed(3)}%</span><small>${predictionReferencePrice(lo,asset)} – ${predictionReferencePrice(hi,asset)} · ${samples.length} TICKS</small></div>`;
-  }).join('');}
-  bindPredictionReferenceInspector(target,viewportStart,windowEnd,duration,{L,R,T,B,W,H,asset,samplesBySource,x,y});
+  if(stats){
+    const spotStats=PREDICTION_REFERENCE_SOURCES.map(source=>{
+      const points=samplesBySource[source.key];if(!points.length)return`<div class="pred-reference-stat ${source.key}" data-empty="true"><b>${source.label}</b><span>NO TICKS IN VIEW</span><small>${source.assets&&!source.assets.includes(asset)?'PAIR NOT SUPPORTED':'Waiting for venue data'}</small></div>`;
+      const values=points.map(point=>point.move_pct).filter(Number.isFinite),last=points.at(-1),lo=values.length?Math.min(...values):0,hi=values.length?Math.max(...values):0,move=last?.move_pct,sign=move>0?'+':'';
+      return`<div class="pred-reference-stat ${source.key}"><b>${source.label}</b><span>FROM OPEN ${Number.isFinite(move)?`${sign}${move.toFixed(3)}%`:'—'}</span><small>${predictionReferencePrice(last?.value,asset)} · ${lo>0?'+':''}${lo.toFixed(3)}% to ${hi>0?'+':''}${hi.toFixed(3)}% · ${points.length} ticks</small></div>`;
+    });
+    for(const side of ['up','down']){
+      const points=visibleShares[side],last=points.at(-1),label=side.toUpperCase(),colorClass=side==='up'?'up':'down';
+      const opened=openingShares[side],delta=opened&&last?(Number(last.value)-Number(opened.value))*100:null,sign=delta>0?'+':'';
+      spotStats.push(points.length?`<div class="pred-reference-stat share ${colorClass}"><b>POLY ${label}</b><span>${(Number(last.value)*100).toFixed(1)}¢ · ${delta==null?'OPEN —':`OPEN ${(Number(opened.value)*100).toFixed(1)}¢ · Δ ${sign}${delta.toFixed(1)}¢`}</span><small>${points.length} book snapshots · last ${clock(last.t)} UTC</small></div>`:`<div class="pred-reference-stat share ${colorClass}" data-empty="true"><b>POLY ${label}</b><span>NO BOOK DATA</span><small>Waiting for stored CLOB midpoint</small></div>`);
+    }
+    stats.innerHTML=spotStats.join('');
+  }
+  bindPredictionReferenceInspector(target,viewportStart,windowEnd,duration,{L,plotRight,priceTop,priceBottom,shareTop,shareBottom,W,H,asset,samplesBySource,visibleShares,anchorPrice,x,yMove,yShare});
 }
 function bindPredictionReferenceInspector(target,viewportStart,windowEnd,duration,chart){
   const svg=target.querySelector('svg'),inspector=$('predictionReferenceInspector');if(!svg||!inspector)return;
-  const names={oracle:'CHAINLINK',coinbase:'COINBASE',binance:'BINANCE'};
+  const names=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,source.label]));
   const clockText=ts=>new Date(ts).toLocaleTimeString([],{timeZone:'UTC',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+' UTC';
-  const tolerance=Math.max(1000,Math.min(2000,duration*.003));
+  const tolerance=Math.max(1000,Math.min(2500,duration*.004));
   const nearest=(points,time)=>{
     if(!points?.length)return null;
-    let lo=0,hi=points.length;
-    while(lo<hi){const mid=(lo+hi)>>1;if(points[mid].t<time)lo=mid+1;else hi=mid;}
+    let lo=0,hi=points.length;while(lo<hi){const mid=(lo+hi)>>1;if(points[mid].t<time)lo=mid+1;else hi=mid;}
     const candidates=[points[lo-1],points[lo]].filter(Boolean).sort((a,b)=>Math.abs(a.t-time)-Math.abs(b.t-time));
     const point=candidates[0];return point&&Math.abs(point.t-time)<=tolerance?point:null;
   };
   svg.onpointermove=event=>{
     const matrix=svg.getScreenCTM();if(!matrix)return;
     const screen=svg.createSVGPoint();screen.x=event.clientX;screen.y=event.clientY;
-    const local=screen.matrixTransform(matrix.inverse());if(local.x<chart.L||local.x>chart.W-chart.R||local.y<chart.T||local.y>chart.H-chart.B)return;
-    const fraction=(local.x-chart.L)/(chart.W-chart.L-chart.R),time=viewportStart+fraction*duration,cursor=$('predictionReferenceCursor'),line=$('predictionReferenceCursorLine');
+    const local=screen.matrixTransform(matrix.inverse());
+    if(local.x<chart.L||local.x>chart.plotRight||local.y<chart.priceTop||local.y>chart.shareBottom)return;
+    const fraction=(local.x-chart.L)/(chart.plotRight-chart.L),time=viewportStart+fraction*duration,cursor=$('predictionReferenceCursor'),line=$('predictionReferenceCursorLine');
     if(cursor)cursor.setAttribute('visibility','visible');if(line){line.setAttribute('x1',local.x.toFixed(1));line.setAttribute('x2',local.x.toFixed(1));}
     const rows=PREDICTION_REFERENCE_SOURCES.map(source=>{
-      const point=nearest(chart.samplesBySource[source.key],time),dot=$(`predictionReferenceCursor${source.key[0].toUpperCase()}${source.key.slice(1)}`);
-      if(dot){if(point){dot.setAttribute('visibility','visible');dot.setAttribute('cx',chart.x(point.t).toFixed(1));dot.setAttribute('cy',chart.y(point.value).toFixed(1));}else dot.setAttribute('visibility','hidden');}
-      const offset=point?(point.t-time)/1000:null,offsetLabel=offset==null?'':`${offset>0?'+':''}${offset.toFixed(1)}s`;
-      return`<span class="${source.key}"><b>${names[source.key]}</b> ${point?predictionReferencePrice(point.value,chart.asset):'NO TICK'}<small>${point?`${clockText(point.t)} · ${offsetLabel}`:'outside source cadence'}</small></span>`;
+      const point=nearest(chart.samplesBySource[source.key],time),dot=$(`predictionReferenceCursor${source.key[0].toUpperCase()+source.key.slice(1)}`);
+      if(dot){if(point){dot.setAttribute('visibility','visible');dot.setAttribute('cx',chart.x(point.t).toFixed(1));dot.setAttribute('cy',chart.yMove(point.move_pct).toFixed(1));}else dot.setAttribute('visibility','hidden');}
+      const move=point&&chart.anchorPrice?(point.value/chart.anchorPrice-1)*100:null;
+      return`<span class="${source.key}"><b>${names[source.key]}</b> ${point?predictionReferencePrice(point.value,chart.asset):'NO TICK'}<small>${point?`${move>0?'+':''}${move.toFixed(3)}% · ${clockText(point.t)}`:'outside venue cadence'}</small></span>`;
     });
+    for(const side of ['up','down']){
+      const point=nearest(chart.visibleShares[side],time),dot=$(`predictionReferenceCursor${side[0].toUpperCase()+side.slice(1)}`);
+      if(dot){if(point){dot.setAttribute('visibility','visible');dot.setAttribute('cx',chart.x(point.t).toFixed(1));dot.setAttribute('cy',chart.yShare(point.value).toFixed(1));}else dot.setAttribute('visibility','hidden');}
+      rows.push(`<span class="share ${side}"><b>POLY ${side.toUpperCase()}</b> ${point?`${(point.value*100).toFixed(1)}¢`:'NO BOOK'}<small>${point?clockText(point.t):'outside snapshot cadence'}</small></span>`);
+    }
     inspector.innerHTML=rows.join('');
   };
-  svg.onpointerleave=()=>{const cursor=$('predictionReferenceCursor');if(cursor)cursor.setAttribute('visibility','hidden');inspector.textContent='Move over the chart to inspect exact source prices and timestamps.';};
+  svg.onpointerleave=()=>{const cursor=$('predictionReferenceCursor');if(cursor)cursor.setAttribute('visibility','hidden');inspector.textContent='Move over either plot to inspect source prices, opening-relative moves and UP/DOWN share prices.';};
 }
 function setPredictionReferenceRange(rangeMs){
   const range=Number(rangeMs);if(![0,30000,60000,180000].includes(range))return;
@@ -7536,9 +7666,10 @@ function predictionTradeMarketHref(card,side){
 function renderPredictionTradePanel(board=S.predictionBoard,now=Date.now()){
   const root=$('predictionTradeQuotes'),sides=$('predictionTradeSides');if(!root||!sides)return;
   const asset=S.predictionReferenceAsset||'BTC',label=$('predictionTradeMarketLabel'),state=$('predictionTradeMarketState');
-  if(label)label.textContent=`${asset} · LIVE 5 MIN`;
+  const horizon=Number(S.predictionReferenceHorizon)||300;
+  if(label)label.textContent=`${asset} · LIVE ${horizon/60} MIN`;
   const card=(board?.cards||[]).flatMap(item=>[item,item?.next_window].filter(Boolean))
-    .find(item=>String(item?.asset||'').toUpperCase()===asset&&Number(item?.horizon_seconds)===300&&item?.period==='CURRENT');
+    .find(item=>String(item?.asset||'').toUpperCase()===asset&&Number(item?.horizon_seconds)===horizon&&item?.period==='CURRENT');
   const snapshotAge=predictionSnapshotAge(board),snapshotLimit=Number(board?.snapshot_stale_after_s)||3;
   const snapshotStale=!board||!!board.stale||!!S.predFeedError||!Number.isFinite(snapshotAge)||snapshotAge>snapshotLimit;
   const open=Number(card?.window_open),close=Number(card?.window_close),isCurrent=!!card&&Number.isFinite(open)&&Number.isFinite(close)&&open<=now&&close>now;
@@ -7557,13 +7688,13 @@ function renderPredictionTradePanel(board=S.predictionBoard,now=Date.now()){
     const ask=askFor(side),age=ageFor(side),href=marketHref?predictionTradeMarketHref(card,side):'';
     const quoteState=ask!=null?'live':snapshotStale?'stale':!isCurrent?'closed':age==null?'unknown':age>3?'stale':'waiting';
     const quoteLabel=ask!=null?`BEST ASK · ${age.toFixed(1)}s OLD`:snapshotStale?'FORECAST FEED STALE':!isCurrent?'MARKET CLOSED':age==null?'QUOTE AGE UNKNOWN':age>3?`ASK STALE · ${age.toFixed(1)}s`:'WAITING FOR ASK';
-    const action=href?`<a class="pred-share-buy" href="${esc(href)}" target="_blank" rel="noopener noreferrer" aria-label="Open the ${side} side of the ${asset} five minute market on Polymarket">BUY ${side} ON POLYMARKET <span aria-hidden="true">↗</span></a>`:'<span class="pred-share-buy unavailable" aria-disabled="true">MARKET LINK UNAVAILABLE</span>';
+    const action=href?`<a class="pred-share-buy" href="${esc(href)}" target="_blank" rel="noopener noreferrer" aria-label="Open the ${side} side of the ${asset} ${horizon/60} minute market on Polymarket">BUY ${side} ON POLYMARKET <span aria-hidden="true">↗</span></a>`:'<span class="pred-share-buy unavailable" aria-disabled="true">MARKET LINK UNAVAILABLE</span>';
     return`<article class="pred-share-side ${side.toLowerCase()}" data-quote-state="${quoteState}"><div class="pred-share-side-head"><strong>${side}</strong><span>UP / DOWN SHARE</span></div><div class="pred-share-price-row"><b>${ask==null?'—':`${(ask*100).toFixed(1)}¢`}</b><small>${quoteLabel}</small></div>${action}</article>`;
   };
   sides.innerHTML=sideTile('UP')+sideTile('DOWN');
   if(state){
     const ages=['UP','DOWN'].map(ageFor),fresh=ages.every(age=>age!=null&&age<=3)&&!snapshotStale&&isCurrent;
-    state.textContent=snapshotStale?'FEED STALE · PRICES HIDDEN':!card?'5 MIN MARKET NOT IN SNAPSHOT':!isCurrent?'NO ACTIVE 5 MIN MARKET':fresh?`LIVE · ${fmtSecs(Math.ceil((close-now)/1000))} LEFT`:'WAITING FOR FRESH ASKS';
+    state.textContent=snapshotStale?'FEED STALE · PRICES HIDDEN':!card?`${horizon/60} MIN MARKET NOT IN SNAPSHOT`:!isCurrent?`NO ACTIVE ${horizon/60} MIN MARKET`:fresh?`LIVE · ${fmtSecs(Math.ceil((close-now)/1000))} LEFT`:'WAITING FOR FRESH ASKS';
     state.dataset.state=fresh?'live':snapshotStale?'stale':card&&isCurrent?'partial':'waiting';
   }
 }
@@ -12227,6 +12358,21 @@ button:disabled,[aria-disabled="true"]{cursor:not-allowed!important;opacity:.58}
 #tabManualpred .pred-reference-chart{min-height:0;margin-top:0;border:1px solid #1d3029;border-radius:7px;background:radial-gradient(ellipse at 50% 0%,#101b17 0%,#0a100f 74%);overflow:hidden}
 #tabManualpred .pred-reference-chart svg{display:block;width:100%;height:auto;min-height:0;max-height:none;overflow:visible;touch-action:pan-y}
 #tabManualpred .pred-reference-grid line{stroke:#263a31;stroke-width:1}
+#tabManualpred .pred-reference-grid-line{stroke:#263a31;stroke-width:1}
+#tabManualpred .pred-reference-grid-line.mid{stroke:#3d594c;stroke-dasharray:4 5}
+#tabManualpred .pred-reference-axis{fill:#8ea497;font:13px var(--mono);font-variant-numeric:tabular-nums}
+#tabManualpred .pred-reference-panel-title{fill:#d1e0d5;font:800 15px var(--mono);letter-spacing:.45px}
+#tabManualpred .pred-reference-panel-unit{fill:#869b8e;font:700 11px var(--mono);letter-spacing:.5px}
+#tabManualpred .pred-reference-zero-line{stroke:#d2d987;stroke-width:1.6;stroke-dasharray:7 5;opacity:.8}
+#tabManualpred .pred-reference-close-line{stroke:#ff9b7c;stroke-width:1.7;stroke-dasharray:5 4}
+#tabManualpred .pred-reference-share-line{fill:none;stroke-width:2.6;filter:drop-shadow(0 0 3px currentColor)}
+#tabManualpred .pred-reference-share-line.up{color:#76e4ad;stroke:#76e4ad}
+#tabManualpred .pred-reference-share-line.down{color:#ff858a;stroke:#ff858a}
+#tabManualpred .pred-reference-share-dot.up{fill:#76e4ad}
+#tabManualpred .pred-reference-share-dot.down{fill:#ff858a}
+#tabManualpred .pred-reference-share-open{stroke-width:1.2;stroke-dasharray:5 5;opacity:.45}
+#tabManualpred .pred-reference-share-open.up{stroke:#76e4ad}
+#tabManualpred .pred-reference-share-open.down{stroke:#ff858a}
 #tabManualpred .pred-reference-chart .pred-reference-line{fill:none}
 #tabManualpred .pred-reference-grid text{fill:#93a69a;font:14px var(--mono);font-variant-numeric:tabular-nums}
 #tabManualpred .pred-reference-time-grid{stroke:#1a2a23;stroke-width:1}
@@ -12237,6 +12383,9 @@ button:disabled,[aria-disabled="true"]{cursor:not-allowed!important;opacity:.58}
 #tabManualpred .pred-reference-line.oracle{color:#74e1b1}
 #tabManualpred .pred-reference-line.coinbase{color:#81baff}
 #tabManualpred .pred-reference-line.binance{color:#f2bd72}
+#tabManualpred .pred-reference-line.kraken{color:#b69aff}
+#tabManualpred .pred-reference-line.gemini{color:#ff92c7}
+#tabManualpred .pred-reference-line.okx{color:#f28876}
 #tabManualpred .pred-reference-line[data-fresh=false]{filter:none}
 #tabManualpred .pred-reference-dot{stroke:#07100c;stroke-width:2.5}
 #tabManualpred .pred-reference-leader{fill:none;stroke-width:1.4;stroke-dasharray:3 3;opacity:.78}
@@ -12256,25 +12405,54 @@ button:disabled,[aria-disabled="true"]{cursor:not-allowed!important;opacity:.58}
 #tabManualpred .pred-reference-cursor.oracle{fill:#74e1b1}
 #tabManualpred .pred-reference-cursor.coinbase{fill:#81baff}
 #tabManualpred .pred-reference-cursor.binance{fill:#f2bd72}
-#tabManualpred .pred-reference-chart-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-top:8px}
+#tabManualpred .pred-reference-cursor.kraken{fill:#b69aff}
+#tabManualpred .pred-reference-cursor.gemini{fill:#ff92c7}
+#tabManualpred .pred-reference-cursor.okx{fill:#f28876}
+#tabManualpred .pred-reference-cursor.share.up{fill:#76e4ad}
+#tabManualpred .pred-reference-cursor.share.down{fill:#ff858a}
+#tabManualpred .pred-reference-chart-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:8px}
 #tabManualpred .pred-reference-stat{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;align-items:center;min-width:0;padding:8px 10px;border:1px solid #20342b;border-left:3px solid #74e1b1;border-radius:5px;background:#0c1411;font:8px var(--mono);font-variant-numeric:tabular-nums}
 #tabManualpred .pred-reference-stat.coinbase{border-left-color:#81baff}
 #tabManualpred .pred-reference-stat.binance{border-left-color:#f2bd72}
+#tabManualpred .pred-reference-stat.kraken{border-left-color:#b69aff}
+#tabManualpred .pred-reference-stat.gemini{border-left-color:#ff92c7}
+#tabManualpred .pred-reference-stat.okx{border-left-color:#f28876}
+#tabManualpred .pred-reference-stat.share.up{border-left-color:#76e4ad}
+#tabManualpred .pred-reference-stat.share.down{border-left-color:#ff858a}
 #tabManualpred .pred-reference-stat>b{grid-row:1/3;color:#d7e4da;font-size:8px}
 #tabManualpred .pred-reference-stat>span{overflow:hidden;color:#adcfb7;text-overflow:ellipsis;white-space:nowrap}
 #tabManualpred .pred-reference-stat small{overflow:hidden;color:#7f9788;text-overflow:ellipsis;white-space:nowrap}
 #tabManualpred .pred-reference-stat[data-empty=true]>span{grid-column:2;color:#c7a875}
-#tabManualpred .pred-reference-inspector{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:7px;padding:7px 9px;border:1px solid #1e3028;border-radius:5px;background:#0a100e;color:#8fa196;font:8px var(--mono);font-variant-numeric:tabular-nums}
+#tabManualpred .pred-reference-inspector{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:7px;padding:7px 9px;border:1px solid #1e3028;border-radius:5px;background:#0a100e;color:#8fa196;font:8px var(--mono);font-variant-numeric:tabular-nums}
 #tabManualpred .pred-reference-inspector>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #tabManualpred .pred-reference-inspector b{margin-right:5px;color:#cfddd2}
 #tabManualpred .pred-reference-inspector small{display:block;margin-top:3px;color:#7e9185}
 #tabManualpred .pred-reference-inspector .oracle b{color:#74e1b1}
 #tabManualpred .pred-reference-inspector .coinbase b{color:#81baff}
 #tabManualpred .pred-reference-inspector .binance b{color:#f2bd72}
+#tabManualpred .pred-reference-inspector .kraken b{color:#b69aff}
+#tabManualpred .pred-reference-inspector .gemini b{color:#ff92c7}
+#tabManualpred .pred-reference-inspector .okx b{color:#f28876}
+#tabManualpred .pred-reference-inspector .share.up b{color:#76e4ad}
+#tabManualpred .pred-reference-inspector .share.down b{color:#ff858a}
+#tabManualpred .pred-reference-forecast{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:8px;margin-top:8px}
+#tabManualpred .pred-reference-forecast-call,#tabManualpred .pred-reference-forecast-probability,#tabManualpred .pred-reference-forecast-open{display:grid;gap:4px;min-width:0;padding:10px 12px;border:1px solid #24372e;border-radius:6px;background:linear-gradient(135deg,#101b16,#0b1210);font-variant-numeric:tabular-nums}
+#tabManualpred .pred-reference-forecast-call{border-left:3px solid #93a99b}
+#tabManualpred .pred-reference-forecast-call.up{border-left-color:#76e4ad}
+#tabManualpred .pred-reference-forecast-call.down{border-left-color:#ff858a}
+#tabManualpred .pred-reference-forecast-call>small,#tabManualpred .pred-reference-forecast-probability>small,#tabManualpred .pred-reference-forecast-open>small{color:#83978b;font:700 8px var(--mono);letter-spacing:.55px}
+#tabManualpred .pred-reference-forecast-call>strong{color:#e1ebe3;font:800 17px var(--mono);letter-spacing:.35px}
+#tabManualpred .pred-reference-forecast-call.up>strong b{color:#76e4ad}
+#tabManualpred .pred-reference-forecast-call.down>strong b{color:#ff858a}
+#tabManualpred .pred-reference-forecast-probability>strong{color:#b9f4d1;font:800 20px var(--mono)}
+#tabManualpred .pred-reference-forecast-probability>span,#tabManualpred .pred-reference-forecast-open>span{overflow:hidden;color:#82968a;font:8px var(--mono);text-overflow:ellipsis;white-space:nowrap}
+#tabManualpred .pred-reference-forecast-open>strong{color:#e0c982;font:750 17px var(--mono)}
+#tabManualpred .pred-reference-forecast-empty{grid-column:1/-1;padding:10px 12px;border:1px solid #24372e;border-radius:6px;color:#9bab9e;font:700 9px var(--mono);letter-spacing:.5px}
 #tabManualpred .pred-reference-note{margin-top:7px;font-size:8px;line-height:1.5}
 @media(max-width:700px){
   #tabManualpred .pred-reference-dock{padding:10px 9px 9px}
   #tabManualpred .pred-reference-quotes{margin-top:8px}
+  #tabManualpred .pred-reference-quotes{grid-template-columns:repeat(2,minmax(0,1fr))}
   #tabManualpred .pred-reference-source{min-height:67px;padding:8px 7px;gap:5px}
   #tabManualpred .pred-reference-source-head>span{font-size:8px}
   #tabManualpred .pred-reference-source-head>small{font-size:7px}
@@ -12297,18 +12475,23 @@ button:disabled,[aria-disabled="true"]{cursor:not-allowed!important;opacity:.58}
   #tabManualpred .pred-reference-range>span{font-size:7px}
   #tabManualpred .pred-reference-range button{min-height:30px;padding:5px 7px;font-size:7px}
   #tabManualpred .pred-reference-chart-live{font-size:7px}
-  #tabManualpred .pred-reference-grid text,#tabManualpred .pred-reference-time{font-size:17px}
-  #tabManualpred .pred-reference-stage-label{font-size:15px}
+  #tabManualpred .pred-reference-chart-live{max-width:100%;white-space:normal;line-height:1.5}
+  #tabManualpred .pred-reference-grid text,#tabManualpred .pred-reference-time,#tabManualpred .pred-reference-axis{font-size:15px}
+  #tabManualpred .pred-reference-stage-label{font-size:14px}
+  #tabManualpred .pred-reference-panel-title{font-size:16px}
+  #tabManualpred .pred-reference-panel-unit{font-size:12px}
   #tabManualpred .pred-reference-edge-label{font-size:14px}
   #tabManualpred .pred-reference-official-label{font-size:13px}
-  #tabManualpred .pred-reference-chart-stats{grid-template-columns:minmax(0,1fr);gap:4px}
+  #tabManualpred .pred-reference-chart-stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:4px}
   #tabManualpred .pred-reference-stat{grid-template-columns:82px minmax(0,1fr);gap:3px 7px;padding:6px 8px;font-size:7px}
   #tabManualpred .pred-reference-stat>b{grid-row:1/3;font-size:7px}
   #tabManualpred .pred-reference-stat>span{font-size:7px}
   #tabManualpred .pred-reference-stat small{grid-column:2;text-align:left;font-size:6px}
   #tabManualpred .pred-reference-stat[data-empty=true]>span{grid-column:auto}
-  #tabManualpred .pred-reference-inspector{grid-template-columns:minmax(0,1fr);gap:3px;font-size:7px}
+  #tabManualpred .pred-reference-inspector{grid-template-columns:repeat(2,minmax(0,1fr));gap:3px;font-size:7px}
   #tabManualpred .pred-reference-inspector small{display:inline;margin-left:5px}
+  #tabManualpred .pred-reference-forecast{grid-template-columns:minmax(0,1fr);gap:5px}
+  #tabManualpred .pred-reference-forecast-call,#tabManualpred .pred-reference-forecast-probability,#tabManualpred .pred-reference-forecast-open{padding:8px 9px}
   #tabManualpred .pred-reference-note{font-size:7px}
 }
 </style>

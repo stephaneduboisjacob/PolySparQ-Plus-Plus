@@ -710,6 +710,34 @@ void Pg::insert_coinbase_tick(const std::string& asset, double price,
     }
 }
 
+void Pg::insert_spot_exchange_tick(const std::string& venue,
+                                   const std::string& asset,
+                                   const std::string& pair,
+                                   double price, double bid, double bid_size,
+                                   double ask, double ask_size,
+                                   std::int64_t exchange_ts_ms,
+                                   std::int64_t received_ts_ms) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        pqxx::work tx{*conn_};
+        tx.exec_params(
+            "INSERT INTO vp.spot_exchange_ticks "
+            "(venue, asset, pair, ts, received_at, exchange_ts_ms, price, "
+            " bid_price, bid_size, ask_price, ask_size) "
+            "VALUES ($1, $2, $3, to_timestamp($4/1000.0), "
+            "to_timestamp($5/1000.0), $4, $6, $7, $8, $9, $10) "
+            "ON CONFLICT (venue, asset, exchange_ts_ms, bid_price, ask_price) DO NOTHING",
+            venue, asset, pair, (long long)exchange_ts_ms,
+            (long long)received_ts_ms, price, bid, bid_size, ask, ask_size);
+        tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_spot_exchange_tick", e.what());
+        spdlog::warn("pg insert_spot_exchange_tick failed: {}", e.what());
+    } catch (const std::exception& e) {
+        spdlog::warn("pg insert_spot_exchange_tick failed: {}", e.what());
+    }
+}
+
 void Pg::insert_window_event(const std::string& condition_id,
                              const std::string& event_type,
                              const std::string& payload_json) noexcept {

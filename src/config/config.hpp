@@ -52,6 +52,14 @@ struct BinanceConfig {
     // Empty = disabled.
     std::string              futures_ws_url;
 };
+struct SpotFeedsConfig {
+    bool        enabled = true;
+    // Local feed-proxy fan-out endpoints. FEEDPROXY_PORT_BASE shifts these
+    // together for isolated proxy instances; each URL can also be overridden.
+    std::string kraken_ws_url = "ws://127.0.0.1:9105";
+    std::string gemini_ws_url = "ws://127.0.0.1:9106";
+    std::string okx_ws_url = "ws://127.0.0.1:9107";
+};
 struct PolygonConfig {
     std::string rpc_url;
 };
@@ -761,6 +769,7 @@ struct Config {
     PgConfig            postgres;
     PolymarketConfig    polymarket;
     BinanceConfig       binance;
+    SpotFeedsConfig     spot_feeds;
     PolygonConfig       polygon;
     LlmConfig           llm;
     StrategyHot         strategy;

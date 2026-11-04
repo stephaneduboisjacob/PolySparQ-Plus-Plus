@@ -10,6 +10,9 @@
 //   rtds (oracle) ws://127.0.0.1:9102  <- wss://ws-live-data.polymarket.com
 //   binance       ws://127.0.0.1:9103  <- wss://stream.binance.com:9443/stream?streams=...
 //   coinbase      ws://127.0.0.1:9104  <- wss://ws-feed.exchange.coinbase.com
+//   kraken        ws://127.0.0.1:9105  <- wss://ws.kraken.com/v2
+//   gemini        ws://127.0.0.1:9106  <- wss://ws.gemini.com
+//   okx           ws://127.0.0.1:9107  <- wss://ws.okx.com/ws/v5/public
 //
 // Design:
 //   - upstream frame  -> fan out verbatim (as text) to every connected client.
@@ -98,6 +101,9 @@ const std::vector<Feed> kFeeds = {
                  "btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/"
                  "xrpusdt@bookTicker", 9103},
     {"coinbase", "wss://ws-feed.exchange.coinbase.com",                  9104},
+    {"kraken",   "wss://ws.kraken.com/v2",                              9105},
+    {"gemini",   "wss://ws.gemini.com",                                 9106},
+    {"okx",      "wss://ws.okx.com/ws/v5/public",                       9107},
 };
 
 class FeedHub;
@@ -627,8 +633,8 @@ int main() {
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
     spdlog::flush_on(spdlog::level::info);
 
-    // Ports default to 9101-9104; FEEDPROXY_PORT_BASE shifts them (base+0..3) so a
-    // test instance can run alongside the live one (e.g. base=9201 → 9201-9204).
+    // Ports default to 9101-9107; FEEDPROXY_PORT_BASE shifts them together so an
+    // isolated proxy can run alongside the live one (e.g. base=9201 → 9201-9207).
     std::vector<Feed> feeds = kFeeds;
     if (const char* base = std::getenv("FEEDPROXY_PORT_BASE")) {
         std::uint16_t b = static_cast<std::uint16_t>(std::atoi(base));

@@ -22,6 +22,7 @@ enum class PersistSource : std::size_t {
     OracleTick,
     BinanceTick,
     CoinbaseTick,
+    SpotExchangeTick,
     FeatureSnapshot,
     ImpulseShadow,
     CrossAssetSyncShadow,
@@ -43,6 +44,7 @@ constexpr std::string_view persist_source_name(PersistSource source) noexcept {
     case PersistSource::OracleTick: return "oracle_tick";
     case PersistSource::BinanceTick: return "binance_tick";
     case PersistSource::CoinbaseTick: return "coinbase_tick";
+    case PersistSource::SpotExchangeTick: return "spot_exchange_tick";
     case PersistSource::FeatureSnapshot: return "feature_snapshot";
     case PersistSource::ImpulseShadow: return "impulse_shadow";
     case PersistSource::CrossAssetSyncShadow: return "cross_asset_sync_shadow";

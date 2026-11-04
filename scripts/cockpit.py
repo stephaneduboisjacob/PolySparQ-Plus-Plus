@@ -3236,19 +3236,27 @@ def api_prediction_reference(asset, horizon_seconds, window_open_ms,
     now_ms = int(time.time() * 1000)
     tick_end_ms = min(now_ms, window_close_ms)
     source_queries = (
-        ("oracle", "oracle_ticks", "asset", asset),
-        ("coinbase", "coinbase_ticks", "asset", asset),
-        ("binance", "binance_ticks", "symbol", SYMBOL[asset]),
+        ("oracle", "oracle_ticks", "asset", asset, None, None),
+        ("coinbase", "coinbase_ticks", "asset", asset, None, None),
+        ("binance", "binance_ticks", "symbol", SYMBOL[asset], None, None),
+        ("kraken", "spot_exchange_ticks", "asset", asset, "venue", "kraken"),
+        ("gemini", "spot_exchange_ticks", "asset", asset, "venue", "gemini"),
+        ("okx", "spot_exchange_ticks", "asset", asset, "venue", "okx"),
     )
     series, latest, errors = {}, {}, {}
-    for name, table, key_column, key_value in source_queries:
+    for name, table, key_column, key_value, extra_column, extra_value in source_queries:
         # Table and key-column names come only from the constant tuple above.
+        where = f"{key_column}=%s"
+        params = [key_value]
+        if extra_column:
+            where += f" AND {extra_column}=%s"
+            params.append(extra_value)
         try:
             rows = q(f"""WITH ranked AS (
                     SELECT ts,price,row_number() OVER (ORDER BY ts) AS rn,
                            count(*) OVER () AS total
                     FROM vp.{table}
-                    WHERE {key_column}=%s
+                    WHERE {where}
                       AND ts>=to_timestamp(%s/1000.0)
                       AND ts<=to_timestamp(%s/1000.0)
                 )
@@ -3257,7 +3265,7 @@ def api_prediction_reference(asset, horizon_seconds, window_open_ms,
                 WHERE total<=%s OR rn=1 OR rn=total
                    OR mod(rn-1,greatest(1,ceil(total::numeric/%s)::bigint))=0
                 ORDER BY ts LIMIT %s""",
-                (key_value, window_open_ms, tick_end_ms,
+                (*params, window_open_ms, tick_end_ms,
                  point_limit, point_limit, point_limit)) if tick_end_ms >= window_open_ms else []
             series[name] = [{"ts_ms": int(row["ts_ms"]), "price": float(row["price"])}
                             for row in rows if row.get("ts_ms") is not None and row.get("price") is not None]
@@ -3265,12 +3273,24 @@ def api_prediction_reference(asset, horizon_seconds, window_open_ms,
             series[name] = []
             errors[name] = str(exc)[:180]
         try:
-            row = q(f"""SELECT (extract(epoch FROM ts)*1000)::bigint AS ts_ms,price
-                         FROM vp.{table} WHERE {key_column}=%s
-                         ORDER BY ts DESC LIMIT 1""", (key_value,), one=True)
-            latest[name] = ({"ts_ms": int(row["ts_ms"]), "price": float(row["price"]),
-                             "age_ms": max(0, now_ms - int(row["ts_ms"]))}
-                            if row and row.get("ts_ms") is not None and row.get("price") is not None else None)
+            received_fields = (", (extract(epoch FROM received_at)*1000)::bigint AS received_ts_ms,"
+                               " bid_price, ask_price, pair") if table == "spot_exchange_ticks" else ""
+            row = q(f"""SELECT (extract(epoch FROM ts)*1000)::bigint AS ts_ms{received_fields},price
+                         FROM vp.{table} WHERE {where}
+                         ORDER BY ts DESC LIMIT 1""", tuple(params), one=True)
+            if row and row.get("ts_ms") is not None and row.get("price") is not None:
+                latest_tick = {"ts_ms": int(row["ts_ms"]), "price": float(row["price"]),
+                               "age_ms": max(0, now_ms - int(row["ts_ms"]))}
+                if table == "spot_exchange_ticks":
+                    if row.get("received_ts_ms") is not None:
+                        latest_tick["received_ts_ms"] = int(row["received_ts_ms"])
+                        latest_tick["received_age_ms"] = max(0, now_ms - int(row["received_ts_ms"]))
+                    for field in ("bid_price", "ask_price", "pair"):
+                        if row.get(field) is not None:
+                            latest_tick[field] = row[field]
+                latest[name] = latest_tick
+            else:
+                latest[name] = None
         except Exception as exc:
             latest[name] = None
             errors.setdefault(name, str(exc)[:180])
@@ -3289,14 +3309,85 @@ def api_prediction_reference(asset, horizon_seconds, window_open_ms,
         if not window or window.get(price_key) is None:
             return None
         return {"price": float(window[price_key]),
-                "ts_ms": int(window[ts_key]) if window.get(ts_key) is not None else None}
+                "ts_ms": int(window[ts_key]) if window.get(ts_key) is not None else None,
+                "source": window.get("settlement_source") or "prediction history"}
+
+    open_reference = official_reference("open_price", "open_price_ts_ms")
+    close_reference = official_reference("close_price", "close_price_ts_ms")
+    market = None
+    share_series = {"up": [], "down": []}
+    latest_shares = {"up": None, "down": None}
+    try:
+        market = q("""SELECT condition_id,yes_token_id,no_token_id,target_price
+                     FROM vp.pm_markets
+                     WHERE asset=%s AND horizon_seconds=%s
+                       AND window_open=to_timestamp(%s/1000.0)
+                     ORDER BY last_seen DESC LIMIT 1""",
+                   (asset, horizon_seconds, window_open_ms), one=True)
+        if market and market.get("condition_id"):
+            share_rows = q("""WITH ranked AS (
+                         SELECT side_label,ts,
+                                COALESCE(midprice, CASE
+                                  WHEN best_bid IS NOT NULL AND best_ask IS NOT NULL
+                                  THEN (best_bid+best_ask)/2.0 END) AS price,
+                                row_number() OVER (PARTITION BY side_label ORDER BY ts) AS rn,
+                                count(*) OVER (PARTITION BY side_label) AS total
+                         FROM vp.pm_book_snapshots
+                         WHERE condition_id=%s AND ts>=to_timestamp(%s/1000.0)
+                           AND ts<=to_timestamp(%s/1000.0)
+                           AND (midprice IS NOT NULL OR
+                                (best_bid IS NOT NULL AND best_ask IS NOT NULL))
+                     )
+                     SELECT side_label::text AS side,
+                            (extract(epoch FROM ts)*1000)::bigint AS ts_ms,price
+                     FROM ranked
+                     WHERE price IS NOT NULL AND price>=0 AND price<=1
+                       AND (total<=%s OR rn=1 OR rn=total
+                         OR mod(rn-1,greatest(1,ceil(total::numeric/%s)::bigint))=0)
+                     ORDER BY ts LIMIT %s""",
+                          (market["condition_id"], window_open_ms, tick_end_ms,
+                           point_limit, point_limit, point_limit)) if tick_end_ms >= window_open_ms else []
+            for row in share_rows:
+                side = str(row.get("side") or "").lower()
+                if side not in share_series or row.get("ts_ms") is None or row.get("price") is None:
+                    continue
+                point = {"ts_ms": int(row["ts_ms"]), "price": float(row["price"])}
+                share_series[side].append(point)
+                latest_shares[side] = point
+    except Exception as exc:
+        errors["polymarket"] = str(exc)[:180]
+
+    if open_reference is None and market and market.get("target_price") is not None:
+        try:
+            target = float(market["target_price"])
+            if target > 0:
+                open_reference = {"price": target, "ts_ms": window_open_ms,
+                                  "source": "market target price"}
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if open_reference is None:
+        try:
+            row = q("""SELECT (extract(epoch FROM ts)*1000)::bigint AS ts_ms,price
+                       FROM vp.oracle_ticks WHERE asset=%s
+                         AND ts<=to_timestamp(%s/1000.0)
+                         AND ts>=to_timestamp(%s/1000.0)-interval '15 seconds'
+                       ORDER BY ts DESC LIMIT 1""",
+                    (asset, window_open_ms, window_open_ms), one=True)
+            if row and row.get("price") is not None:
+                open_reference = {"price": float(row["price"]),
+                                  "ts_ms": int(row["ts_ms"]),
+                                  "source": "last Chainlink tick before open"}
+        except Exception as exc:
+            errors.setdefault("open_reference", str(exc)[:180])
     return {
         "asset": asset, "horizon_seconds": horizon_seconds,
         "window_open_ms": window_open_ms, "window_close_ms": window_close_ms,
         "server_ts_ms": now_ms, "point_limit": point_limit,
         "series": series, "latest": latest, "errors": errors,
-        "open_reference": official_reference("open_price", "open_price_ts_ms"),
-        "close_reference": official_reference("close_price", "close_price_ts_ms"),
+        "open_reference": open_reference,
+        "close_reference": close_reference,
+        "share_series": share_series, "latest_shares": latest_shares,
+        "condition_id": market.get("condition_id") if market else None,
         "settlement_source": window.get("settlement_source") if window else None,
         "settlement_window_s": window.get("settlement_window_s") if window else None,
         "outcome": window.get("outcome") if window else None,

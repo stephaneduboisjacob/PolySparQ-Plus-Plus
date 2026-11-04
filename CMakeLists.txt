@@ -50,6 +50,7 @@ add_library(vp_core STATIC
     src/net/http_client.cpp
     src/feeds/binance.cpp
     src/feeds/coinbase_ws.cpp
+    src/feeds/spot_exchange_ws.cpp
     src/feeds/polymarket_md.cpp
     src/feeds/polymarket_user_ws.cpp
     src/feeds/polymarket_rest.cpp
