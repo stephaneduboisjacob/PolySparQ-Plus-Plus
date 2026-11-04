@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "PolySparQ++ Cockpit",
+  "short_name": "PolySparQ++",
+  "description": "Live market intelligence and trading operations cockpit.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#07090d",
+  "theme_color": "#0c1018",
+  "icons": [
+    {
+      "src": "/cockpit-assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/cockpit-assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

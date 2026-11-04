@@ -61,7 +61,7 @@ entry_order_mode = "maker"
 maker_improve_ticks = 1
 maker_reprice_ms = 250
 maker_poll_ms = 250
-maker_max_age_ms = 5000
+maker_max_age_ms = 0
 maker_cancel_before_close_ms = 45000
 
 lead_lag_scalp_enabled = true
@@ -101,4 +101,5 @@ coinbase_ticks_enabled = false
 window_events_enabled = true
 features_enabled = false
 book_snapshots_enabled = false
+book_snapshot_levels = 20
 pm_trades_enabled = false

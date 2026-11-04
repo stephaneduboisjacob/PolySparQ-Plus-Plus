@@ -92,6 +92,7 @@ h1{font-size:22px;font-weight:700;letter-spacing:-.02em}
   .market-tape-chart polyline{fill:none;stroke-width:2.25;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
   .market-tape-chart circle{stroke:var(--panel);stroke-width:1.5}
   .market-tape-axis{display:flex;justify-content:space-between;color:var(--dim);font-size:9px;margin-top:-2px}
+  .market-tape-legend{display:flex;justify-content:center;gap:14px;color:var(--mut);font-size:9px;margin-top:2px}
   .market-tape-stats{display:grid;grid-template-columns:1fr 1fr;gap:7px 10px;margin-top:8px}
   .market-tape-stats span{display:block;color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.06em}
   .market-tape-stats b{display:block;color:var(--text);font-family:var(--mono);font-size:11px;margin-top:2px}
@@ -515,7 +516,7 @@ pre,code{font-family:var(--mono)}
   <section class="view" id="v-markets">
     <div class="v4-hero"><img class="v4-hero-art" src="/assets_v4/markets-hero.webp?v=5.1" alt="Market structure artwork"><div class="v4-hero-copy"><div class="v4-kicker">Market intelligence</div><div class="v4-title">Markets in motion</div><div class="v4-desc">Current and upcoming windows, with prediction context and the live book where available.</div></div><img class="v4-hero-full-logo" src="/assets_v4/polysparq_logo_full_with_name.webp?v=5.3" alt="PolySparQ++"></div>
     <div class="card market-tape-panel">
-      <div class="market-tape-head"><div><h2 class="sec" style="margin-top:0">Window tape <span class="cnt">current market · stored CLOB snapshots</span></h2><div class="market-tape-note">UP-side midpoint movement and recorded public trades for each current window. Empty tape can mean local capture is disabled or that this market has not been tracked yet. Descriptive history only, not a forecast or trade signal.</div></div><button class="ghost" onclick="loadMarkets()" title="Refresh markets and stored tape">↻ Refresh</button></div>
+      <div class="market-tape-head"><div><h2 class="sec" style="margin-top:0">Window tape <span class="cnt">current market · stored CLOB snapshots</span></h2><div class="market-tape-note">UP and DOWN midpoint movement plus recorded public trades for each current window. Empty tape can mean local capture is disabled or that this market has not been tracked yet. Descriptive history only, not a forecast or trade signal.</div></div><button class="ghost" onclick="loadMarkets()" title="Refresh markets and stored tape">↻ Refresh</button></div>
       <div class="market-tape-grid" id="mktTape"><div class="empty">Loading current-window tape…</div></div>
     </div>
     <div class="grid g3" id="mktAll"></div>
@@ -627,6 +628,9 @@ pre,code{font-family:var(--mono)}
   <section class="view" id="v-feeds">
     <div class="v4-hero"><img class="v4-hero-art" src="/assets_v4/feeds-hero.webp?v=5.1" alt="Market feed signal artwork"><div class="v4-hero-copy"><div class="v4-kicker">Data quality · freshness</div><div class="v4-title">Feed Quality</div><div class="v4-desc">Connected sources are only useful when their updates are current and coherent.</div></div><img class="v4-hero-full-logo" src="/assets_v4/polysparq_logo_full_with_name.webp?v=5.3" alt="PolySparQ++"></div>
     <div class="card" style="margin-bottom:12px"><h2 class="sec" style="margin-top:0">Prediction-market capture <span class="cnt">profile-file settings · running instances</span></h2><div id="captureNotice" class="market-tape-note" style="margin:0 0 8px">Checking capture profile settings…</div><div id="captureProfiles" class="capture-profile-grid"><div class="empty">Loading profile settings…</div></div></div>
+    <div class="card" style="margin-bottom:12px"><h2 class="sec" style="margin-top:0">Persistence queue <span class="cnt">runtime counters · refreshes every 5s</span></h2><div id="persistQueueNotice" class="market-tape-note" style="margin:0 0 8px">Checking database-writer pressure…</div><div id="persistQueue" class="capture-profile-grid"><div class="empty">Loading runtime queue status…</div></div></div>
+    <div class="card" style="margin-bottom:12px"><h2 class="sec" style="margin-top:0">Market-data storage <span class="cnt">PostgreSQL relation sizes · refreshes every 60s</span></h2><div id="marketStorageNotice" class="market-tape-note" style="margin:0 0 8px">Checking database footprint…</div><div id="marketStorage" class="capture-profile-grid"><div class="empty">Loading table-size statistics…</div></div></div>
+    <div class="card" style="margin-bottom:12px"><h2 class="sec" style="margin-top:0">Recent book-history coverage <span class="cnt">tracked closed windows · rolling 24h · bounded sample</span></h2><div id="marketArchiveCoverageNotice" class="market-tape-note" style="margin:0 0 8px">Checking recent local book history…</div><div id="marketArchiveCoverage" class="capture-profile-grid"><div class="empty">Loading recent window coverage…</div></div></div>
     <div class="card"><table id="tFeeds"><thead><tr><th>source</th><th>key</th><th class="num">last tick age</th><th class="num">ticks (1h)</th><th>integrity</th></tr></thead><tbody></tbody></table></div>
   </section>
 
@@ -975,29 +979,41 @@ function renderMarkets(elId,cards,withGates){
     </div>`}).join('')||'<div class="empty">no markets</div>';
 }
 let marketTapeRequest=0;
-function marketTapeChart(samples,asset,move){
-  const pts=(Array.isArray(samples)?samples:[]).map(p=>({bucket:Number(p?.[0]),mid:Number(p?.[1])})).filter(p=>Number.isFinite(p.bucket)&&Number.isFinite(p.mid));
-  if(!pts.length)return '<div class="empty">No stored book samples in this window.</div>';
-  const lo=Math.min(...pts.map(p=>p.mid)),hi=Math.max(...pts.map(p=>p.mid)),span=hi-lo||0.000001;
-  const first=pts[0].bucket,last=pts[pts.length-1].bucket,xspan=last-first||1;
-  const coords=pts.map(p=>({x:5+(p.bucket-first)*230/xspan,y:57-(p.mid-lo)*45/span}));
-  const color=move==null?'#4d9fff':move>=0?'#2ecc8f':'#ff4d5f';
-  const groups=[];let group=[];
-  pts.forEach((p,i)=>{if(i&&p.bucket-pts[i-1].bucket>1){if(group.length)groups.push(group);group=[]}group.push(coords[i])});
-  if(group.length)groups.push(group);
-  const lines=groups.filter(g=>g.length>1).map(g=>`<polyline points="${g.map(p=>`${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}" stroke="${color}"></polyline>`).join('');
-  const dots=coords.map(p=>`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="1.8" fill="${color}"></circle>`).join('');
-  return `<svg class="market-tape-chart" viewBox="0 0 240 64" role="img" aria-label="Stored UP midpoint history for ${esc(asset)}">${lines}${dots}</svg><div class="market-tape-axis"><span>First stored bucket</span><span>Latest stored bucket</span></div>`;
+function marketTapeChart(upSamples,downSamples,asset,upMove,downMove){
+  const parse=(samples,label,move)=>({label,move,points:(Array.isArray(samples)?samples:[]).map(p=>({bucket:Number(p?.[0]),mid:Number(p?.[1])})).filter(p=>Number.isFinite(p.bucket)&&Number.isFinite(p.mid))});
+  const series=[parse(upSamples,'UP',upMove),parse(downSamples,'DOWN',downMove)];
+  const points=series.flatMap(s=>s.points);
+  if(!points.length)return '<div class="empty">No stored book samples in this window.</div>';
+  const lo=Math.min(...points.map(p=>p.mid)),hi=Math.max(...points.map(p=>p.mid)),span=hi-lo||0.000001;
+  const first=Math.min(...points.map(p=>p.bucket)),last=Math.max(...points.map(p=>p.bucket)),xspan=last-first||1;
+  const drawn=series.map(s=>{
+    const coords=s.points.map(p=>({bucket:p.bucket,x:5+(p.bucket-first)*230/xspan,y:57-(p.mid-lo)*45/span}));
+    const color=s.move==null?'#8da0b7':s.move>=0?'#2ecc8f':'#ff4d5f';
+    const groups=[];let group=[];
+    coords.forEach((p,i)=>{if(i&&p.bucket-coords[i-1].bucket>1){if(group.length)groups.push(group);group=[]}group.push(p)});
+    if(group.length)groups.push(group);
+    const dash=s.label==='DOWN'?' stroke-dasharray="4 3"':'';
+    const lines=groups.filter(g=>g.length>1).map(g=>`<polyline points="${g.map(p=>`${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')}" stroke="${color}"${dash}></polyline>`).join('');
+    const dots=coords.map(p=>`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="1.8" fill="${color}"></circle>`).join('');
+    return {label:s.label,color,lines,dots};
+  });
+  const lines=drawn.map(s=>s.lines).join(''),dots=drawn.map(s=>s.dots).join('');
+  const legend=drawn.map(s=>`<span style="color:${s.color}">● ${s.label}</span>`).join('');
+  return `<svg class="market-tape-chart" viewBox="0 0 240 64" role="img" aria-label="Stored UP and DOWN midpoint history for ${esc(asset)}">${lines}${dots}</svg><div class="market-tape-axis"><span>First stored bucket</span><span>Latest stored bucket</span></div><div class="market-tape-legend">${legend}</div>`;
 }
 function renderMarketTapeCard(card,m){
   const move=m?.move_cents==null?null:Number(m.move_cents),change=move==null?'—':`${move>0?'+':''}${move.toFixed(1)}¢`;
+  const downMove=m?.down_move_cents==null?null:Number(m.down_move_cents),downChange=downMove==null?'—':`${downMove>0?'+':''}${downMove.toFixed(1)}¢`;
   const cls=move==null?'':move>0?'pos':move<0?'neg':'';
-  const bookAge=m?.book_age_s==null?'Unavailable':`${Number(m.book_age_s).toFixed(1)}s`;
+  const downCls=downMove==null?'':downMove>0?'pos':downMove<0?'neg':'';
+  const bookAge=`${m?.book_age_s==null?'—':Number(m.book_age_s).toFixed(1)+'s'} / ${m?.down_book_age_s==null?'—':Number(m.down_book_age_s).toFixed(1)+'s'}`;
   const first=m?.first_up_mid==null?'—':`${(Number(m.first_up_mid)*100).toFixed(1)}¢`;
   const latest=m?.latest_up_mid==null?'—':`${(Number(m.latest_up_mid)*100).toFixed(1)}¢`;
+  const firstDown=m?.first_down_mid==null?'—':`${(Number(m.first_down_mid)*100).toFixed(1)}¢`;
+  const latestDown=m?.latest_down_mid==null?'—':`${(Number(m.latest_down_mid)*100).toFixed(1)}¢`;
   const trades=m?`${Number(m.trade_count||0).toLocaleString()} · $${Number(m.notional_usd||0).toFixed(2)}`:'—';
-  const chart=m?marketTapeChart(m.up_midpoints,card.asset,move):'<div class="empty">Window tape is not available for this market.</div>';
-  return `<article class="market-tape-card"><div class="head"><div><div class="market-name">${esc(card.asset||'Market')} · ${Number(card.horizon_seconds||0)/60}m</div><div class="market-phase">Current window · UP midpoint</div></div><span class="tag ${cls}">${esc(change)}</span></div>${chart}<div class="market-tape-stats"><div><span>Move · first to latest</span><b class="${cls}">${esc(change)}</b></div><div><span>Latest book age</span><b>${esc(bookAge)}</b></div><div><span>First / latest midpoint</span><b>${esc(first)} / ${esc(latest)}</b></div><div><span>Public prints · both outcomes</span><b>${esc(trades)}</b></div></div></article>`;
+  const chart=m?marketTapeChart(m.up_midpoints,m.down_midpoints,card.asset,move,downMove):'<div class="empty">Window tape is not available for this market.</div>';
+  return `<article class="market-tape-card"><div class="head"><div><div class="market-name">${esc(card.asset||'Market')} · ${Number(card.horizon_seconds||0)/60}m</div><div class="market-phase">Current window · both outcome midpoints</div></div><span class="tag ${cls}">UP ${esc(change)}</span></div>${chart}<div class="market-tape-stats"><div><span>UP move · first to latest</span><b class="${cls}">${esc(change)}</b></div><div><span>DOWN move · first to latest</span><b class="${downCls}">${esc(downChange)}</b></div><div><span>UP first / latest midpoint</span><b>${esc(first)} / ${esc(latest)}</b></div><div><span>DOWN first / latest midpoint</span><b>${esc(firstDown)} / ${esc(latestDown)}</b></div><div><span>Latest book age · UP / DOWN</span><b>${esc(bookAge)}</b></div><div><span>Public prints · both outcomes</span><b>${esc(trades)}</b></div></div></article>`;
 }
 async function loadMarketTape(currentCards){
   const target=$('mktTape'),request=++marketTapeRequest;
@@ -1442,9 +1458,10 @@ async function forceSell(i){
 async function loadFeeds(){
   try{const f=await jf('/api/v3/feeds');
     const captureSupported=Array.isArray(f.capture_profiles),profiles=captureSupported?f.capture_profiles:[];
+    const queueSupported=Array.isArray(f.persistence_queue),queueRows=queueSupported?f.persistence_queue:[];
     const flag=value=>value===true?'<span class="pill win">ON</span>':value===false?'<span class="pill stop">OFF</span>':'<span class="pill">UNKNOWN</span>';
-    $('captureProfiles').innerHTML=!captureSupported?'<div class="empty">This cockpit server does not report capture-profile status.</div>':profiles.map(p=>`<article class="capture-profile"><div class="capture-profile-head"><span class="capture-profile-name">${esc(p.instance)}</span><span class="pill ${p.config_readable?'ok':'loss'}">${p.config_readable?'FILE READABLE':'READ FAILED'}</span></div><div class="capture-flag-row"><span>CLOB book snapshots</span>${flag(p.book_snapshots_enabled)}</div><div class="capture-flag-row"><span>Public trade capture</span>${flag(p.pm_trades_enabled)}</div><div class="capture-profile-source">Profile-file values only · process-loaded values are not verified here.</div></article>`).join('')||'<div class="empty">No active bot profiles reported.</div>';
-    const bookOff=profiles.length>0&&profiles.every(p=>p.book_snapshots_enabled===false),tradesOff=profiles.length>0&&profiles.every(p=>p.pm_trades_enabled===false),unknown=profiles.some(p=>!p.config_readable||p.book_snapshots_enabled==null||p.pm_trades_enabled==null);
+    $('captureProfiles').innerHTML=!captureSupported?'<div class="empty">This cockpit server does not report capture-profile status.</div>':profiles.map(p=>`<article class="capture-profile"><div class="capture-profile-head"><span class="capture-profile-name">${esc(p.instance)}</span><span class="pill ${p.config_readable?'ok':'loss'}">${p.config_readable?'FILE READABLE':'READ FAILED'}</span></div><div class="capture-flag-row"><span>CLOB book snapshots</span>${flag(p.book_snapshots_enabled)}</div><div class="capture-flag-row"><span>Stored levels per side · 0–20</span><b>${Number.isInteger(p.book_snapshot_levels)?`${p.book_snapshot_levels} / 20`:'UNKNOWN'}</b></div><div class="capture-flag-row"><span>Public trade capture</span>${flag(p.pm_trades_enabled)}</div><div class="capture-profile-source">0 stores quote/summary fields only; 1–20 stores that many bid and ask levels. Profile-file values only · process-loaded values are not verified here.</div></article>`).join('')||'<div class="empty">No active bot profiles reported.</div>';
+    const bookOff=profiles.length>0&&profiles.every(p=>p.book_snapshots_enabled===false),tradesOff=profiles.length>0&&profiles.every(p=>p.pm_trades_enabled===false),unknown=profiles.some(p=>!p.config_readable||p.book_snapshots_enabled==null||p.book_snapshot_levels==null||p.pm_trades_enabled==null);
     const notices=[];
     if(bookOff)notices.push('No running profile file enables book snapshots; the Window tape chart may stay empty.');
     if(tradesOff)notices.push('No running profile file enables public-trade capture; print counts may stay at zero.');
@@ -1454,8 +1471,57 @@ async function loadFeeds(){
     if(captureSupported)notices.push('These are values from profile files, not confirmation of settings already loaded by each process.');
     $('captureNotice').className='market-tape-note'+(bookOff||tradesOff||unknown||!captureSupported?' warn-panel':'');
     $('captureNotice').textContent=notices.join(' ');
+    const storage=f.market_storage,storageSupported=!!storage&&storage.available!==false&&Array.isArray(storage.relations),storageRows=storageSupported?storage.relations:[];
+    const storageLabel={pm_book_snapshots:'CLOB book snapshots',pm_trades:'Public trades',pm_markets:'Market metadata'};
+    const fmtBytes=value=>{let n=Number(value);if(!Number.isFinite(n)||n<0)return'—';const units=['B','KiB','MiB','GiB','TiB'];let i=0;while(n>=1024&&i<units.length-1){n/=1024;i++}return`${n.toFixed(i>=3?2:1)} ${units[i]}`};
+    const fmtRows=value=>{const n=Number(value);return Number.isFinite(n)&&n>=0?'≈'+Math.round(n).toLocaleString():'—'};
+    $('marketStorage').innerHTML=!storageSupported?'<div class="empty">This cockpit response does not provide PostgreSQL storage statistics.</div>':storageRows.map(r=>`<article class="capture-profile"><div class="capture-profile-head"><span class="capture-profile-name">${esc(storageLabel[r.relname]||r.relname||'Market data')}</span><span class="pill">${fmtBytes(r.total_bytes)} total</span></div><div class="capture-flag-row"><span>Approx. live / dead rows</span><b>${fmtRows(r.approx_rows)} / ${fmtRows(r.approx_dead_rows)}</b></div><div class="capture-flag-row"><span>Main relation / indexes</span><b>${fmtBytes(r.table_bytes)} / ${fmtBytes(r.index_bytes)}</b></div><div class="capture-profile-source">PostgreSQL estimates; total footprint includes indexes and TOAST data.</div></article>`).join('')||'<div class="empty">No market-data relation statistics returned.</div>';
+    const storageNotices=[];
+    if(!storageSupported)storageNotices.push(storage?.available===false?'Storage statistics are unavailable.':'This cockpit server does not report storage statistics.');
+    else storageNotices.push('Row counts are PostgreSQL estimates. This view is read-only and does not apply a retention policy.');
+    if(storageSupported&&storage.sampled_ms)storageNotices.push('Sampled '+new Date(Number(storage.sampled_ms)).toLocaleTimeString());
+    $('marketStorageNotice').className='market-tape-note'+(!storageSupported?' warn-panel':'');
+    $('marketStorageNotice').textContent=storageNotices.join(' ');
+    const archive=f.market_archive_coverage,archiveSupported=!!archive&&archive.available!==false&&Array.isArray(archive.groups),archiveGroups=archiveSupported?archive.groups:[];
+    const archiveCount=value=>{const n=Number(value);return Number.isFinite(n)&&n>=0?Math.round(n):0};
+    const archiveHasGap=archiveGroups.some(g=>archiveCount(g.windows_with_snapshots)<archiveCount(g.markets_sampled)||archiveCount(g.windows_with_both_sides)<archiveCount(g.windows_with_snapshots)||(archiveCount(g.expected_buckets_15s)>archiveCount(g.snapshot_buckets_15s))||(archiveCount(g.expected_buckets_15s)>archiveCount(g.both_sides_buckets_15s)));
+    $('marketArchiveCoverage').innerHTML=!archiveSupported?'<div class="empty">This cockpit response does not provide recent archive coverage.</div>':archiveGroups.map(g=>{
+      const markets=archiveCount(g.markets_sampled),any=archiveCount(g.windows_with_snapshots),both=archiveCount(g.windows_with_both_sides),rows=archiveCount(g.snapshot_rows);
+      const buckets=archiveCount(g.snapshot_buckets_15s),bothBuckets=archiveCount(g.both_sides_buckets_15s),expected=archiveCount(g.expected_buckets_15s),tracked=archiveCount(g.windows_with_tracked_time),complete=archiveCount(g.windows_with_full_15s_coverage);
+      const pct=markets?Math.round(100*any/markets):0,bucketPct=expected?Math.round(100*buckets/expected):0,bothBucketPct=expected?Math.round(100*bothBuckets/expected):0,mins=Number(g.horizon_seconds)===300?5:Number(g.horizon_seconds)===900?15:null;
+      return `<article class="capture-profile"><div class="capture-profile-head"><span class="capture-profile-name">${esc(g.asset)} · ${mins?mins+'m':'window'}</span><span class="pill ${markets&&any===markets?'win':'stop'}">${pct}% with books</span></div><div class="capture-flag-row"><span>Tracked windows with any snapshot</span><b>${any} / ${markets}</b></div><div class="capture-flag-row"><span>Tracked windows with both outcomes</span><b>${both} / ${markets}</b></div><div class="capture-flag-row"><span>15s tracked-time buckets with a snapshot</span><b>${buckets.toLocaleString()} / ${expected.toLocaleString()} · ${bucketPct}%</b></div><div class="capture-flag-row"><span>15s buckets with both outcomes</span><b>${bothBuckets.toLocaleString()} / ${expected.toLocaleString()} · ${bothBucketPct}%</b></div><div class="capture-flag-row"><span>Tracked windows with both sides in every bucket</span><b>${complete} / ${tracked}</b></div><div class="capture-flag-row"><span>Tracked-time snapshot rows</span><b>${rows.toLocaleString()}</b></div></article>`;
+    }).join('')||'<div class="empty">No recent closed tracked windows in the sample.</div>';
+    const archiveNotices=[];
+    if(!archiveSupported)archiveNotices.push(archive?.available===false?'Recent archive coverage is unavailable.':'This cockpit server does not report recent archive coverage.');
+    else if(!archive.sampled_markets)archiveNotices.push('No tracked closed 5m/15m windows were found in the last 24 hours.');
+    else archiveNotices.push(`Sampled ${archiveCount(archive.sampled_markets)} most recent tracked closed windows from the last 24 hours${archive.truncated?' (capped at 500)':''}.`);
+    if(archiveSupported&&archiveHasGap)archiveNotices.push('Some sampled windows have no snapshots, lack one outcome side, or have incomplete 15s coverage for one or both outcomes.');
+    if(archiveSupported&&archiveGroups.length)archiveNotices.push('15s buckets start at each market’s first-seen time. Bucket coverage helps reveal long gaps; it does not prove continuous cadence or full-depth capture.');
+    $('marketArchiveCoverageNotice').className='market-tape-note'+(!archiveSupported||archiveHasGap?' warn-panel':'');
+    $('marketArchiveCoverageNotice').textContent=archiveNotices.join(' ');
+    const queueTotals=queueRows.map(row=>{
+      const q=row.queue;
+      if(!q)return {row,total:0,markup:`<article class="capture-profile"><div class="capture-profile-head"><span class="capture-profile-name">${esc(row.instance)}</span><span class="pill">${row.runtime_available?'NO QUEUE DATA':'RUNTIME UNVERIFIED'}</span></div><div class="capture-profile-source">${row.runtime_available?'This running process has not published queue counters yet. Restart it with the updated binary to report them.':'Queue counters require a fresh PID-matched runtime status.'}</div></article>`};
+      const counts=Object.entries(q.rejected_by_source||{}).filter(([,n])=>Number(n)>0);
+      const total=counts.reduce((sum,[,n])=>sum+Number(n),0);
+      const pct=q.capacity?Math.min(100,100*q.pending/q.capacity):0;
+      const pressure=pct>=80?'loss':'ok';
+      const rejects=counts.length?counts.map(([name,n])=>`${esc(name.replaceAll('_',' '))}: ${Number(n).toLocaleString()}`).join(' · '):'None since process start';
+      return {row,total,markup:`<article class="capture-profile"><div class="capture-profile-head"><span class="capture-profile-name">${esc(row.instance)}</span><span class="pill ${pressure}">${q.pending}/${q.capacity} queued · ${pct.toFixed(0)}%</span></div><div class="capture-flag-row"><span>Rejected persistence enqueues</span><b class="${total?'neg':''}">${total.toLocaleString()} since process start</b></div><div class="capture-profile-source">${rejects}</div></article>`};
+    });
+    $('persistQueue').innerHTML=!queueSupported?'<div class="empty">This cockpit API does not report persistence-queue telemetry.</div>':queueTotals.map(x=>x.markup).join('')||'<div class="empty">No running bot instances to report.</div>';
+    const queueMissing=queueTotals.some(x=>!x.row.queue),queueDrops=queueTotals.some(x=>x.total>0),queueHot=queueTotals.some(x=>x.row.queue&&x.row.queue.capacity&&100*x.row.queue.pending/x.row.queue.capacity>=80);
+    const queueNotices=[];
+    if(!queueSupported)queueNotices.push('Queue telemetry is absent from this cockpit response.');
+    else if(!queueRows.length)queueNotices.push('No running bot runtime status was reported.');
+    if(queueMissing)queueNotices.push('At least one process has no queue counters yet; it may need the updated binary and a restart.');
+    if(queueDrops)queueNotices.push('These are rejected nonblocking database-queue enqueues by source, not exchange order rejections. Dropped feed or telemetry records can leave data gaps.');
+    if(queueHot)queueNotices.push('At least one writer queue is at 80% capacity or higher.');
+    if(queueSupported&&queueRows.length&&!queueMissing&&!queueDrops)queueNotices.push('No rejected writes reported. Queue snapshots refresh every five seconds.');
+    $('persistQueueNotice').className='market-tape-note'+(queueDrops||queueHot||queueMissing||!queueSupported?' warn-panel':'');
+    $('persistQueueNotice').textContent=queueNotices.join(' ');
     $('tFeeds').querySelector('tbody').innerHTML=(f.feeds||[]).map(x=>`<tr><td>${esc(x.source)}</td><td>${esc(x.key)}</td><td class="num">${x.age_s!=null?x.age_s.toFixed(0)+'s':'—'}</td><td class="num">${x.n1h}</td><td><span class="pill ${x.ok?'win':'loss'}">${x.ok?'FRESH':'STALE/GAPPY'}</span></td></tr>`).join('')||`<tr><td colspan="5"><div style="text-align:center;padding:6px"><img src="/assets_v4/empty-feed.webp?v=5.1" style="max-width:280px;width:70%;border-radius:10px;opacity:.9"><div class="empty" style="padding:4px">no feed data in window</div></div></td></tr>`;
-  }catch(e){$('captureNotice').className='market-tape-note warn-panel';$('captureNotice').textContent='Capture status unavailable: '+e.message;$('captureProfiles').innerHTML='<div class="empty">Profile capture status could not be loaded.</div>';console.error(e);toast(e.message,'err')}
+  }catch(e){$('captureNotice').className='market-tape-note warn-panel';$('captureNotice').textContent='Capture status unavailable: '+e.message;$('captureProfiles').innerHTML='<div class="empty">Profile capture status could not be loaded.</div>';$('persistQueueNotice').className='market-tape-note warn-panel';$('persistQueueNotice').textContent='Persistence queue status unavailable: '+e.message;$('persistQueue').innerHTML='<div class="empty">Runtime queue status could not be loaded.</div>';$('marketStorageNotice').className='market-tape-note warn-panel';$('marketStorageNotice').textContent='Storage statistics unavailable.';$('marketStorage').innerHTML='<div class="empty">Market-data storage status could not be loaded.</div>';$('marketArchiveCoverageNotice').className='market-tape-note warn-panel';$('marketArchiveCoverageNotice').textContent='Recent book-history coverage unavailable.';$('marketArchiveCoverage').innerHTML='<div class="empty">Archive coverage status could not be loaded.</div>';console.error(e);toast(e.message,'err')}
 }
 async function loadAnalyticsScreen(){
   const scope=S.inst;
@@ -1582,14 +1648,20 @@ async function loadBoard(force){
     $('boardGrid').innerHTML=cards.map(c=>{
       const ready2=['ready','provisional'].includes(c.model_status);const reportedDir=c.direction==='UP'||c.direction==='DOWN'?c.direction:'WAIT';const dir=ready2?reportedDir:'WAIT';
       const ask=dir==='UP'?c.polymarket_up_price:c.polymarket_down_price;
+      const pair=c.paired_outcome_economics,pairAge=c.book_age_s==null?NaN:Number(c.book_age_s);
+      const pairValid=pair?.available===true&&Number.isFinite(Number(pair.net_edge_per_pair))&&Number.isFinite(pairAge)&&pairAge>=0&&pairAge<=3;
+      const pairEdge=pairValid?Number(pair.net_edge_per_pair):null;
+      const pairDepth=pairValid&&pair.top_ask_pair_depth!=null?`${Number(pair.top_ask_pair_depth).toFixed(2)} pairs at top asks`:'top-ask depth unavailable';
+      const pairText=pairValid?`$${Number(pair.net_cost_per_pair).toFixed(5)} cost · $${Number(pair.estimated_fee_per_pair).toFixed(5)} estimated fees · ${pairEdge>=0?'+':''}$${pairEdge.toFixed(5)} / pair · ${pairDepth}`:'Unavailable · both fresh asks and a supported fee schedule are required';
+      const pairClass=pairEdge==null?'':pairEdge>0?'pos':pairEdge<0?'neg':'';
       const p=(c.up_probability??0.5)*100;
       const shadow=Number(c.experimental_up_probability??c.up_probability??0.5)*100;
       const shadowDir=c.experimental_direction||'WAIT';
       const lead=(c.signal_contributions||[]).map(x=>`<div class="board-signal"><span title="${esc(x.detail||'')}">${esc(x.name)}${x.available?'':' · unavailable'}</span><b>${x.available?`${Number(x.delta_pp)>0?'+':''}${Number(x.delta_pp||0).toFixed(2)}pt`:'—'}</b></div>`).join('');
       const tint=dir==='UP'?'up':dir==='DOWN'?'down':'wait';
       const pxv=v=>v==null?'—':(100*v).toFixed(1)+'¢';
-      const gap=v=>v==null?'—':`${Number(v)>0?'+':''}${Number(v).toFixed(1)}pt`;
-      const range=c.prediction_basis==='polymarket_midpoint'?'CLOB QUOTE RANGE':'SHADOW VOL SENSITIVITY';
+      const gap=v=>v==null?'—':`${Number(v)>0?'+':''}${(100*Number(v)).toFixed(1)}pt`;
+      const range='PRIMARY VOLATILITY SENSITIVITY';
       const candidate=c.alert_candidate;
       const selectedOutcome=c.market_outcome_indices?.[dir];
       return `<article class="mcard board-card board-direction-${tint}" style="cursor:pointer" data-url="${esc(c.market_url||'')}" data-outcome-index="${Number.isInteger(selectedOutcome)?selectedOutcome:''}" onclick="openBoardMarket(this)">
@@ -1598,9 +1670,9 @@ async function loadBoard(force){
       <span class="tag" style="margin-left:auto">${c.period==='NEXT'?fmtSecs3(c.seconds_until_open)+' to open':fmtSecs3(c.seconds_left)+' left'}</span></div>
       <div class="mrow"><span class="board-forecast" style="font-size:22px;font-family:var(--mono);font-weight:800">${ready2?`${esc(dir)} FORECAST · ${(100*(c.chance??Math.max(Number(c.up_probability),1-Number(c.up_probability)))).toFixed(1)}%`:'WAITING FOR FRESH INPUTS'}</span></div>
       <div class="gd" style="height:7px;border-radius:4px;background:linear-gradient(90deg,rgba(255,77,95,.78),rgba(139,151,166,.3) 50%,rgba(46,204,143,.78));position:relative;margin:7px 0"><i style="position:absolute;top:-3px;width:3px;height:13px;background:#fff;box-shadow:0 0 8px #fff;left:${ready2?p:50}%"></i></div>
-      <div class="mrow"><span>primary UP / CLOB midpoint</span><b>${pxv(c.up_probability)} / ${pxv(c.polymarket_up)}</b></div>
+      <div class="mrow"><span>primary independent UP / CLOB midpoint</span><b>${pxv(c.up_probability)} / ${pxv(c.polymarket_up)}</b></div>
       <div class="mrow"><span>shadow ensemble UP / side</span><b>${pxv(c.experimental_up_probability)} · ${esc(shadowDir)}</b></div>
-      <div class="mrow"><span>shadow minus market gap</span><b class="${cl(c.model_market_gap||0)}">${gap(c.model_market_gap)}</b></div>
+      <div class="mrow"><span>primary minus CLOB midpoint</span><b class="${cl(c.model_market_gap||0)}">${gap(c.model_market_gap)}</b></div>
       <div class="mrow"><span>primary net / quote-stress edge</span><b class="${cl(c.model_edge||0)}">${edgeText(c.model_edge)} / ${edgeText(c.conservative_edge)}</b></div>
       <div class="mrow"><span>shadow net / stressed edge</span><b class="${cl(c.experimental_model_edge||0)}">${edgeText(c.experimental_model_edge)} / ${edgeText(c.experimental_conservative_edge)}</b></div>
       <div class="mrow"><span>ask / hurdle</span><b>${pxv(ask)} / ${pxv(c.execution_hurdle)}</b></div>
@@ -1609,8 +1681,10 @@ async function loadBoard(force){
       <div class="board-inputs"><div class="board-input"><small>CHAINLINK SPOT / OPEN</small><b>${Number(c.spot||0).toLocaleString(undefined,{maximumFractionDigits:c.asset==='XRP'?5:2})} / ${Number(c.strike||0).toLocaleString(undefined,{maximumFractionDigits:c.asset==='XRP'?5:2})}</b><em>${esc(c.reference||'reference unavailable')} · ${Number(c.reference_age_s||0).toFixed(1)}s age</em></div><div class="board-input"><small>COINBASE / BINANCE</small><b>${c.coinbase_price==null?'—':Number(c.coinbase_price).toLocaleString(undefined,{maximumFractionDigits:c.asset==='XRP'?5:2})} / ${c.binance_price==null?'—':Number(c.binance_price).toLocaleString(undefined,{maximumFractionDigits:c.asset==='XRP'?5:2})}</b><em>ages ${c.coinbase_age_s==null?'—':Number(c.coinbase_age_s).toFixed(1)+'s'} / ${c.binance_age_s==null?'—':Number(c.binance_age_s).toFixed(1)+'s'}</em></div><div class="board-input"><small>TAKER FLOW · 60s</small><b>${c.order_flow?.imbalance==null?'—':`${(100*Number(c.order_flow.imbalance)).toFixed(0)}% net buy`}</b><em>$${Number((c.order_flow?.buy_usd||0)+(c.order_flow?.sell_usd||0)).toLocaleString(undefined,{maximumFractionDigits:0})} Binance notional</em></div><div class="board-input"><small>CANDLE TREND / RSI</small><b>${c.technical?.r5_pct==null?'—':`${Number(c.technical.r5_pct)>=0?'+':''}${Number(c.technical.r5_pct).toFixed(3)}% / 5m`} · ${c.technical?.rsi14==null?'—':Number(c.technical.rsi14).toFixed(0)}</b><em>${Number(c.candle_store?.samples||0)} closed 1m returns · ${Number(c.candle_age_s||0).toFixed(1)}s age</em></div></div>
       <details class="board-method" onclick="event.stopPropagation()"><summary>Signal calculations & source timestamps</summary><div style="margin-top:7px">${lead||'<div class="mut">No signal contributions available.</div>'}<p style="margin-top:8px">Basis: ${esc(c.prediction_basis||'waiting')} · Chainlink key: ${esc(c.settlement_source||'market settlement source unavailable')} · feed times: ${esc(JSON.stringify(c.input_timestamps||{}))}. News matches: ${Number(c.news_signal?.matched_headlines||0)} · weighted sentiment: ${Number(c.news_signal?.score||0).toFixed(2)}. Candle source: ${esc(c.candle_store?.source||'unavailable')}.</p></div></details>
       <p class="mut" style="font-size:9.5px;line-height:1.5;margin-top:9px">${esc(c.manual_note||'Waiting for an explanation from the model.')}</p>
-      <div class="mrow"><span>${esc(c.prediction_basis==='polymarket_midpoint'?'PRIMARY BASIS':'FALLBACK BASIS')}</span><b>${esc(c.prediction_basis||'waiting')}</b></div>
-      <div class="mrow"><span>fee / top ask depth</span><b>${c.fee_rate>=0?(100*c.fee_rate).toFixed(2)+'%':'unknown'} / ${c.predicted_ask_depth==null?'—':Number(c.predicted_ask_depth).toFixed(1)+' sh'}</b></div>
+      <div class="mrow"><span>PRIMARY FORECAST BASIS</span><b>${esc(c.prediction_basis||'waiting')}</b></div>
+      <div class="mrow"><span>Taker fee parameter / top ask depth</span><b>${c.fee_rate>=0?(100*c.fee_rate).toFixed(2)+'%':'unknown'} / ${c.predicted_ask_depth==null?'—':Number(c.predicted_ask_depth).toFixed(1)+' sh'}</b></div>
+      <div class="mrow"><span>UP + DOWN · $1 complete-set payout</span><b class="${pairClass}">${esc(pairText)}</b></div>
+      <div class="mut" style="font-size:9px;line-height:1.45;margin-top:3px">Assumes both shares take liquidity at the current top asks. The fee parameter is not the effective percent of trade value; the estimate applies the per-market curve and rounds upward. Excludes extra slippage and one-leg-only fills; research display only, not an order signal.</div>
       <a class="pred-market-link" href="${esc(c.market_url||'#')}" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open this Polymarket market ↗</a>
       </article>`}).join('')||'<div class="empty">No windows match these filters, or the board is warming up.</div>';
   }catch(e){retryDelay=1000;$('boardGrid').innerHTML=`<div class="empty">prediction feed unavailable: ${esc(e.message)}</div>`}

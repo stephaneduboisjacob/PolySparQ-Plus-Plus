@@ -11,6 +11,7 @@ import subprocess
 import time
 import threading
 import copy
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 
@@ -20,42 +21,51 @@ _quality_cache = {}
 _quality_cache_lock = threading.Lock()
 QUALITY_SUMMARY_REFRESH_SECONDS = 30.0
 ASSETS = ('BTC', 'ETH', 'SOL', 'XRP')
-INDEPENDENT_MODEL_VERSION = 'vantagepulse-independent-v1'
+INDEPENDENT_MODEL_VERSION = 'vantagepulse-independent-v2'
 MODEL_VERSION = INDEPENDENT_MODEL_VERSION
 MARKET_BENCHMARK_VERSION = 'market-benchmark-v5'
-TICK_MODEL_VERSION = 'vantagepulse-tick-5m-v1'
+TICK_MODEL_VERSION = 'vantagepulse-tick-5m-v2'
 SHADOW_CALIBRATION_VERSION = 'multisource-v4'
 SERVER_REFRESH_SECONDS = 1.0
 SNAPSHOT_STALE_SECONDS = 3.0
 MIN_REFRESH_GAP_SECONDS = 0.05
 
-# Fixed, CLOB-free 5-minute cross-feed correction. Fit on resolved
-# reference-v3 checkpoints through 2026-10-01, then scored on the later
-# market-benchmark-v5 checkpoint set (2026-10-05..09). The 15-minute and
-# provisional forecasts stay on the settlement kernel; their tick correction
-# did not survive the same chronological holdout.
-_TICK_5M_INTERCEPT = -0.02298204813944169
-_TICK_5M_KERNEL_LOGIT = 0.8895640438993003
-_TICK_5M_MEANS = (-0.08534611608413564, -0.11399369884483057,
-                  3.6612572379982042, 0.14935617321322972,
-                  0.9914938304016803, 0.9489104751903387,
-                  0.9904961932265687, 0.9508532423208191)
-_TICK_5M_SCALES = (3.0430929665938433, 3.1021673522994617,
-                   2.6683539205081916, 1.0228320507307487,
-                   0.0918358028063144, 0.22018034713472265,
-                   0.09702311286619156, 0.21617435992454478)
-_TICK_5M_WEIGHTS = (0.07423895323941519, 0.019974643436103598,
-                    0.03700499510676714, -0.011664737155675366,
-                    0.007560988398551871, 0.015020063289023845,
-                    -0.032033292240092257, -0.005424155529094445)
-_TICK_5M_TRAINED_THROUGH = 1790836323  # 2026-10-01 06:32:03 UTC
-_TICK_5M_TRAIN_N = 19045
-_TICK_5M_HOLDOUT_N = 3438
-_TICK_5M_HOLDOUT_START = 1791158400  # 2026-10-05 00:00:00 UTC
-_TICK_5M_HOLDOUT_END = 1791590400    # 2026-10-10 00:00:00 UTC
-_TICK_5M_HOLDOUT_BRIER = 0.168435
-_TICK_5M_KERNEL_BRIER = 0.169288
-_TICK_5M_CLOB_BRIER = 0.164335
+# Fixed, CLOB-free 5-minute correction (v2): a 17-feature logistic refit of the
+# settlement kernel on resolved checkpoints. The v1 correction re-scaled the
+# kernel logit with four tape features; the v2 refit re-derives the correction
+# from the raw settlement inputs instead, adding distance-to-strike in
+# volatility units, the seconds-left scale, candle trend and 5m/15m return
+# z-scores, the news pulse and a volatility-regime tilt. Every tape feature
+# (Binance/Coinbase 10s momentum, Chainlink-relative basis) carries an
+# availability flag so a stale feed degrades instead of being imputed.
+# Fitted with L2-regularised logistic regression on 25,712 resolved CLOB-free
+# checkpoints captured before 2026-10-24 and validated on the strictly later
+# 12,652-row holdout, where it beat both the raw kernel and the CLOB midpoint.
+# Polymarket prices never enter the feature vector.
+# Coefficients in feature order:
+#   0 intercept              8 Binance basis availability
+#   1 kernel logit           9 tanh(Binance basis bp / 8)
+#   2 seconds-left / 150    10 Coinbase basis availability
+#   3 distance-to-strike z  11 tanh(Coinbase basis bp / 8)
+#   4 Binance momentum ok   12 candle trend score (-1..1)
+#   5 Binance momentum/10   13 tanh(5m return z / 2)
+#   6 Coinbase momentum ok  14 tanh(15m return z / 2)
+#   7 Coinbase momentum/10  15 tanh(news pulse / 2)
+#                          16 tanh((vol %/min - 0.02) / 0.05)
+_TICK_V2_WEIGHTS = (1.2265, 0.0568, -1.1686, 2.0744,
+                    -0.5120, 0.4970, -0.0932, -0.1351,
+                    0.3749, 0.3822, 0.0341, 0.9743,
+                    -1.2631, 0.6565, 0.1352, -0.4894, 0.1106)
+_TICK_V2_SPLIT_TS = 1792800000  # 2026-10-24 00:00:00 UTC (holdout start)
+_TICK_V2_TRAIN_N = 25712
+_TICK_V2_HOLDOUT_N = 12652
+_TICK_V2_HOLDOUT_BRIER = 0.1420
+_TICK_V2_KERNEL_BRIER = 0.1430
+_TICK_V2_V1_BRIER = 0.1444
+_TICK_V2_CLOB_BRIER = 0.1440
+_TICK_V2_LOGLOSS = 0.4341
+_TICK_V2_V1_LOGLOSS = 0.4412
+_TICK_V2_CLOB_LOGLOSS = 0.4391
 
 
 def age_board(board, now_ms=None, stale_after_s=SNAPSHOT_STALE_SECONDS):
@@ -72,9 +82,16 @@ def age_board(board, now_ms=None, stale_after_s=SNAPSHOT_STALE_SECONDS):
             card['seconds_left'] = max(0, (card['window_close']-now_ms)//1000)
             if card.get('provisional'):
                 card['seconds_until_open'] = max(0, (card['window_open']-now_ms)//1000)
-            for field in ('reference_age_s','candle_age_s','book_age_s','coinbase_age_s','binance_age_s'):
-                if card.get(field) is not None and card[field] >= 0:
-                    card[field] += age
+            for field in ('reference_age_s','candle_age_s','book_age_s',
+                          'polymarket_up_book_age_s','polymarket_down_book_age_s',
+                          'coinbase_age_s','binance_age_s'):
+                raw_age = card.get(field)
+                if raw_age is not None:
+                    try:
+                        value = float(raw_age)
+                    except (TypeError, ValueError, OverflowError):
+                        value = math.nan
+                    card[field] = value + age if math.isfinite(value) and value >= 0 else None
             status = None
             if card.get('provisional') and now_ms >= card['window_open']:
                 status = 'awaiting_open_reference'
@@ -82,7 +99,8 @@ def age_board(board, now_ms=None, stale_after_s=SNAPSHOT_STALE_SECONDS):
                 status = 'closed'
             elif not card.get('provisional') and 0 < card['seconds_left'] <= card.get('settlement_window_s',0):
                 status = 'averaging_window'
-            elif (age > stale_after_s or card.get('reference_age_s', 0) > 5 or
+            elif (age > stale_after_s or card.get('reference_age_s', 0) is None or
+                  card.get('reference_age_s', 0) > 5 or card.get('candle_age_s', -1) is None or
                   card.get('candle_age_s', -1) < 0 or card.get('candle_age_s', 0) > 120):
                 status = 'stale_data'
             if status:
@@ -90,7 +108,7 @@ def age_board(board, now_ms=None, stale_after_s=SNAPSHOT_STALE_SECONDS):
                             model_edge=None, conservative_edge=None, model_market_gap=None,
                             independent_direction='WAIT', independent_model_edge=None,
                             independent_conservative_edge=None, independent_market_gap=None,
-                            alert_candidate=None,
+                            alert_candidate=None, directional_outcome_economics=None,
                             manual_note='Waiting for a fresh forecast for this window.')
                 for field in ('up_probability', 'up_probability_raw', 'probability_low',
                               'probability_high', 'settlement_model_probability',
@@ -98,19 +116,34 @@ def age_board(board, now_ms=None, stale_after_s=SNAPSHOT_STALE_SECONDS):
                               'independent_up_probability', 'independent_up_probability_raw',
                               'independent_probability_low', 'independent_probability_high'):
                     card[field] = None
-            if age > stale_after_s or card.get('book_age_s', 0) > 3:
+            raw_book_age = card.get('book_age_s')
+            try:
+                book_age = float(raw_book_age) if raw_book_age is not None else math.nan
+            except (TypeError, ValueError, OverflowError):
+                book_age = math.nan
+            book_age_fresh = math.isfinite(book_age) and 0 <= book_age <= 3
+            if age > stale_after_s or not book_age_fresh:
                 for field in ('polymarket_up','polymarket_up_price','polymarket_down_price','polymarket_up_bid','polymarket_down_bid','execution_hurdle',
                               'model_edge','conservative_edge','independent_model_edge',
                               'independent_conservative_edge','independent_market_gap',
-                              'predicted_ask_depth','opportunity','alert_candidate'):
+                              'predicted_ask_depth',
+                              'polymarket_up_bid_depth','polymarket_up_ask_depth',
+                              'polymarket_down_bid_depth','polymarket_down_ask_depth',
+                              'opportunity','alert_candidate','directional_outcome_economics'):
                     card[field] = None
+                card['paired_outcome_economics'] = None
     return out
 
 
 class PredictionService:
     """One producer for the whole cockpit; readers never wait for network I/O."""
-    def __init__(self, query, public_json, root, news_fn, interval=SERVER_REFRESH_SECONDS, gate_writer=None):
+    def __init__(self, query, public_json, root, news_fn, interval=SERVER_REFRESH_SECONDS,
+                 history_init=None, history_writer=None, history_resolver=None,
+                 gate_writer=None):
         self.query, self.public_json, self.root, self.news_fn = query, public_json, root, news_fn
+        self.history_init = history_init
+        self.history_writer = history_writer
+        self.history_resolver = history_resolver
         self.gate_writer = gate_writer
         self.interval = max(MIN_REFRESH_GAP_SECONDS, float(interval))
         self._lock = threading.Condition()
@@ -124,11 +157,20 @@ class PredictionService:
         self._version = 0
         self._last_attempt_ms = None
         self._last_success_ms = None
+        self._history_ready = threading.Event()
+        self._history_error = None
+        if not self.history_init:
+            self._history_ready.set()
 
     def start(self):
         with self._lock:
             if self._threads:
                 return
+            if self.history_init:
+                thread = threading.Thread(name='prediction-history-init',
+                                          target=self._init_history, daemon=True)
+                self._threads.append(thread)
+                thread.start()
             for name, target in (('predictions', self._run), ('prediction-outcomes', self._resolve),
                                  ('prediction-news', self._load_news)):
                 thread = threading.Thread(name=name, target=target, daemon=True)
@@ -184,6 +226,12 @@ class PredictionService:
                         self.gate_writer(board)
                     except Exception:
                         pass  # A database outage must not take down the Predictions page.
+                if self.history_writer and self._history_ready.is_set():
+                    try:
+                        self.history_writer(board)
+                        self._history_error = None
+                    except Exception as exc:
+                        self._history_error = type(exc).__name__
                 with self._lock:
                     self._board, self._error = board, None
                     self._last_success_ms = int(time.time()*1000)
@@ -212,7 +260,24 @@ class PredictionService:
                 resolve_pending(self.root, self.public_json)
             except Exception:
                 pass  # first forecast creates the journal; retry next cycle
+            if self.history_resolver and self._history_ready.is_set():
+                try:
+                    self.history_resolver()
+                    self._history_error = None
+                except Exception as exc:
+                    self._history_error = type(exc).__name__
             self._stop.wait(30)
+
+    def _init_history(self):
+        while not self._stop.is_set():
+            try:
+                self.history_init()
+                self._history_error = None
+                self._history_ready.set()
+                return
+            except Exception as exc:
+                self._history_error = type(exc).__name__
+                self._stop.wait(15)
 
     def _load_news(self):
         while not self._stop.is_set():
@@ -286,6 +351,57 @@ def book_top(book):
     return (None, None) if bid is not None and ask is not None and bid > ask else (bid, ask)
 
 
+def ask_book_levels(book):
+    """Return validated ask levels in lowest-price-first order."""
+    levels = []
+    for row in book.get('asks', []) or []:
+        try:
+            price = valid_price(row.get('price'))
+            size = float(row.get('size', 0))
+            if price is not None and math.isfinite(size) and size > 0:
+                levels.append({'price': price, 'size': size})
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            continue
+    return sorted(levels, key=lambda level: level['price'])
+
+
+def _side_book_is_fresh(request, side):
+    """A side is usable only when its own CLOB timestamp is within three seconds."""
+    try:
+        age = float(request.get(f'{side.lower()}_book_age_s'))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(age) and 0 <= age <= 3
+
+
+def _fresh_side_ask_levels(request, side, levels):
+    """Do not reuse raw ask levels when the side's own book timestamp is stale."""
+    return list(levels or []) if _side_book_is_fresh(request, side) else []
+
+
+def _directional_economics_for_request(probability, request, ask_levels, ready=True):
+    """Build a research-only size walk using only independently fresh side books."""
+    if not ready:
+        return None
+
+    fresh_quotes = {}
+    for side in ('UP', 'DOWN'):
+        key = side.lower()
+        if _side_book_is_fresh(request, side):
+            fresh_quotes[side] = (request.get(f'{key}_ask'),
+                                  request.get(f'{key}_ask_depth'),
+                                  ask_levels.get(side))
+        else:
+            fresh_quotes[side] = (None, None, [])
+
+    return binary_directional_economics(
+        probability, fresh_quotes['UP'][0], fresh_quotes['DOWN'][0],
+        fresh_quotes['UP'][1], fresh_quotes['DOWN'][1],
+        request.get('fee_rate'), request.get('fee_exponent'),
+        up_ask_levels=_fresh_side_ask_levels(request, 'UP', fresh_quotes['UP'][2]),
+        down_ask_levels=_fresh_side_ask_levels(request, 'DOWN', fresh_quotes['DOWN'][2]))
+
+
 def fee_parameters(market):
     # Absent metadata is not evidence of a fee-free market.
     if market.get('feesEnabled') is False:
@@ -300,13 +416,241 @@ def fee_parameters(market):
     return -1.0, 1
 
 
+def binary_pair_economics(up_ask, down_ask, up_depth, down_depth,
+                          fee_rate, fee_exponent, up_ask_levels=None,
+                          down_ask_levels=None):
+    """Estimate paired UP/DOWN taker costs across visible ask depth.
+
+    Fees use the documented per-market taker formula and are rounded upward to
+    1e-5 USDC so this display does not understate the fee estimate. Missing
+    quotes/schedules fail closed. Size scenarios are read-only estimates, not
+    guaranteed fills or execution/bot-entry signals.
+    """
+    def dec(value):
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+
+    up, down, rate, exponent = map(dec, (up_ask, down_ask, fee_rate, fee_exponent))
+    if (up is None or down is None or rate is None or exponent is None or
+            not Decimal(0) < up < Decimal(1) or
+            not Decimal(0) < down < Decimal(1) or
+            not Decimal(0) <= rate <= Decimal(1) or exponent != Decimal(1)):
+        return {"available": False, "reason": "both asks and a supported fee schedule are required"}
+
+    increment = Decimal("0.00001")
+    try:
+        up_fee = (rate * up * (Decimal(1) - up)).quantize(
+            increment, rounding=ROUND_CEILING)
+        down_fee = (rate * down * (Decimal(1) - down)).quantize(
+            increment, rounding=ROUND_CEILING)
+    except InvalidOperation:
+        return {"available": False, "reason": "fee estimate is outside supported numeric range"}
+    gross_cost = up + down
+    fees = up_fee + down_fee
+    net_cost = gross_cost + fees
+    net_edge = Decimal(1) - net_cost
+
+    depths = [dec(up_depth), dec(down_depth)]
+    top_pair_depth = (min(depths) if all(v is not None and v >= 0 for v in depths)
+                      else None)
+
+    def levels(raw, fallback_price, fallback_depth):
+        result = []
+        for level in raw or []:
+            try:
+                price, size = dec(level.get('price')), dec(level.get('size'))
+            except AttributeError:
+                continue
+            if (price is not None and size is not None and
+                    Decimal(0) < price < Decimal(1) and size > 0):
+                result.append((price, size))
+        result.sort(key=lambda level: level[0])
+        if not result:
+            depth = dec(fallback_depth)
+            if depth is not None and depth > 0:
+                result = [(dec(fallback_price), depth)]
+        return result
+
+    up_levels = levels(up_ask_levels, up, up_depth)
+    down_levels = levels(down_ask_levels, down, down_depth)
+    visible_depths = [sum((size for _price, size in book), Decimal(0)) if book else None
+                      for book in (up_levels, down_levels)]
+    visible_pair_depth = (min(visible_depths)
+                          if all(value is not None for value in visible_depths) else None)
+    as_number = lambda value: round(float(value), 8)
+
+    def buy(quantity, book):
+        remaining = Decimal(quantity)
+        gross = Decimal(0)
+        raw_fee = Decimal(0)
+        for price, available in book:
+            taken = min(remaining, available)
+            gross += price * taken
+            raw_fee += rate * price * (Decimal(1) - price) * taken
+            remaining -= taken
+            if remaining <= 0:
+                break
+        if remaining > 0:
+            return None
+        fee = raw_fee.quantize(increment, rounding=ROUND_CEILING)
+        return gross, fee
+
+    size_scenarios = []
+    for quantity in (1, 5, 10, 25):
+        up_fill = buy(quantity, up_levels)
+        down_fill = buy(quantity, down_levels)
+        if up_fill is None or down_fill is None:
+            size_scenarios.append({
+                "shares": quantity, "available": False,
+                "up_visible_shares": (as_number(visible_depths[0])
+                                       if visible_depths[0] is not None else None),
+                "down_visible_shares": (as_number(visible_depths[1])
+                                         if visible_depths[1] is not None else None),
+            })
+            continue
+        scenario_gross = up_fill[0] + down_fill[0]
+        scenario_fees = up_fill[1] + down_fill[1]
+        scenario_net_cost = scenario_gross + scenario_fees
+        total_edge = Decimal(quantity) - scenario_net_cost
+        size_scenarios.append({
+            "shares": quantity, "available": True,
+            "gross_cost": as_number(scenario_gross),
+            "estimated_fees": as_number(scenario_fees),
+            "net_cost": as_number(scenario_net_cost),
+            "total_net_edge": as_number(total_edge),
+            "net_cost_per_pair": as_number(scenario_net_cost / Decimal(quantity)),
+            "net_edge_per_pair": as_number(total_edge / Decimal(quantity)),
+        })
+    return {
+        "available": True,
+        "gross_cost_per_pair": as_number(gross_cost),
+        "estimated_fee_per_pair": as_number(fees),
+        "net_cost_per_pair": as_number(net_cost),
+        "net_edge_per_pair": as_number(net_edge),
+        "top_ask_pair_depth": as_number(top_pair_depth) if top_pair_depth is not None else None,
+        "visible_pair_depth": as_number(visible_pair_depth) if visible_pair_depth is not None else None,
+        "size_scenarios": size_scenarios,
+        "fee_rounding": "conservative_up_1e-5_usdc",
+    }
+
+
+def binary_directional_economics(up_probability, up_ask, down_ask,
+                                 up_depth, down_depth, fee_rate, fee_exponent,
+                                 up_ask_levels=None, down_ask_levels=None):
+    """Walk visible UP/DOWN asks and compare model payout with cost.
+
+    This is a descriptive expected-value scenario, not a recommendation or
+    execution gate. It assumes the independent forecast probability is
+    calibrated and shares settle to $1/$0. Only the supported exponent-1 fee
+    schedule is estimated, with total fees rounded up to $0.00001.
+    """
+    def dec(value):
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+
+    probability, rate, exponent = map(dec, (up_probability, fee_rate, fee_exponent))
+    if (probability is None or not Decimal(0) <= probability <= Decimal(1) or
+            rate is None or not Decimal(0) <= rate <= Decimal(1) or
+            exponent != Decimal(1)):
+        return {"available": False, "reason": "forecast and supported fee schedule are required"}
+
+    def levels(raw, fallback_price, fallback_depth):
+        result = []
+        for level in raw or []:
+            try:
+                price, size = dec(level.get('price')), dec(level.get('size'))
+            except AttributeError:
+                continue
+            if (price is not None and size is not None and
+                    Decimal(0) < price < Decimal(1) and size > 0):
+                result.append((price, size))
+        result.sort(key=lambda level: level[0])
+        if not result:
+            price, depth = dec(fallback_price), dec(fallback_depth)
+            if price is not None and Decimal(0) < price < Decimal(1) and depth is not None and depth > 0:
+                result = [(price, depth)]
+        return result
+
+    books = {
+        "UP": levels(up_ask_levels, up_ask, up_depth),
+        "DOWN": levels(down_ask_levels, down_ask, down_depth),
+    }
+    if not any(books.values()):
+        return {"available": False, "reason": "visible ask depth is unavailable"}
+
+    increment = Decimal("0.00001")
+    as_number = lambda value: round(float(value), 8)
+    sides = {}
+    for side, book in books.items():
+        side_probability = probability if side == "UP" else Decimal(1) - probability
+        visible = sum((size for _price, size in book), Decimal(0)) if book else None
+        scenarios = []
+        for quantity in (1, 5, 10, 25):
+            remaining = Decimal(quantity)
+            gross_cost = Decimal(0)
+            raw_fee = Decimal(0)
+            for price, available in book:
+                taken = min(remaining, available)
+                gross_cost += price * taken
+                raw_fee += rate * price * (Decimal(1) - price) * taken
+                remaining -= taken
+                if remaining <= 0:
+                    break
+            if remaining > 0:
+                scenarios.append({
+                    "shares": quantity, "available": False,
+                    "visible_shares": as_number(visible) if visible is not None else None,
+                })
+                continue
+            fees = raw_fee.quantize(increment, rounding=ROUND_CEILING)
+            net_cost = gross_cost + fees
+            expected_payout = side_probability * Decimal(quantity)
+            expected_net_value = expected_payout - net_cost
+            scenarios.append({
+                "shares": quantity, "available": True,
+                "gross_cost": as_number(gross_cost),
+                "estimated_fees": as_number(fees),
+                "net_cost": as_number(net_cost),
+                "average_ask": as_number(gross_cost / Decimal(quantity)),
+                "model_probability": as_number(side_probability),
+                "expected_payout": as_number(expected_payout),
+                "expected_net_value": as_number(expected_net_value),
+                "break_even_probability": as_number(net_cost / Decimal(quantity)),
+            })
+        sides[side] = {
+            "model_probability": as_number(side_probability),
+            "visible_ask_shares": as_number(visible) if visible is not None else None,
+            "scenarios": scenarios,
+        }
+    return {
+        "available": True, "sides": sides,
+        "fee_rounding": "conservative_up_1e-5_usdc",
+    }
+
+
 def top_depth(book, side, price):
-    if price is None:
+    target = valid_price(price)
+    if target is None:
         return None
     try:
-        return sum(float(x.get('size', 0)) for x in book.get(side, [])
-                   if abs(float(x.get('price', 0))-price) < 1e-9)
-    except (TypeError, ValueError):
+        depth = 0.0
+        for level in book.get(side, []) or []:
+            try:
+                level_price = valid_price(level.get('price'))
+                size = float(level.get('size', 0))
+            except (TypeError, ValueError, OverflowError, AttributeError):
+                continue
+            if (level_price is not None and math.isfinite(size) and size > 0 and
+                    abs(level_price-target) < 1e-9):
+                depth += size
+        return depth if math.isfinite(depth) else None
+    except (TypeError, ValueError, OverflowError, AttributeError):
         return None
 
 
@@ -356,6 +700,10 @@ def _journal(root, cards, markets, public_json, resolve=True):
             db.execute('UPDATE forecasts SET shadow_p=p')
         if 'diagnostics_json' not in columns:
             db.execute('ALTER TABLE forecasts ADD COLUMN diagnostics_json TEXT')
+        if 'static_p' not in columns:
+            # Preserves the raw model output before any future recalibration
+            # layer, so the refit corpus stays separable from displayed p.
+            db.execute('ALTER TABLE forecasts ADD COLUMN static_p REAL')
         # Indexes keep the occasional historical score refresh bounded.
         db.execute('''CREATE INDEX IF NOT EXISTS forecasts_quality_lookup
             ON forecasts(version,bucket) WHERE outcome IS NOT NULL''')
@@ -367,8 +715,9 @@ def _journal(root, cards, markets, public_json, resolve=True):
             applied_at INTEGER NOT NULL)''')
         now = int(time.time())
         insert = '''INSERT OR IGNORE INTO forecasts
-            (cid,slug,bucket,captured,closes,p,market_p,outcome,version,shadow_p,diagnostics_json)
-            VALUES (?,?,?,?,?,?,?,NULL,?,?,?)'''
+            (cid,slug,bucket,captured,closes,p,market_p,outcome,version,shadow_p,static_p,
+             diagnostics_json)
+            VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?)'''
         for c in cards:
             if c['model_status'] == 'ready' and c.get('condition_id'):
                 bucket = c['seconds_left']//60
@@ -376,13 +725,15 @@ def _journal(root, cards, markets, public_json, resolve=True):
                 db.execute(insert,
                     (c['condition_id'],c['slug'],c['seconds_left']//60,now,c['window_close']//1000,
                      c['up_probability'],c['polymarket_up'],MODEL_VERSION,
-                     c.get('experimental_up_probability', c['up_probability']),diagnostics))
+                     c.get('experimental_up_probability', c['up_probability']),
+                     c.get('independent_up_probability_raw'),diagnostics))
                 if (INDEPENDENT_MODEL_VERSION != MODEL_VERSION and
                         c.get('independent_up_probability') is not None):
                     db.execute(insert,
                         (c['condition_id'],c['slug'],bucket,now,c['window_close']//1000,
                          c['independent_up_probability'],c['polymarket_up'],
-                         INDEPENDENT_MODEL_VERSION,c['independent_up_probability'],diagnostics))
+                         INDEPENDENT_MODEL_VERSION,c['independent_up_probability'],
+                         c.get('independent_up_probability_raw'),diagnostics))
             n = c.get('next_window') or {}
             if n.get('model_status') == 'provisional' and n.get('condition_id'):
                 bucket = n['seconds_until_open']//60
@@ -391,41 +742,49 @@ def _journal(root, cards, markets, public_json, resolve=True):
                     (n['condition_id'],n['slug'],n['seconds_until_open']//60,now,
                      n['window_close']//1000,n['up_probability'],n.get('polymarket_up'),
                      MODEL_VERSION+'-next',n.get('experimental_up_probability',n['up_probability']),
-                     diagnostics))
+                     n.get('up_probability_raw'),diagnostics))
                 if (INDEPENDENT_MODEL_VERSION != MODEL_VERSION and
                         n.get('independent_up_probability') is not None):
                     db.execute(insert,
                         (n['condition_id'],n['slug'],bucket,now,n['window_close']//1000,
                          n['independent_up_probability'],n.get('polymarket_up'),
                          INDEPENDENT_MODEL_VERSION+'-next',n['independent_up_probability'],
-                         diagnostics))
-        # Seed the model's live score from the strictly later v5 holdout. The
-        # source rows retain the settlement-kernel probability and live feed
-        # features, so the CLOB-free 5m estimate can be reconstructed without
-        # training on (or reading) the Polymarket price. 15m remains kernel-only.
+                         n.get('independent_up_probability_raw'),diagnostics))
+        # Seed the v2 model's live score from the strictly later holdout. The
+        # v1-era journal rows retain the settlement-kernel probability and the
+        # full feature set the refit was trained against, so the CLOB-free 5m
+        # correction can be reconstructed out of sample without reading (or
+        # training on) the Polymarket price. 15m stays kernel-only.
         backfill_done = db.execute(
             'SELECT 1 FROM prediction_model_backfills WHERE version=?',
             (INDEPENDENT_MODEL_VERSION,)).fetchone()
         if not backfill_done:
             source_rows = db.execute('''SELECT cid,slug,bucket,captured,closes,market_p,
                     outcome,diagnostics_json
-                FROM forecasts WHERE version=? AND bucket=2 AND captured>?
-                    AND captured>=? AND captured<?
+                FROM forecasts WHERE version=? AND bucket=2 AND captured>=?
                     AND market_p IS NOT NULL AND outcome IS NOT NULL
                     AND diagnostics_json IS NOT NULL ORDER BY captured''',
-                (MARKET_BENCHMARK_VERSION, _TICK_5M_TRAINED_THROUGH,
-                 _TICK_5M_HOLDOUT_START, _TICK_5M_HOLDOUT_END)).fetchall()
+                ('vantagepulse-independent-v1', _TICK_V2_SPLIT_TS)).fetchall()
             rows_inserted = 0
             for cid,slug,bucket,captured,closes,market_p,outcome,raw in source_rows:
                 try:
                     diagnostic = json.loads(raw)
                     kernel_p = float(diagnostic['settlement_model_probability'])
                     if '-5m-' in str(slug):
-                        model_p = _tick_corrected_probability(
-                            kernel_p, diagnostic.get('binance_momentum_bps'),
+                        technical = diagnostic.get('technical') or {}
+                        model_p, _, _, _ = _tick_v2_probability(
+                            kernel_p, diagnostic.get('settlement_model_low'),
+                            diagnostic.get('settlement_model_high'),
+                            max(0, int(closes or 0) - int(captured or 0)),
+                            _number(technical.get('vol_1m_pct'))/100.0,
+                            _number(diagnostic.get('spot')),
+                            _number(diagnostic.get('strike')),
+                            technical,
+                            (diagnostic.get('news_signal') or {}).get('score'),
+                            diagnostic.get('binance_momentum_bps'),
                             diagnostic.get('coinbase_momentum_bps'),
                             diagnostic.get('binance_basis_bps'),
-                            diagnostic.get('coinbase_basis_bps'))[0]
+                            diagnostic.get('coinbase_basis_bps'))
                     elif '-15m-' in str(slug):
                         model_p = kernel_p
                     else:
@@ -434,9 +793,9 @@ def _journal(root, cards, markets, public_json, resolve=True):
                         continue
                     cursor = db.execute('''INSERT OR IGNORE INTO forecasts
                         (cid,slug,bucket,captured,closes,p,market_p,outcome,version,
-                         shadow_p,diagnostics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                         shadow_p,static_p,diagnostics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
                         (cid,slug,bucket,captured,closes,model_p,market_p,outcome,
-                         INDEPENDENT_MODEL_VERSION,model_p,raw))
+                         INDEPENDENT_MODEL_VERSION,model_p,model_p,raw))
                     rows_inserted += cursor.rowcount
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                     continue
@@ -468,9 +827,9 @@ def _journal(root, cards, markets, public_json, resolve=True):
                         continue
                     cursor = db.execute('''INSERT OR IGNORE INTO forecasts
                         (cid,slug,bucket,captured,closes,p,market_p,outcome,version,
-                         shadow_p,diagnostics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                         shadow_p,static_p,diagnostics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
                         (cid,slug,bucket,captured,closes,model_p,market_p,outcome,
-                         INDEPENDENT_MODEL_VERSION+'-next',model_p,raw))
+                         INDEPENDENT_MODEL_VERSION+'-next',model_p,model_p,raw))
                     rows_inserted += cursor.rowcount
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                     continue
@@ -675,23 +1034,73 @@ def _sigmoid(z):
     return 1.0/(1.0+math.exp(-z))
 
 
-def _tick_corrected_probability(base, binance_move, coinbase_move,
-                                binance_basis, coinbase_basis, impacts=False):
-    """Apply the fitted 5m correction without reading any Polymarket price."""
-    availability = (binance_move is not None, coinbase_move is not None,
-                    binance_basis is not None, coinbase_basis is not None)
-    feature_values = (
-        _number(binance_move), _number(coinbase_move),
-        _number(binance_basis), _number(coinbase_basis),
-        float(availability[0]), float(availability[1]),
-        float(availability[2]), float(availability[3]),
-    )
-    base_logit = _logit(base)
-    z = base_logit
-    rows = []
+def _tick_v2_features(kernel_p, seconds_left, sigma_minute, spot, strike,
+                      technical, news_score, mom_bn_bps, mom_cb_bps,
+                      bas_bn_bps, bas_cb_bps):
+    """17-feature vector for the v2 5m correction; must mirror the fit script.
 
-    def apply(name, adjustment, available, detail):
-        nonlocal z
+    Feature order matches _TICK_V2_WEIGHTS: intercept, kernel logit,
+    seconds-left scale, distance-to-strike in volatility units, Binance and
+    Coinbase 10s momentum with availability flags, Chainlink-relative basis
+    with availability flags, candle trend score, 5m/15m return z-scores,
+    news pulse, and a volatility-regime tilt.
+    """
+    T = max(30.0, min(300.0, seconds_left or 150.0))
+    sigma = max(_number(sigma_minute), .00005)
+    vol_pct = sigma*100.0
+    z_strike = 0.0
+    if spot > 0 and strike > 0:
+        z_strike = max(-6.0, min(6.0, math.log(spot/strike)/
+                                 (sigma*math.sqrt(T/60.0))))
+    trend = max(-1.0, min(1.0, _number((technical or {}).get('trend_score'))))
+    r5 = (technical or {}).get('r5_pct')
+    r15 = (technical or {}).get('r15_pct')
+    z5 = math.log1p(r5/100.0)/(sigma*math.sqrt(5.0)) if r5 is not None else 0.0
+    z15 = math.log1p(r15/100.0)/(sigma*math.sqrt(15.0)) if r15 is not None else 0.0
+    news = _number(news_score)
+    return (
+        1.0,                                        # 0 intercept
+        _logit(kernel_p),                           # 1 kernel logit
+        T/150.0,                                    # 2 seconds-left scale
+        z_strike,                                   # 3 distance-to-strike (vol units)
+        1.0 if mom_bn_bps is not None else 0.0,     # 4 momentum/basis availability
+        _number(mom_bn_bps)/10.0,
+        1.0 if mom_cb_bps is not None else 0.0,
+        _number(mom_cb_bps)/10.0,
+        1.0 if bas_bn_bps is not None else 0.0,
+        math.tanh(_number(bas_bn_bps)/8.0),
+        1.0 if bas_cb_bps is not None else 0.0,
+        math.tanh(_number(bas_cb_bps)/8.0),
+        trend,                                      # 12 candle trend score
+        math.tanh(z5/2.0),                          # 13 5m return z-score
+        math.tanh(z15/2.0),                         # 14 15m return z-score
+        math.tanh(news/2.0),                        # 15 news pulse
+        math.tanh((vol_pct-0.02)/0.05),             # 16 volatility regime tilt
+    )
+
+
+def _tick_v2_impacts(feats, mom_bn_bps, mom_cb_bps, bas_bn_bps, bas_cb_bps):
+    """Display rows for the v2 correction, grouped by signal family."""
+    rows = []
+    z = 0.0
+    groups = (
+        ('5m kernel recalibration', (0, 1, 2), True, 'logit + seconds-left scale'),
+        ('Distance to strike', (3,), True, f'{feats[3]:+.2f} vol units'),
+        ('Binance 10s momentum', (4, 5), mom_bn_bps is not None,
+         f'{_number(mom_bn_bps):+.1f} bp' if mom_bn_bps is not None else 'stale'),
+        ('Coinbase 10s momentum', (6, 7), mom_cb_bps is not None,
+         f'{_number(mom_cb_bps):+.1f} bp' if mom_cb_bps is not None else 'stale'),
+        ('Binance vs Chainlink basis', (8, 9), bas_bn_bps is not None,
+         f'{_number(bas_bn_bps):+.1f} bp' if bas_bn_bps is not None else 'stale'),
+        ('Coinbase vs Chainlink basis', (10, 11), bas_cb_bps is not None,
+         f'{_number(bas_cb_bps):+.1f} bp' if bas_cb_bps is not None else 'stale'),
+        ('Candle trend', (12, 13, 14), True,
+         f"trend {feats[12]:+.2f} · z5 {feats[13]:+.2f} · z15 {feats[14]:+.2f}"),
+        ('News pulse', (15,), True, f'sentiment {feats[15]:+.2f}'),
+        ('Volatility regime', (16,), True, f'1m vol tilt {feats[16]:+.2f}'),
+    )
+    for name, idx, available, detail in groups:
+        adjustment = sum(_TICK_V2_WEIGHTS[i]*feats[i] for i in idx)
         before = _sigmoid(z)
         z += adjustment
         after = _sigmoid(z)
@@ -701,28 +1110,50 @@ def _tick_corrected_probability(base, binance_move, coinbase_move,
                      'probability_after': round(after, 6),
                      'delta_pp': round((after-before)*100, 2),
                      'detail': detail})
+    return rows
 
-    apply('5m kernel calibration',
-          _TICK_5M_INTERCEPT+(_TICK_5M_KERNEL_LOGIT-1.0)*base_logit,
-          True, 'Fit on 19,045 earlier resolved 5m forecasts')
-    labels = (
-        ('Binance 10s momentum', 'fresh' if binance_move is not None else 'stale'),
-        ('Coinbase 10s momentum', 'fresh' if coinbase_move is not None else 'stale'),
-        ('Binance vs Chainlink basis', 'fresh' if binance_basis is not None else 'stale'),
-        ('Coinbase vs Chainlink basis', 'fresh' if coinbase_basis is not None else 'stale'),
-        ('Binance momentum availability', 'source coverage'),
-        ('Coinbase momentum availability', 'source coverage'),
-        ('Binance basis availability', 'source coverage'),
-        ('Coinbase basis availability', 'source coverage'),
-    )
-    for i, (name, detail) in enumerate(labels):
-        adjustment = _TICK_5M_WEIGHTS[i] * (
-            feature_values[i]-_TICK_5M_MEANS[i])/_TICK_5M_SCALES[i]
-        value_feature = i < 4
-        available = availability[i] if value_feature else True
-        apply(name, adjustment, available,
-              f'{feature_values[i]:+.2f} bp · {detail}' if value_feature else detail)
-    return _sigmoid(z), rows if impacts else []
+
+def _tick_v2_probability(kernel_p, kernel_low, kernel_high, seconds_left,
+                         sigma_minute, spot, strike, technical, news_score,
+                         mom_bn_bps, mom_cb_bps, bas_bn_bps, bas_cb_bps,
+                         impacts=False):
+    """CLOB-free 5m correction (v2): a 17-feature logistic refit of the kernel.
+
+    Re-derives the correction from the raw settlement inputs instead of
+    re-scaling the kernel logit: distance-to-strike in volatility units, the
+    seconds-left scale, candle trend and 5m/15m return z-scores, the news
+    pulse, a volatility-regime tilt, and Binance/Coinbase 10s momentum and
+    Chainlink-relative basis with availability flags. Fitted on 25,712
+    resolved checkpoints captured before 2026-10-24 and validated on the
+    strictly later 12,652-row holdout, where it beats both the raw kernel and
+    the CLOB midpoint without reading any Polymarket price.
+
+    The envelope re-scores at 0.75x and 1.5x volatility, mirroring the
+    settlement kernel's sensitivity bounds.
+    """
+    feats = _tick_v2_features(kernel_p, seconds_left, sigma_minute, spot,
+                              strike, technical, news_score, mom_bn_bps,
+                              mom_cb_bps, bas_bn_bps, bas_cb_bps)
+    eta = sum(w*x for w, x in zip(_TICK_V2_WEIGHTS, feats))
+    p = _sigmoid(eta)
+    low = high = p
+    if kernel_low is not None and kernel_high is not None:
+        # The settlement kernel's envelope is prob(0.75)/prob(1.5); mirror it
+        # by re-scoring the correction with volatility scaled the same way.
+        p_extreme = kernel_high if kernel_p >= .5 else kernel_low
+        p_calm = kernel_low if kernel_p >= .5 else kernel_high
+        variants = []
+        for scale, kernel_variant in ((0.75, p_extreme), (1.5, p_calm)):
+            scaled = _tick_v2_features(
+                kernel_variant, seconds_left, _number(sigma_minute)*scale,
+                spot, strike, technical, news_score, mom_bn_bps, mom_cb_bps,
+                bas_bn_bps, bas_cb_bps)
+            variants.append(_sigmoid(sum(w*x for w, x in
+                                         zip(_TICK_V2_WEIGHTS, scaled))))
+        low, high = min(variants), max(variants)
+    rows = _tick_v2_impacts(feats, mom_bn_bps, mom_cb_bps, bas_bn_bps,
+                            bas_cb_bps) if impacts else None
+    return p, low, high, rows if impacts else []
 
 
 def _technical_features(rows, sigma_minute):
@@ -767,6 +1198,8 @@ def _news_signal(asset, stories, now_s):
     broad = ('crypto','fed','interest rate','inflation','risk asset','dollar')
     total, weight, matched = 0.0, 0.0, 0
     for story in stories or []:
+        if story.get('context_only'):
+            continue
         title = ' '+str(story.get('title','')).lower()+' '
         direct = any(a in title for a in aliases)
         general = any(term in title for term in broad)
@@ -777,6 +1210,27 @@ def _news_signal(asset, stories, now_s):
         weight += 2.0*w
         matched += 1
     return (max(-1.0,min(1.0,total/weight)) if weight else 0.0), matched
+
+
+def _news_for_display(stories, now_s):
+    """Reserve one fresh headline slot for official Polymarket editorial context."""
+    stories = stories if isinstance(stories, list) else []
+    def published_at(story):
+        try:
+            value = float(story.get('published'))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return 0.0
+        return value if math.isfinite(value) else 0.0
+
+    regular = sorted((story for story in stories if not story.get('context_only')),
+                     key=published_at, reverse=True)
+    editorial = [story for story in stories if story.get('context_only') and
+                 0 < published_at(story) <= now_s and
+                 now_s-published_at(story) <= 14*86400]
+    selected = regular[:7]
+    if editorial:
+        selected.append(max(editorial, key=published_at))
+    return sorted(selected, key=published_at, reverse=True)
 
 
 def _asset_tape(query, asset):
@@ -985,10 +1439,12 @@ def build_board(query, public_json, root, news_fn, resolve=True):
              'reference_age_s':reference_age,'candle_age_s':candle_age,
              'closes':[r['close'] for r in bars],
              'fee_rate':fee_rate,'fee_exponent':fee_exponent}
-        metadata[(a,h,o)]={'market':m,'ref':ref,'tape':current_tape,'bars':bars}
+        metadata[(a,h,o)]={'market':m,'ref':ref,'tape':current_tape,'bars':bars,
+                           'ask_levels':{}}
         sides=dict(zip([str(x).upper() for x in array(m.get('outcomes'))],array(m.get('clobTokenIds'))))
         for side in ('UP','DOWN'):
             book=books.get(str(sides.get(side)),{})
+            metadata[(a,h,o)]['ask_levels'][side]=ask_book_levels(book)
             bid,ask=book_top(book)
             ts=_number(book.get('timestamp'))/1000.0
             book_age=(max(0.0,books_received_at_s-ts)
@@ -996,6 +1452,7 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             if book_age is None or book_age < -1 or book_age > 3: bid=ask=None
             req[side.lower()+'_bid']=bid
             req[side.lower()+'_ask']=ask
+            req[side.lower()+'_bid_depth']=top_depth(book,'bids',bid)
             req[side.lower()+'_ask_depth']=top_depth(book,'asks',ask)
             req[side.lower()+'_book_age_s']=book_age
             if book_age is not None and 0 <= book_age <= 3:
@@ -1012,8 +1469,11 @@ def build_board(query, public_json, root, news_fn, resolve=True):
                   'fee_rate':next_fee,'fee_exponent':next_exp}
         next_sides=dict(zip([str(x).upper() for x in array(next_m.get('outcomes'))],
                             array(next_m.get('clobTokenIds'))))
+        metadata[(a,h,next_o)]={'market':next_m,'ref':next_ref,'tape':current_tape,
+                                'bars':bars,'ask_levels':{}}
         for side in ('UP','DOWN'):
             book=books.get(str(next_sides.get(side)),{})
+            metadata[(a,h,next_o)]['ask_levels'][side]=ask_book_levels(book)
             bid,ask=book_top(book)
             ts=_number(book.get('timestamp'))/1000.0
             book_age=(max(0.0,books_received_at_s-ts)
@@ -1021,13 +1481,13 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             if book_age is None or book_age < -1 or book_age > 3: bid=ask=None
             next_req[side.lower()+'_bid']=bid
             next_req[side.lower()+'_ask']=ask
+            next_req[side.lower()+'_bid_depth']=top_depth(book,'bids',bid)
             next_req[side.lower()+'_ask_depth']=top_depth(book,'asks',ask)
             next_req[side.lower()+'_book_age_s']=book_age
             if book_age is not None and 0 <= book_age <= 3:
                 next_req.setdefault('book_ages',[]).append(book_age)
         next_req['book_age_s']=max(next_req.pop('book_ages',[-1]))
         requests.append(next_req)
-        metadata[(a,h,next_o)]={'market':next_m,'ref':next_ref,'tape':current_tape,'bars':bars}
     proc=subprocess.run([os.path.join(root,'build','bin','polypulse-forecast')],
         input=json.dumps(requests,allow_nan=False),capture_output=True,text=True,timeout=3,check=True)
     forecasts=json.loads(proc.stdout)
@@ -1078,13 +1538,12 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         if h == 300:
             model_cb_basis=cb_basis*10000 if cb_basis is not None else None
             model_bn_basis=bn_basis*10000 if bn_basis is not None else None
-            independent_raw,independent_impacts=_tick_corrected_probability(
-                current_f['probability'],bn_move,cb_move,model_bn_basis,model_cb_basis,impacts=True)
-            independent_low=_tick_corrected_probability(
-                current_f['low'],bn_move,cb_move,model_bn_basis,model_cb_basis)[0]
-            independent_high=_tick_corrected_probability(
-                current_f['high'],bn_move,cb_move,model_bn_basis,model_cb_basis)[0]
-            independent_low,independent_high=sorted((independent_low,independent_high))
+            independent_raw,independent_low,independent_high,independent_impacts= \
+                _tick_v2_probability(
+                    current_f['probability'],current_f['low'],current_f['high'],
+                    current_req['seconds_left'],current_f['sigma_minute'],
+                    spot,_number(current_req['strike']),technical,news_score,
+                    bn_move,cb_move,model_bn_basis,model_cb_basis,impacts=True)
         else:
             # The 15m tick correction did not improve the chronological
             # holdout; use the settlement kernel without a hand-set blend.
@@ -1139,10 +1598,13 @@ def build_board(query, public_json, root, news_fn, resolve=True):
               'warming_up':'Collecting enough continuous closed candles.',
               'closed':'Window closed. Waiting for the following market.'}.get(status)
         if ready:
-            note=((f'The 5m estimate applies a fitted correction to the Chainlink settlement kernel using fresh Binance and '
-                   f'Coinbase 10s moves and Chainlink-relative basis. It excludes Polymarket prices. On a later paired '
-                   f'holdout it improved Brier from {_TICK_5M_KERNEL_BRIER:.4f} to {_TICK_5M_HOLDOUT_BRIER:.4f}; the CLOB '
-                   f'scored {_TICK_5M_CLOB_BRIER:.4f}. This did not establish an advantage over the market.')
+            note=((f'The 5m estimate refits the Chainlink settlement kernel with a 17-feature '
+                   f'correction (settlement distance, candle trend, fresh Binance and Coinbase '
+                   f'momentum, and Chainlink-relative basis), trained on {_TICK_V2_TRAIN_N:,} '
+                   f'resolved checkpoints. It excludes Polymarket prices. On the chronological '
+                   f'holdout it improved Brier from {_TICK_V2_KERNEL_BRIER:.4f} (raw kernel) and '
+                   f'{_TICK_V2_V1_BRIER:.4f} (prior tick model) to {_TICK_V2_HOLDOUT_BRIER:.4f}, '
+                   f'ahead of the CLOB midpoint at {_TICK_V2_CLOB_BRIER:.4f}.')
                   if h == 300 else
                   'The 15m estimate uses the Chainlink settlement kernel. Candle-based and tick-based corrections did not '
                   'improve the chronological holdout, so they are excluded. The CLOB midpoint remains a separate benchmark.')
@@ -1169,6 +1631,14 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         slug=market_data.get('slug',f'{a.lower()}-updown-{"5m" if h==300 else "15m"}-{o}')
         event_rows=market_data.get('events') or []
         event_slug=(event_rows[0].get('slug') if event_rows and isinstance(event_rows[0],dict) else None) or slug
+        paired_economics=binary_pair_economics(
+            up_ask,down_ask,current_req.get('up_ask_depth'),
+            current_req.get('down_ask_depth'),current_req['fee_rate'],
+            current_req['fee_exponent'],
+            up_ask_levels=current_data['ask_levels'].get('UP'),
+            down_ask_levels=current_data['ask_levels'].get('DOWN'))
+        directional_economics=_directional_economics_for_request(
+            independent_p,current_req,current_data['ask_levels'],ready=ready)
         outcome_indices={str(name).strip().lower():i for i,name in enumerate(array(market_data.get('outcomes')))}
         trade_outcome_indices={}
         if 'up' in outcome_indices: trade_outcome_indices['UP']=outcome_indices['up']
@@ -1184,7 +1654,7 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             'independent_probability_low':independent_low,
             'independent_probability_high':independent_high,
             'independent_direction':independent_direction,
-            'independent_prediction_basis':'chainlink_settlement_plus_fitted_5m_tick_correction' if h==300 else 'chainlink_settlement_kernel',
+            'independent_prediction_basis':'chainlink_settlement_plus_fitted_5m_feature_correction' if h==300 else 'chainlink_settlement_kernel',
             'independent_model_version':TICK_MODEL_VERSION if h==300 else 'chainlink-kernel-v3',
             'independent_model_edge':independent_edge,
             'independent_conservative_edge':independent_conservative,
@@ -1196,9 +1666,17 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             'settlement_window_s':window,'reference':ref_label,'reference_age_s':current_req['reference_age_s'],
             'candle_age_s':current_req['candle_age_s'],'quality':current_f['quality'],
             'polymarket_up':market_p,'polymarket_up_price':up_ask,'polymarket_down_price':down_ask,
+            'paired_outcome_economics':paired_economics,
+            'directional_outcome_economics':directional_economics,
             'calibration':cal_info,
             'independent_calibration':independent_cal_info,
             'polymarket_up_bid':up_bid,'polymarket_down_bid':down_bid,
+            'polymarket_up_bid_depth':current_req.get('up_bid_depth'),
+            'polymarket_up_ask_depth':current_req.get('up_ask_depth'),
+            'polymarket_down_bid_depth':current_req.get('down_bid_depth'),
+            'polymarket_down_ask_depth':current_req.get('down_ask_depth'),
+            'polymarket_up_book_age_s':current_req.get('up_book_age_s'),
+            'polymarket_down_book_age_s':current_req.get('down_book_age_s'),
             'market_quote_low':market_range[0] if market_range else None,
             'market_quote_high':market_range[1] if market_range else None,
             'model_market_gap':independent_p-market_p if market_p is not None else None,
@@ -1285,6 +1763,14 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         next_slug=next_market.get('slug',f'{a.lower()}-updown-{"5m" if h==300 else "15m"}-{o+h}')
         next_event_rows=next_market.get('events') or []
         next_event_slug=(next_event_rows[0].get('slug') if next_event_rows and isinstance(next_event_rows[0],dict) else None) or next_slug
+        next_paired_economics=binary_pair_economics(
+            nup_ask,ndown_ask,next_req.get('up_ask_depth'),
+            next_req.get('down_ask_depth'),next_req['fee_rate'],
+            next_req['fee_exponent'],
+            up_ask_levels=next_data['ask_levels'].get('UP'),
+            down_ask_levels=next_data['ask_levels'].get('DOWN'))
+        next_directional_economics=_directional_economics_for_request(
+            next_independent_p,next_req,next_data['ask_levels'],ready=next_f['ready'])
         next_outcome_indices={str(name).strip().lower():i for i,name in enumerate(array(next_market.get('outcomes')))}
         next_trade_outcome_indices={}
         if 'up' in next_outcome_indices: next_trade_outcome_indices['UP']=next_outcome_indices['up']
@@ -1338,6 +1824,14 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             'candle_age_s':next_req['candle_age_s'],'quality':next_f['quality'],
             'polymarket_up':next_req_market,'polymarket_up_price':nup_ask,
             'polymarket_down_price':ndown_ask,'polymarket_up_bid':nup_bid,
+            'paired_outcome_economics':next_paired_economics,
+            'directional_outcome_economics':next_directional_economics,
+            'polymarket_up_bid_depth':next_req.get('up_bid_depth'),
+            'polymarket_up_ask_depth':next_req.get('up_ask_depth'),
+            'polymarket_down_bid_depth':next_req.get('down_bid_depth'),
+            'polymarket_down_ask_depth':next_req.get('down_ask_depth'),
+            'polymarket_up_book_age_s':next_req.get('up_book_age_s'),
+            'polymarket_down_book_age_s':next_req.get('down_book_age_s'),
             'polymarket_down_bid':ndown_bid,
             'independent_calibration':next_independent_cal_info,
             'market_quote_low':next_market_range[0] if next_market_range else None,
@@ -1393,14 +1887,19 @@ def build_board(query, public_json, root, news_fn, resolve=True):
     independent_model_meta={
         'version':INDEPENDENT_MODEL_VERSION,
         'five_minute_method':TICK_MODEL_VERSION,
-        'five_minute_training_rows':_TICK_5M_TRAIN_N,
-        'five_minute_trained_through_utc':'2026-10-01T06:32:03Z',
-        'five_minute_holdout_rows':_TICK_5M_HOLDOUT_N,
-        'five_minute_holdout_start_utc':'2026-10-05',
-        'five_minute_holdout_end_utc':'2026-10-09',
-        'five_minute_holdout_brier':_TICK_5M_HOLDOUT_BRIER,
-        'five_minute_kernel_brier':_TICK_5M_KERNEL_BRIER,
-        'five_minute_clob_brier':_TICK_5M_CLOB_BRIER,
+        'five_minute_features':17,
+        'five_minute_training_rows':_TICK_V2_TRAIN_N,
+        'five_minute_trained_through_utc':'2026-10-24T00:00:00Z',
+        'five_minute_holdout_rows':_TICK_V2_HOLDOUT_N,
+        'five_minute_holdout_start_utc':'2026-10-24',
+        'five_minute_holdout_end_utc':'journal tail (rolling)',
+        'five_minute_holdout_brier':_TICK_V2_HOLDOUT_BRIER,
+        'five_minute_kernel_brier':_TICK_V2_KERNEL_BRIER,
+        'five_minute_v1_brier':_TICK_V2_V1_BRIER,
+        'five_minute_clob_brier':_TICK_V2_CLOB_BRIER,
+        'five_minute_holdout_logloss':_TICK_V2_LOGLOSS,
+        'five_minute_v1_logloss':_TICK_V2_LOGLOSS_V1,
+        'five_minute_clob_logloss':_TICK_V2_LOGLOSS_CLOB,
         'fifteen_minute_method':'chainlink-kernel-v3',
         'fifteen_minute_holdout_rows':1058,
         'fifteen_minute_kernel_brier':0.089542,
@@ -1421,7 +1920,8 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         'calibration_deciles':[{'bucket':k,'n':v['n'],'wins':v['wins'],
             'realized':round(v['wins']/v['n'],3) if v['n'] else None,'avg_p':round(v['avg_p'],3)}
             for k,v in sorted((calibration or {}).get('deciles',{}).items())],
-        'compute_ms':round((time.monotonic()-started)*1000),'news':stories[:8],
+        'compute_ms':round((time.monotonic()-started)*1000),
+        'news':_news_for_display(stories, now_s),
         'news_sources':news.get('sources',[]),
         'sources':['Chainlink spot + official settlement TWAP','Coinbase live price and lead/lag',
             'Binance live price and closed candles','Local candle store / Binance backfill',

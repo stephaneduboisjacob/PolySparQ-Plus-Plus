@@ -7,6 +7,7 @@
 #include <cmath>
 namespace vp {
 namespace {
+constexpr double kPrediction2mFadeHardMinSharePrice = 0.60;
 inline std::string make_uuid() { return vp::core::make_uuid(); }
 double passive_buy_price(const OrderBook& book, const OrderRequest& req) {
     const double tick = req.tick_size > 0 ? req.tick_size : 0.01;
@@ -69,13 +70,45 @@ OrderResult PaperExecutor::submit(
         req.stop_loss_fak_authorized &&
         (req.source == "CB_LEAD_SCALP_HARD_STOP" ||
          req.source == "LATE_SETTLEMENT_HARD_STOP" ||
-         req.source == "PREDICTION_2M_STOP") &&
+         req.source == "PREDICTION_2M_STOP" ||
+         req.source == "CB_PRICE_STOP_HYBRID_FAK") &&
         req.dir == OrderDir::Sell;
-    if (req.execution_mode == ExecutionMode::Taker && !authorized_stop_fak) {
+    const bool authorized_manual_force_sell =
+        req.manual_override_taker_authorized &&
+        req.source == "HUMAN_OVERRIDE" && req.dir == OrderDir::Sell;
+    // The contrarian PAPER experiment deliberately takes the opposite side at
+    // its executable ask. The source is created only by the paper-only fade
+    // callback; live config validation rejects the experiment.
+    const bool authorized_prediction_2m_fade =
+        req.source == "PREDICTION_2M_FADE" &&
+        req.dir == OrderDir::Buy &&
+        req.execution_mode == ExecutionMode::Taker;
+    const bool authorized_prediction_2m_entry_taker =
+        req.source == "PREDICTION_2M_ENTRY" &&
+        req.dir == OrderDir::Buy &&
+        req.execution_mode == ExecutionMode::Taker;
+    const bool authorized_coinbase_confluence_taker =
+        req.source == "COINBASE_CONFLUENCE_PAPER_ENTRY" &&
+        req.dir == OrderDir::Buy &&
+        req.execution_mode == ExecutionMode::Taker;
+    // Penney Hustler exits are PAPER-only. The take-profit taker fires when the
+    // bid is already at/above the 0.80 target; the dump fires at T-30s when the
+    // remaining inventory is worth less than 25 cents and must be liquidated.
+    const bool authorized_penney_hustler_exit =
+        (req.source == "PENNEY_HUSTLER_TP_TAKER" ||
+         req.source == "PENNEY_HUSTLER_DUMP") &&
+        req.dir == OrderDir::Sell &&
+        req.execution_mode == ExecutionMode::Taker;
+    if (req.execution_mode == ExecutionMode::Taker &&
+        !authorized_stop_fak && !authorized_manual_force_sell &&
+        !authorized_prediction_2m_fade &&
+        !authorized_prediction_2m_entry_taker &&
+        !authorized_coinbase_confluence_taker &&
+        !authorized_penney_hustler_exit) {
         r.status = "rejected";
         r.terminal = true;
         r.reject_class = OrderResult::RejectClass::RiskCap;
-        r.reject_reason = "taker execution disabled except for an authorized tick hard stop";
+        r.reject_reason = "taker execution disabled except for an authorized hard stop or cockpit force sell";
         if (journal_.on_order) journal_.on_order(req, r);
         return r;
     }
@@ -126,14 +159,66 @@ OrderResult PaperExecutor::submit(
         double exec_price = 0;
         if (req.dir == OrderDir::Buy) {
             auto a = book->best_ask();
-            if (a.price <= 0 || a.size <= 0) {
+            const bool has_ask = a.price > 0 && a.size > 0;
+            const bool allow_askless_maker =
+                req.maker_allow_no_ask &&
+                (req.source == "LATE_SETTLEMENT_ENTRY" ||
+                 req.source == "PENNEY_HUSTLER_ENTRY") &&
+                req.execution_mode != ExecutionMode::Taker;
+            const auto b = book->best_bid();
+            if (req.source == "COINBASE_CONFLUENCE_PAPER_ENTRY" &&
+                (!has_ask || b.price <= 0.0 || a.price > 0.90 + 1e-9 ||
+                 a.price < b.price || a.price - b.price > 0.08 + 1e-9 ||
+                 a.size * a.price + 1e-9 < req.size_usd ||
+                 req.limit_price > 0.90 + 1e-9 || req.fee_rate + 1e-9 < 0.07 ||
+                 req.fee_exponent != 1)) {
+                r.reject_class = OrderResult::RejectClass::RiskCap;
+                r.reject_reason =
+                    "Coinbase confluence PAPER guard requires ask<=0.90, spread<=0.08, full top-level depth, and 7% fees";
+                goto done;
+            }
+            if (req.source == "COINBASE_CONFLUENCE_PAPER_MAKER_ENTRY" &&
+                (req.execution_mode != ExecutionMode::Maker ||
+                 !req.maker_fixed_price || req.maker_reprice_ms != 0 ||
+                 req.maker_max_age_ms <= 0 || !has_ask || b.price <= 0.0 ||
+                 a.price > 0.90 + 1e-9 || a.price <= b.price ||
+                 a.price - b.price > 0.08 + 1e-9 ||
+                 !std::isfinite(req.limit_price) || req.limit_price <= 0.0 ||
+                 req.limit_price > 0.90 + 1e-9 ||
+                 req.limit_price >= a.price - 1e-9 ||
+                 !std::isfinite(req.size_shares) || req.size_shares <= 0.0 ||
+                 !std::isfinite(req.size_usd) ||
+                 req.size_shares * req.limit_price > req.size_usd + 1e-8 ||
+                 std::abs(req.fee_rate) > 1e-9 || req.fee_exponent != 1)) {
+                r.reject_class = OrderResult::RejectClass::RiskCap;
+                r.reject_reason =
+                    "Coinbase confluence PAPER maker guard requires a passive fixed-price, fee-free quote within caps";
+                goto done;
+            }
+            if (!has_ask && !(allow_askless_maker && b.price > 0 && b.size > 0)) {
                 r.reject_reason = "no asks on book"; goto done;
             }
             if (req.execution_mode != ExecutionMode::Taker) {
                 exec_price = passive_buy_price(*book, req);
-                if (exec_price <= 0 || exec_price >= a.price - 1e-9) {
+                if (exec_price <= 0 || (has_ask && exec_price >= a.price - 1e-9)) {
                     r.reject_class = OrderResult::RejectClass::PostOnlyCross;
                     r.reject_reason = "no passive maker price available";
+                    goto done;
+                }
+                if (req.source == "PENNEY_HUSTLER_ENTRY" &&
+                    req.maker_fixed_price &&
+                    std::abs(exec_price - req.limit_price) > 1e-9) {
+                    r.reject_class = OrderResult::RejectClass::PostOnlyCross;
+                    r.reject_reason = fmt::format(
+                        "PENNEY_HUSTLER exact ${:.2f} entry is not passively available",
+                        req.limit_price);
+                    goto done;
+                }
+                if (req.source == "COINBASE_CONFLUENCE_PAPER_MAKER_ENTRY" &&
+                    std::abs(exec_price - req.limit_price) > 1e-9) {
+                    r.reject_class = OrderResult::RejectClass::PostOnlyCross;
+                    r.reject_reason =
+                        "Coinbase confluence fixed maker quote is no longer passive";
                     goto done;
                 }
                 if (req.maker_min_price > 0.0 &&
@@ -163,6 +248,14 @@ OrderResult PaperExecutor::submit(
                 r.status = "acked";
                 r.order_price = exec_price;
                 OrderRequest stored = req;
+                // Passive PAPER maker quotes stay open until an explicit
+                // strategy/operator/market cancellation. Do not age them out;
+                // Hybrid stop probes keep their bounded failover deadline.
+                if (stored.execution_mode == ExecutionMode::Maker &&
+                    stored.source != "COINBASE_CONFLUENCE_PAPER_MAKER_ENTRY") {
+                    stored.maker_max_age_ms = 0;
+                    stored.maker_root_deadline_ms = 0;
+                }
                 const auto now_ms = Clock::wall_ns() / 1'000'000LL;
                 if (stored.maker_root_deadline_ms <= 0 && stored.maker_max_age_ms > 0)
                     stored.maker_root_deadline_ms = now_ms + stored.maker_max_age_ms;
@@ -190,7 +283,20 @@ OrderResult PaperExecutor::submit(
                              r.order_shares * exec_price, req.source);
                 goto done;
             }
+            if (!has_ask) {
+                r.reject_reason = "no asks on book"; goto done;
+            }
             exec_price = a.price;
+            // Recheck the actual executable ask, not only the earlier signal
+            // snapshot. The book can move between the fade callback and this
+            // execution read; never let that race create a sub-$0.60 fill.
+            if (req.source == "PREDICTION_2M_FADE" &&
+                exec_price + 1e-9 < kPrediction2mFadeHardMinSharePrice) {
+                r.reject_reason = fmt::format(
+                    "prediction 2m fade ask {:.3f} below hard minimum {:.2f}",
+                    exec_price, kPrediction2mFadeHardMinSharePrice);
+                goto done;
+            }
             if (req.limit_price > 0 && exec_price > req.limit_price) {
                 r.reject_reason = fmt::format("ask {:.3f} > limit {:.3f}",
                                               exec_price, req.limit_price);
@@ -219,7 +325,10 @@ OrderResult PaperExecutor::submit(
             if (r.fill_shares <= 0) { r.reject_reason="no executable ask depth"; goto done; }
         } else { // SELL — reserve inventory for passive orders, otherwise fill at bid
             auto b = book->best_bid();
-            if (b.price <= 0 || b.size <= 0) { r.reject_reason = "no bids on book"; goto done; }
+            if (req.execution_mode == ExecutionMode::Taker &&
+                (b.price <= 0 || b.size <= 0)) {
+                r.reject_reason = "no bids on book"; goto done;
+            }
             exec_price = b.price;
             // determine how many shares to sell
             double held = 0;
@@ -238,6 +347,14 @@ OrderResult PaperExecutor::submit(
             if (req.execution_mode != ExecutionMode::Taker) {
                 const double px = passive_sell_price(*book,req);
                 const double shares = std::floor(std::min(want,held)*100.0+1e-8)/100.0;
+                if (req.source == "PENNEY_HUSTLER_TP" &&
+                    std::abs(px - req.limit_price) > 1e-9) {
+                    r.reject_class=OrderResult::RejectClass::PostOnlyCross;
+                    r.reject_reason=fmt::format(
+                        "PENNEY_HUSTLER exact ${:.2f} offer would not be passive",
+                        req.limit_price);
+                    goto done;
+                }
                 if (px<=b.price) {
                     r.reject_class=OrderResult::RejectClass::PostOnlyCross;
                     r.reject_reason="passive sell price would cross the best bid"; goto done;
@@ -254,6 +371,12 @@ OrderResult PaperExecutor::submit(
                     goto done;
                 }
                 auto stored=req;
+                // Match PAPER maker buys: passive quotes do not age out.
+                // Keep the Hybrid stop-probe deadline for its taker failover.
+                if (stored.execution_mode == ExecutionMode::Maker) {
+                    stored.maker_max_age_ms = 0;
+                    stored.maker_root_deadline_ms = 0;
+                }
                 const auto now=Clock::wall_ns()/1'000'000LL;
                 if (stored.maker_root_deadline_ms<=0 && stored.maker_max_age_ms>0)
                     stored.maker_root_deadline_ms=now+stored.maker_max_age_ms;
@@ -347,15 +470,24 @@ std::size_t PaperExecutor::maintain_open_orders(
             // resting price after estimated queue ahead has traded.
             if (quantity>0 || closing || expired) {
                 const bool terminal=closing || expired || o.shares-quantity<=1e-8;
+                const bool authorized_cb_stop =
+                    o.req.source == "CB_PRICE_STOP" &&
+                    o.req.stop_loss_fak_authorized &&
+                    o.req.dir == OrderDir::Sell;
                 actions.push_back({o,quantity,terminal,expired && !closing &&
-                    o.req.execution_mode==ExecutionMode::Hybrid});
+                    o.req.execution_mode==ExecutionMode::Hybrid &&
+                    (o.req.dir == OrderDir::Buy || authorized_cb_stop)});
                 o.shares-=quantity;
                 if (terminal) { it=open_orders_.erase(it); continue; }
             }
             if (book && !o.req.maker_fixed_price && o.req.maker_reprice_ms>0 &&
                 now_ms-o.last_reprice_ms>=o.req.maker_reprice_ms) {
                 const double px=o.req.dir==OrderDir::Buy ? passive_buy_price(*book,o.req) : passive_sell_price(*book,o.req);
-                if (px>0 && px<1 && std::fabs(px-o.price)>1e-9) {
+                const bool below_buy_floor = o.req.dir == OrderDir::Buy &&
+                    o.req.maker_min_price > 0.0 &&
+                    px + 1e-9 < o.req.maker_min_price;
+                if (px>0 && px<1 && !below_buy_floor &&
+                    std::fabs(px-o.price)>1e-9) {
                     // Preserve the remaining dollar budget across replacements
                     // in either direction. When a passive BUY reprices down,
                     // keeping the old share count would silently shrink the
@@ -403,14 +535,26 @@ std::size_t PaperExecutor::maintain_open_orders(
                 u.status,u.fill_shares,u.fill_price,a.order.req.source);
         } else { u.status="cancelled"; }
         if (journal_.on_order) journal_.on_order(a.order.req,u);
-        // HYBRID fallback exists for entry buys only. A maker SELL may never
-        // quietly become a taker as its TTL expires.
-        if (a.fallback && a.order.req.dir==OrderDir::Buy) {
+        // Hybrid sell fallback is limited to the CB absolute-price stop; all
+        // other maker sells remain maker-only.
+        const bool authorized_cb_stop =
+            a.order.req.source == "CB_PRICE_STOP" &&
+            a.order.req.stop_loss_fak_authorized &&
+            a.order.req.dir == OrderDir::Sell;
+        if (a.fallback &&
+            (a.order.req.dir == OrderDir::Buy || authorized_cb_stop)) {
             auto req=a.order.req;
             req.intent_id.clear(); req.execution_mode=ExecutionMode::Taker;
-            req.size_usd=a.order.shares*a.order.price; req.size_shares=a.order.shares;
+            if (req.dir == OrderDir::Buy) {
+                req.size_usd=a.order.shares*a.order.price;
+                req.size_shares=a.order.shares;
+            } else {
+                req.size_usd=0.0;
+                req.size_shares=std::max(0.0, a.order.shares - a.quantity);
+            }
             req.source+="_HYBRID_FAK";
-            submit(req,book_lookup);
+            if (req.dir == OrderDir::Buy || req.size_shares > 1e-8)
+                submit(req,book_lookup);
         }
     }
     for (const auto& r:reprices)

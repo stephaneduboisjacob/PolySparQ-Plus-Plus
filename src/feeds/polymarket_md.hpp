@@ -1,12 +1,46 @@
 #pragma once
 // Polymarket CLOB market-data websocket -> book deltas + trades.
 #include "core/types.hpp"
+#include <charconv>
+#include <cmath>
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace vp {
+
+// Polymarket reports the last trade's BUY/SELL direction. Keep it separate
+// from the local BBO tick-rule inference used by existing consumers.
+inline std::optional<OrderDir> parse_reported_trade_side(
+    std::string_view side) noexcept {
+    if (side == "BUY" || side == "buy") return OrderDir::Buy;
+    if (side == "SELL" || side == "sell") return OrderDir::Sell;
+    return std::nullopt;
+}
+
+// Market events may omit their exchange timestamp. Keep such observations in
+// event-time consumers using the receive time instead of epoch zero.
+inline std::int64_t resolve_trade_timestamp_ms(
+    std::int64_t exchange_ms, std::int64_t received_ms) noexcept {
+    return exchange_ms > 0 ? exchange_ms : received_ms;
+}
+
+// A missing or malformed optional trade size must not masquerade as a real
+// zero-size print in notional and tape-coverage summaries.
+inline std::optional<double> parse_reported_trade_size(
+    std::string_view raw) noexcept {
+    if (raw.empty()) return std::nullopt;
+    double value = 0.0;
+    const auto parsed = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != raw.data() + raw.size() ||
+        !std::isfinite(value))
+        return std::nullopt;
+    return value;
+}
 
 class WsClient;
 
@@ -24,9 +58,10 @@ public:
     struct TradeUpdate {
         std::string condition_id;
         std::string token_id;
-        ShareSide   side_label;
+        std::optional<OrderDir> reported_side;
         double      price = 0;
         double      size  = 0;
+        bool        size_available = false;
         std::int64_t exchange_ms = 0;
     };
 

@@ -42,6 +42,22 @@ double field_as_double(simdjson::simdjson_result<simdjson::dom::element> r) {
     if (!e.get(i)) return double(i);
     return 0.0;
 }
+std::optional<double> field_as_optional_double(
+    simdjson::simdjson_result<simdjson::dom::element> r) {
+    simdjson::dom::element e;
+    if (r.get(e) != simdjson::SUCCESS) return std::nullopt;
+    std::string_view sv;
+    if (e.get(sv) == simdjson::SUCCESS)
+        return parse_reported_trade_size(sv);
+    double d = 0.0;
+    if (e.get(d) == simdjson::SUCCESS)
+        return std::isfinite(d) ? std::optional<double>(d) : std::nullopt;
+    int64_t i = 0;
+    if (e.get(i) == simdjson::SUCCESS) return static_cast<double>(i);
+    uint64_t u = 0;
+    if (e.get(u) == simdjson::SUCCESS) return static_cast<double>(u);
+    return std::nullopt;
+}
 int64_t field_as_i64(simdjson::simdjson_result<simdjson::dom::element> r) {
     simdjson::dom::element e;
     if (r.get(e) != simdjson::SUCCESS) return 0;
@@ -339,8 +355,15 @@ PolymarketMD::PolymarketMD(std::string url, OnBook onb, OnTrade ont, OnBbo onbbo
                 if (ev["asset_id"].get(sv) == simdjson::SUCCESS)  tu.token_id     = std::string(sv);
                 if (tu.token_id.empty()) return;
                 tu.price = field_as_double(ev["price"]);
-                tu.size  = field_as_double(ev["size"]);
+                const auto trade_size = field_as_optional_double(ev["size"]);
+                if (trade_size && *trade_size >= 0.0) {
+                    tu.size = *trade_size;
+                    tu.size_available = true;
+                }
                 tu.exchange_ms = field_as_i64(ev["timestamp"]);
+                std::string_view side;
+                if (ev["side"].get(side) == simdjson::SUCCESS)
+                    tu.reported_side = parse_reported_trade_side(side);
                 on_trade_(tu);
                 return;
             }

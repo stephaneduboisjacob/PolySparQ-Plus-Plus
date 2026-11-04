@@ -44,12 +44,12 @@ late_window_sniper_order_usd = 5.0
 late_window_sniper_max_entries_per_window = 1
 late_window_sniper_hard_stop_ticks = 25
 
-# Stay passive at the bid; cap order lifetime to limit stale-quote selection.
+# Stay passive at the bid; the close guard cancels the quote near settlement.
 entry_order_mode = "maker"
 maker_improve_ticks = 0
 maker_reprice_ms = 250
 maker_poll_ms = 250
-maker_max_age_ms = 5000
+maker_max_age_ms = 0
 maker_cancel_before_close_ms = 15000
 
 # Stay aligned with the engine-reported $5 minimum and hard-cap exposure.
@@ -75,5 +75,6 @@ coinbase_ticks_enabled = false
 window_events_enabled = true
 features_enabled = true
 book_snapshots_enabled = true
+book_snapshot_levels = 5 # top five levels per side, with lower archive cost than full depth
 pm_trades_enabled = true
 features_write_interval_ms = 1000

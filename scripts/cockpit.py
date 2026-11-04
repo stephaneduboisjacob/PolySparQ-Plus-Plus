@@ -42,12 +42,21 @@ from psycopg2 import pool as pgpool
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cockpit_ui.html")
+ROOT_COCKPIT_ASSETS = {
+    "/manifest.webmanifest": ("cockpit.webmanifest", "application/manifest+json; charset=utf-8"),
+    "/cockpit-assets/icon-192.png": ("cockpit_assets/icon-192.png", "image/png"),
+    "/cockpit-assets/icon-512.png": ("cockpit_assets/icon-512.png", "image/png"),
+    "/cockpit-assets/apple-touch-icon.png": ("cockpit_assets/apple-touch-icon.png", "image/png"),
+}
 CFG_FILE = os.path.join(ROOT, "config", "polypulse-cb.toml")
 if not os.path.isfile(CFG_FILE):
     CFG_FILE = os.path.join(ROOT, "config", "polypulse.toml")
 LOG_FILE = os.path.join(ROOT, "logs", "polypulse.log")
 PID_FILE = os.path.join(ROOT, "logs", "bot.pid")
 CONFIG_DIR = os.path.join(ROOT, "config")
+USER_BOT_CONFIG_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+    "polysparq", "bots")
 REPORTS_DIR = os.path.join(ROOT, "session_reports")
 CONTROL_DIR = os.path.join(ROOT, "control")
 DSN = "dbname=vantagepulse"
@@ -183,6 +192,22 @@ COCKPIT_TUNABLE = {
     "lead_lag_scalp_model_value_enabled": ("bool",),
     "prediction_page_gate_enabled": ("bool",),
     "prediction_page_min_chance_pct": ("float", 0.0, 100.0),
+    "prediction_2m_order_usd":      ("float", 1.0, 25.0),
+    "prediction_2m_taker_enabled":  ("bool",),
+    "prediction_2m_min_edge_pct":   ("float", 0.0, 50.0),
+    "prediction_2m_min_price":      ("float", 0.01, 0.97),
+    "prediction_2m_max_price":      ("float", 0.01, 0.97),
+    "prediction_2m_take_profit_price": ("float", 0.0, 0.999),
+    "prediction_2m_maker_offset_ticks": ("int", 0, 50),
+    "prediction_2m_fade_enabled":   ("bool",),
+    "prediction_2m_fade_order_usd": ("float", 1.0, 25.0),
+    "prediction_2m_fade_max_price": ("float", 0.01, 0.97),
+    # Read-only cross-asset monitoring settings. These never authorize trading.
+    "cross_asset_sync_shadow_enabled": ("bool",),
+    "cross_asset_sync_min_divergence_pct": ("float", 0.0, 50.0),
+    "cross_asset_sync_max_book_age_ms": ("int", 100, 30000),
+    "cross_asset_sync_max_spread": ("float", 0.001, 1.0),
+    "cross_asset_sync_min_touch_depth_usd": ("float", 0.0, 100000.0),
     "lead_lag_scalp_max_secs_remaining_15m": ("int", 0, 899),
     "lead_lag_scalp_max_secs_remaining_5m": ("int", 0, 299),
     "lead_lag_scalp_reversal_oracle_confirm_bps": ("float", 0.0, 100.0),
@@ -191,8 +216,20 @@ COCKPIT_TUNABLE = {
     "lead_lag_scalp_order_usd": ("float", 1.0, 5.0),
     "late_window_sniper_hard_stop_ticks": ("int", 0, 1000),
     "late_window_sniper_max_entries_per_window": ("int", 1, 10),
+    "late_window_sniper_enabled": ("bool",),
+    "late_window_sniper_min_secs_5m": ("int", 1, 119),
+    "late_window_sniper_max_secs_5m": ("int", 2, 120),
+    "late_window_sniper_min_secs_15m": ("int", 1, 199),
+    "late_window_sniper_max_secs_15m": ("int", 2, 200),
+    "late_window_sniper_min_price": ("float", 0.50, 0.96),
+    "late_window_sniper_max_price": ("float", 0.71, 0.97),
+    "late_window_sniper_min_open_delta_pct": ("float", 0.0, 5.0),
     "late_window_sniper_min_net_edge_pct": ("float", 0.0, 25.0),
-    "late_window_sniper_order_usd": ("float", 1.0, 5.0),
+    "late_window_sniper_order_usd": ("float", 1.0, 25.0),
+    "late_window_sniper_order_shares": ("float", 0.0, 5000.0),
+    "late_window_sniper_stop_price": ("float", 0.0, 1.0),
+    "late_window_sniper_take_profit_price": ("float", 0.0, 0.999),
+    "hold_to_settlement": ("bool",),
     "timed_exit_secs":             ("int", 0, 3600),
     "ride_to_settle_secs":         ("int", 0, 3600),
     # ── entry counts / pacing ──
@@ -208,8 +245,10 @@ COCKPIT_TUNABLE = {
     'recycler_target_profit_pct': ('float', 5, 50),
     'recycler_momentum_lookback_secs': ('int', 1, 10),
     'recycler_min_momentum_ticks': ('int', 1, 10),
-    'recycler_entry_cutoff_secs': ('int', 360, 600),
-    'recycler_entry_open_grace_secs': ('int', 0, 600),
+    'recycler_entry_cutoff_secs': ('int', 1, 86400),
+    # Global engine range; validate_recycler applies the narrower 600s cap
+    # unless recycler_maniac_mode is enabled for this profile.
+    'recycler_entry_open_grace_secs': ('int', 0, 3600),
     'recycler_first_entry_scale_pct': ('float', 1, 100),
     'recycler_late_taker_min_bid': ('float', 0, 0.99),
     'recycler_min_settlement_edge_pct': ('float', 0, 50),
@@ -228,11 +267,14 @@ COCKPIT_TUNABLE = {
     'recycler_settlement_entry_min_price': ('float', 0.85, 0.98),
     'recycler_settlement_entry_max_price': ('float', 0.85, 0.98),
     'recycler_settlement_only': ('bool',),
-    'recycler_max_cycles': ('int', 1, 15),
-    'recycler_lookback_secs': ('int', 30, 300),
+    # Global engine ranges; profile-specific limits are checked against
+    # recycler_maniac_mode before any file is written.
+    'recycler_max_cycles': ('int', 1, 100),
+    'recycler_lookback_secs': ('int', 10, 300),
     'recycler_min_range': ('float', 0.02, 0.4),
-    'recycler_max_window_loss': ('float', 0.01, 100),
-    'recycler_max_session_loss': ('float', 0.01, 1000),
+    # Zero disables these optional loss caps, matching the engine defaults.
+    'recycler_max_window_loss': ('float', 0, 100),
+    'recycler_max_session_loss': ('float', 0, 1000),
     "entry_order_mode":            ("enum", ["maker"]),
     "maker_improve_ticks":         ("int", 0, 20),
     "maker_reprice_ms":            ("int", 100, 60000),
@@ -576,6 +618,9 @@ def _config_value_at(data, qualified_key):
 
 def _redact_config_tree(data):
     """Blank credential values while retaining their write-only editor fields."""
+    if isinstance(data, list):
+        return [_redact_config_tree(value) if isinstance(value, (dict, list)) else value
+                for value in data]
     if not isinstance(data, dict):
         return data
     out = {}
@@ -583,7 +628,7 @@ def _redact_config_tree(data):
         if key.lower() in CONFIG_SECRET_KEYS:
             out[key] = ""
         else:
-            out[key] = _redact_config_tree(value) if isinstance(value, dict) else value
+            out[key] = _redact_config_tree(value) if isinstance(value, (dict, list)) else value
     return out
 
 
@@ -729,6 +774,8 @@ def plan_allowed_models(plan):
     return list(models or [])
 
 DB = None  # connection pool, lazily created
+_CROSS_ASSET_SETTLED_CACHE_LOCK = threading.Lock()
+_CROSS_ASSET_SETTLED_CACHE = {"at": 0.0, "rows": None}
 
 
 def get_pool():
@@ -798,8 +845,25 @@ def _clean(d):
 # ── config / runtime detection ─────────────────────────────────────────────
 def _instance_config_file(instance=None):
     if instance:
-        return os.path.join(CONFIG_DIR, f"polypulse-{instance}.toml")
+        repo_path = os.path.join(CONFIG_DIR, f"polypulse-{instance}.toml")
+        if os.path.isfile(repo_path):
+            return repo_path
+        # Operator-owned profiles can live outside the repository so local
+        # infrastructure and credentials never need to be copied into git.
+        for filename in (f"{instance}.toml", f"polypulse-{instance}.toml"):
+            external_path = os.path.join(USER_BOT_CONFIG_DIR, filename)
+            if os.path.isfile(external_path):
+                return external_path
+        return repo_path
     return CFG_FILE
+
+
+def _instance_config_is_external(instance):
+    path = _instance_config_file(instance)
+    try:
+        return os.path.commonpath((os.path.realpath(path), os.path.realpath(CONFIG_DIR))) != os.path.realpath(CONFIG_DIR)
+    except (OSError, ValueError):
+        return False
 
 
 def load_config(instance=None):
@@ -833,7 +897,7 @@ def starting_balance_usd(instance=None):
     Per-instance view: return that instance's config stake.
     ALL view: sum stakes of all running instances."""
     if instance:
-        return _config_stake(os.path.join(ROOT, "config", f"polypulse-{instance}.toml"))
+        return _config_stake(_instance_config_file(instance))
     # Tournament services are discovered dynamically.  Keeping this tied to
     # the old hard-coded INSTANCES list silently omitted predictor/endgame from
     # the ALL-account equity base.
@@ -841,7 +905,7 @@ def starting_balance_usd(instance=None):
     if not running:
         running = [i for i in fleet_instances() if instance_running(i)]
     if running:
-        return sum(_config_stake(os.path.join(ROOT, "config", f"polypulse-{i}.toml"))
+        return sum(_config_stake(_instance_config_file(i))
                    for i in running if current_mode(i).lower()==current_mode().lower())
     return _config_stake(CFG_FILE)
 
@@ -1009,6 +1073,23 @@ def tail(path, n=400):
         return []
 
 
+def log_line_age_seconds(line, now=None):
+    """Return a same-host log prefix age, or None when it cannot be verified."""
+    match = re.match(r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\]", line or "")
+    if not match:
+        return None
+    try:
+        logged_at = datetime.strptime(
+            f"{match.group(1)} {match.group(2)}", "%Y-%m-%d %H:%M:%S.%f"
+        )
+    except ValueError:
+        return None
+    reference = now if now is not None else datetime.now()
+    if reference.tzinfo is not None:
+        reference = reference.astimezone().replace(tzinfo=None)
+    return (reference - logged_at).total_seconds()
+
+
 def latest_log_value(lines, needle, after="= $"):
     for ln in reversed(lines):
         if needle in ln and after in ln:
@@ -1119,7 +1200,7 @@ _ledger_cache = {}
 _ledger_lock = threading.Lock()
 
 
-def scoped_fill_ledger(mode, since=None, instance=None):
+def scoped_fill_ledger(mode, since=None, instance=None, session_id=None):
     from accounting import replay_fills
     if not instance:
         names = bot_status_detail().get('instances_running') or []
@@ -1127,7 +1208,7 @@ def scoped_fill_ledger(mode, since=None, instance=None):
                    for i in names if current_mode(i).lower()==mode.lower()]
         return {**{k:sum((r[k] for r in ledgers),[]) for k in ('positions','exits','errors')},
                 **{k:sum(r[k] for r in ledgers) for k in ('buy_value','sell_value','fees')}}
-    key = (mode, since, instance)
+    key = (mode, since, instance, session_id)
     with _ledger_lock:
         cached = _ledger_cache.get(key)
         if cached and time.monotonic()-cached[0] < 0.5:
@@ -1139,6 +1220,9 @@ def scoped_fill_ledger(mode, since=None, instance=None):
     if instance:
         filters.append("o.instance=%s")
         args.append(instance)
+    if session_id:
+        filters.append("o.session_id=%s::uuid")
+        args.append(session_id)
     fills = q(f"""SELECT f.id,f.ts,f.price,f.size_shares,f.fee_usd,
                 o.client_order_id,o.mode,o.instance,o.session_id,o.condition_id,
                 o.token_id,o.side_label,o.direction,o.source,o.ts_created
@@ -1152,14 +1236,14 @@ def scoped_fill_ledger(mode, since=None, instance=None):
     return result
 
 
-def reconstructed_positions(mode=None, since=None, instance=None):
+def reconstructed_positions(mode=None, since=None, instance=None, session_id=None):
     mode = mode or current_mode(instance)
     if mode.lower() == 'paper' and since is None:
         since = accounting_since(instance, mode)
     if mode.lower() == 'paper' and not since:
         return empty_positions()
     since = normalize_since(since)
-    ledger = scoped_fill_ledger(mode, since, instance)
+    ledger = scoped_fill_ledger(mode, since, instance, session_id)
     held = ledger['positions']
     metadata = {}
     outcome_metadata = {}
@@ -1200,8 +1284,11 @@ def reconstructed_positions(mode=None, since=None, instance=None):
             m['question'] = outcome['manual_question']
         # Do not borrow the opposite token's bid when its own book is missing.
         own_book = m.get('token_id') == p['token_id']
+        # avg is the observed share price, excluding entry fees. Cost basis
+        # includes fees; marking an unquoted position at fee-inclusive cost
+        # silently erased those already-paid fees from P&L.
+        avg = p['cost']/p['shares']
         cost = p['cost']+p['entry_fees']
-        avg = cost/p['shares']
         close = m.get('window_close')
         secs = int((close-now_ms)/1000) if close else None
         pending = secs is not None and secs <= 0
@@ -1230,15 +1317,17 @@ def reconstructed_positions(mode=None, since=None, instance=None):
             'total_unrealized':sum(p['pnl_usd'] for p in positions),
             'deployed_usd':sum(p['cost_basis'] for p in positions),
             'market_value':sum(p['market_value'] for p in positions),
-            'source':'fills_replay','accounting_errors':ledger['errors']}
+            'source':'fills_replay','accounting_errors':ledger['errors'],
+            'accounting_complete':ledger.get('accounting_complete', not ledger['errors'])}
 
 
-def ledger_accounting(mode=None, position_snapshot=None, since=None, instance=None):
+def ledger_accounting(mode=None, position_snapshot=None, since=None, instance=None,
+                      session_id=None):
     """Truth source for paper accounting: fills cashflow + live open-position marks.
     When instance is set, restricts to that bot's fills and uses its starting stake."""
     mode = mode or current_mode(instance)
     pos = position_snapshot or reconstructed_positions(mode, since, instance)
-    if mode.lower() == "paper" and not since:
+    if mode.lower() == "paper" and not since and not session_id:
         start = starting_balance_usd(instance)
         return {
             "source": "fresh_paper_session",
@@ -1253,8 +1342,9 @@ def ledger_accounting(mode=None, position_snapshot=None, since=None, instance=No
             "sell_value_usd": 0.0,
             "fees_usd": 0.0,
             "session_start": None,
+            "accounting_complete": True,
         }
-    row = pos.get('_ledger') or scoped_fill_ledger(mode, since, instance)
+    row = pos.get('_ledger') or scoped_fill_ledger(mode, since, instance, session_id)
     buy_value = float(row.get("buy_value") or 0.0)
     sell_value = float(row.get("sell_value") or 0.0)
     fees = float(row.get("fees") or 0.0)
@@ -1276,6 +1366,7 @@ def ledger_accounting(mode=None, position_snapshot=None, since=None, instance=No
         "sell_value_usd": sell_value,
         "fees_usd": fees,
         "session_start": since,
+        "accounting_complete": row.get('accounting_complete', not row.get('errors')),
     }
 
 
@@ -1317,6 +1408,13 @@ def api_status(position_snapshot=None, since=None, instance=None):
     deployed = acct["deployed_usd"]
     equity = acct["equity_usd"]
     cash = acct["cash_usd"]
+    accounting_errors = pos.get("accounting_errors", [])
+    marks_complete = all(p.get("mark_is_live") for p in pos.get("positions", []))
+    pnl_complete = bool(acct.get("accounting_complete") and marks_complete)
+    pnl_quality = ("complete_live_marks" if pnl_complete else
+                   "fill_ledger_incomplete" if accounting_errors else
+                   "open_positions_unmarked" if not marks_complete else
+                   "complete")
     if mode.lower() == 'live':
         # Actual free wallet cash already includes deposits, withdrawals and
         # redemptions. Never synthesize it from a paper starting-stake setting.
@@ -1325,10 +1423,12 @@ def api_status(position_snapshot=None, since=None, instance=None):
         equity = cash+acct['market_value_usd'] if cash is not None else None
         acct['source'] = 'wallet_snapshot_and_fills' if fresh_wallet else 'wallet_snapshot_unavailable'
     health = None
+    health_age_s = None
     health_fresh = health_total = health_stale = None
     for ln in reversed(lines):
         if "orderbook health" in ln:
             health = ln.split("orderbook health:", 1)[1].strip()
+            health_age_s = log_line_age_seconds(ln)
             m = re.search(r"(\d+)\s*/\s*(\d+)\s+(fresh|stale)", health)
             if m:
                 first, total, label = int(m.group(1)), int(m.group(2)), m.group(3)
@@ -1353,16 +1453,23 @@ def api_status(position_snapshot=None, since=None, instance=None):
         "wallet_usd": wallet,
         "cash_usd": cash,
         "equity_usd": equity,
-        "realized_pnl": realized,
-        "unrealized_pnl": unreal,
-        "net_pnl": acct["net_pnl"],
+        "realized_pnl": realized if not accounting_errors else None,
+        "realized_pnl_estimate": realized,
+        "unrealized_pnl": unreal if marks_complete and not accounting_errors else None,
+        "unrealized_pnl_estimate": unreal,
+        "net_pnl": acct["net_pnl"] if pnl_complete else None,
+        "net_pnl_estimate": acct["net_pnl"],
+        "net_pnl_available": pnl_complete,
+        "net_pnl_quality": pnl_quality,
+        "accounting_complete": bool(acct.get("accounting_complete")),
         "deployed_usd": deployed,
         "market_value_usd": acct["market_value_usd"],
         "buy_value_usd": acct["buy_value_usd"],
         "sell_value_usd": acct["sell_value_usd"],
         "fees_usd": acct["fees_usd"],
         "accounting_source": acct["source"],
-        "accounting_errors": pos.get("accounting_errors", []),
+        "accounting_errors": accounting_errors,
+        "unmarked_positions": sum(not p.get("mark_is_live") for p in pos.get("positions", [])),
         "session_start": bot.get("session_start"),
         "open_positions": len(pos.get("positions") or []),
         "wins": wins,
@@ -1373,6 +1480,7 @@ def api_status(position_snapshot=None, since=None, instance=None):
         "health_fresh": health_fresh,
         "health_stale": health_stale,
         "health_total": health_total,
+        "health_age_s": health_age_s,
         "heartbeat": hb,
         "instances_running": fleet_bot.get("instances_running", []),
         "server_ts": int(time.time() * 1000),
@@ -1381,6 +1489,137 @@ def api_status(position_snapshot=None, since=None, instance=None):
 
 def api_positions():
     return reconstructed_positions()
+
+
+POLYMARKET_DATA_API_V2 = "https://data-api.polymarket.com/v2"
+POLYMARKET_ACCOUNT_PAGE_SIZE = 100
+POLYMARKET_ACCOUNT_MAX_RESPONSE_BYTES = 4_000_000
+
+
+def _polymarket_data_v2_get(route, params):
+    """Read one bounded response from the fixed, first-party Data API host."""
+    import urllib.request
+    url = f"{POLYMARKET_DATA_API_V2}/{route}?{urlencode(params)}"
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "PolySparQ++/read-only-account-view",
+                 "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=6.0) as response:
+        raw = response.read(POLYMARKET_ACCOUNT_MAX_RESPONSE_BYTES + 1)
+    if len(raw) > POLYMARKET_ACCOUNT_MAX_RESPONSE_BYTES:
+        raise ValueError("Polymarket Data API response exceeded the 4 MB safety limit")
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict) or "data" not in payload:
+        raise ValueError("Polymarket Data API returned an invalid response envelope")
+    return payload
+
+
+def api_polymarket_account(user, cursor=None):
+    """Optional account-wide holdings cross-check; read-only and never bot P&L."""
+    address = str(user or "").strip()
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", address):
+        return 400, {"error": "Enter a valid Polymarket proxy wallet address (0x + 40 hex characters)."}
+    if address.lower() == "0x" + "0" * 40:
+        return 400, {"error": "The zero address cannot identify a Polymarket account."}
+
+    cursor = str(cursor or "")
+    if len(cursor) > 4096 or any(ord(char) < 32 for char in cursor):
+        return 400, {"error": "The Polymarket cursor is invalid; refresh from the first page."}
+
+    position_params = {
+        "user": address,
+        "status": "OPEN",
+        "limit": POLYMARKET_ACCOUNT_PAGE_SIZE,
+        "sort_by": "CURRENT_VALUE",
+        "sort_direction": "DESC",
+        "include_archived": "true",
+    }
+    if cursor:
+        position_params["cursor"] = cursor
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            positions_future = executor.submit(
+                _polymarket_data_v2_get, "positions", position_params)
+            value_future = (None if cursor else executor.submit(
+                _polymarket_data_v2_get, "value", {"user": address}))
+            positions_response = positions_future.result(timeout=7.0)
+            value_response = value_future.result(timeout=7.0) if value_future else None
+    except Exception as exc:
+        import urllib.error
+        if isinstance(exc, urllib.error.HTTPError):
+            status = int(exc.code)
+            if status == 429:
+                return 503, {"error": "Polymarket Data API is rate-limiting this request. Try again shortly."}
+            if status == 400:
+                return 400, {"error": "Polymarket Data API rejected this address or page cursor."}
+            return 502, {"error": f"Polymarket Data API returned HTTP {status}."}
+        if isinstance(exc, (TimeoutError, urllib.error.URLError)):
+            return 503, {"error": "Polymarket Data API timed out or is temporarily unreachable."}
+        return 502, {"error": "Polymarket Data API response could not be read safely."}
+
+    if not isinstance(positions_response, dict):
+        return 502, {"error": "Polymarket Data API returned an invalid positions page."}
+    rows = positions_response.get("data")
+    pagination = positions_response.get("pagination")
+    if not isinstance(rows, list) or not isinstance(pagination, dict):
+        return 502, {"error": "Polymarket Data API returned an invalid positions page."}
+    portfolio_value = value_response.get("data") if isinstance(value_response, dict) else None
+    if not isinstance(portfolio_value, dict) and not cursor:
+        return 502, {"error": "Polymarket Data API returned an invalid portfolio value."}
+    if (not cursor and str(portfolio_value.get("proxy_wallet", "")).lower() != address.lower()):
+        return 502, {"error": "Polymarket Data API returned a different wallet than requested."}
+
+    numeric_fields = (
+        "current_size", "avg_price", "entry_cost_usdc", "entry_fees_usdc",
+        "total_cost_usdc", "current_price", "current_value", "total_size",
+        "realized_pnl", "unrealized_pnl", "total_pnl", "percent_pnl",
+    )
+
+    def finite_number(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) else None
+
+    safe_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return 502, {"error": "Polymarket Data API returned an invalid position row."}
+        if str(row.get("proxy_wallet", "")).lower() != address.lower():
+            return 502, {"error": "Polymarket Data API returned a position for a different wallet."}
+        safe = {field: finite_number(row.get(field)) for field in numeric_fields}
+        safe.update({field: str(row.get(field) or "")[:500] for field in (
+            "condition_id", "token_id", "title", "slug", "outcome", "status",
+            "end_date", "event_slug")})
+        safe.update({field: bool(row.get(field)) for field in (
+            "redeemable", "mergeable", "archived")})
+        try:
+            safe["first_entry_at"] = int(row.get("first_entry_at") or 0)
+        except (TypeError, ValueError, OverflowError):
+            safe["first_entry_at"] = 0
+        safe_rows.append(safe)
+
+    next_cursor = pagination.get("next_cursor")
+    if next_cursor is not None and (not isinstance(next_cursor, str) or len(next_cursor) > 4096):
+        return 502, {"error": "Polymarket Data API returned an invalid pagination cursor."}
+    has_more = bool(pagination.get("has_more") and next_cursor)
+    try:
+        page_offset = max(0, int(pagination.get("offset") or 0))
+    except (TypeError, ValueError, OverflowError):
+        page_offset = 0
+    return {"source": "Polymarket Data API v2", "read_only": True,
+            "proxy_wallet": address,
+            "portfolio_value_usdc": (finite_number(portfolio_value.get("value"))
+                                      if portfolio_value is not None else None),
+            "portfolio_value_includes": "Open single-outcome holdings at market marks plus unresolved combo positions at cost basis; not free USDC cash.",
+            "position_status_scope": "OPEN (includes redeemable holdings); archived markets included.",
+            "positions": safe_rows, "page_offset": page_offset,
+            "page_count": len(safe_rows), "has_more": has_more,
+            "next_cursor": next_cursor if has_more else None,
+            "refreshed_at_ms": int(time.time() * 1000)}
 
 
 def _synthetic_price_line(cid, side, minutes):
@@ -2326,6 +2565,17 @@ def api_predictor_trajectory(condition_id=None, limit=200):
     return {"samples": samples, "by_market": by_market}
 
 
+# ── Manual-trading prediction board ────────────────────────────────────────
+_manual_prediction_service = None
+_manual_prediction_lock = threading.Lock()
+_manual_news_cache = [0.0, None]
+_manual_news_lock = threading.Lock()
+PREDICTION_NEWS_FEEDS = (
+    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/", False),
+    ("Cointelegraph", "https://cointelegraph.com/rss", False),
+    ("Decrypt", "https://decrypt.co/feed", False),
+    ("The Oracle by Polymarket", "https://news.polymarket.com/feed", True),
+)
 _prediction_gate_schema_lock = threading.Lock()
 _prediction_gate_schema_initialized = False
 
@@ -2423,12 +2673,914 @@ def _record_prediction_gate_current(board):
     finally:
         pool.putconn(conn)
 
+_prediction_history_init_lock = threading.Lock()
+_prediction_history_backfill_lock = threading.Lock()
+_prediction_history_schema_initialized = False
+_prediction_history_backfill_complete = False
 
-# ── Manual-trading prediction board ────────────────────────────────────────
-_manual_prediction_service = None
-_manual_prediction_lock = threading.Lock()
-_manual_news_cache = [0.0, None]
-_manual_news_lock = threading.Lock()
+PREDICTION_HISTORY_CHECKPOINTS = (
+    ("pre_start_60s", "1 MIN BEFORE", -60.0),
+    ("open_0pct", "OPEN · 0%", 0.0),
+    ("elapsed_20pct", "20%", 0.20),
+    ("elapsed_40pct", "40%", 0.40),
+    ("elapsed_60pct", "60%", 0.60),
+    ("elapsed_80pct", "80%", 0.80),
+)
+
+
+def _prediction_history_connection():
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        conn.set_session(readonly=False, autocommit=False)
+        return pool, conn
+    except Exception:
+        pool.putconn(conn, close=True)
+        raise
+
+
+def _prediction_history_ensure_schema():
+    """Apply the idempotent history migration for existing cockpit installs."""
+    global _prediction_history_schema_initialized
+    if _prediction_history_schema_initialized:
+        return
+    with _prediction_history_init_lock:
+        if _prediction_history_schema_initialized:
+            return
+        migrations = []
+        for filename in ("029_prediction_history.sql", "030_prediction_gate_current.sql"):
+            path = os.path.join(ROOT, "sql", filename)
+            with open(path, encoding="utf-8") as source:
+                migrations.append(source.read())
+        pool, conn = _prediction_history_connection()
+        try:
+            with conn.cursor() as cur:
+                for migration in migrations:
+                    cur.execute(migration)
+            conn.commit()
+            _prediction_history_schema_initialized = True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            pool.putconn(conn)
+
+
+def _prediction_history_schema_init():
+    """Prepare PostgreSQL, then import actual legacy snapshots once."""
+    global _prediction_history_backfill_complete
+    _prediction_history_ensure_schema()
+    if _prediction_history_backfill_complete:
+        return
+    with _prediction_history_backfill_lock:
+        if _prediction_history_backfill_complete:
+            return
+        _backfill_prediction_history_sqlite()
+        _prediction_history_backfill_complete = True
+
+
+def _history_number(value):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _history_time(epoch_s):
+    return datetime.fromtimestamp(float(epoch_s), tz=timezone.utc)
+
+
+def _history_source_window(source):
+    source = str(source or "").lower()
+    if "twap-60s" in source:
+        return 60
+    if "twap-30s" in source:
+        return 30
+    return 0
+
+
+def _history_json(value):
+    """Drop non-finite numbers before storing forecast diagnostics as JSONB."""
+    if isinstance(value, dict):
+        return {str(k): _history_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_history_json(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _history_key(card):
+    cid = str(card.get("condition_id") or "").strip()
+    slug = str(card.get("slug") or "").strip()
+    opened = int(float(card.get("window_open") or 0))
+    return cid or f"{slug}:{opened}", cid or None, slug
+
+
+def _history_window_values(card):
+    from prediction_board import reference_window
+    window_key, cid, slug = _history_key(card)
+    opened_ms = int(float(card.get("window_open") or 0))
+    closed_ms = int(float(card.get("window_close") or 0))
+    horizon = int(card.get("horizon_seconds") or 0)
+    if not window_key or not slug or opened_ms <= 0 or closed_ms <= opened_ms:
+        return None
+    source = card.get("settlement_source") or ""
+    resolution_window = max(0, reference_window({"resolutionSource": source}))
+    opening_price = None
+    opening_ts = None
+    if card.get("period") == "CURRENT" and not card.get("provisional"):
+        opening_price = _history_number(card.get("strike"))
+        opening_ts = card.get("reference_strike_ts")
+    return {
+        "window_key": window_key, "condition_id": cid, "asset": str(card.get("asset") or ""),
+        "horizon": horizon, "slug": slug, "opened": _history_time(opened_ms/1000),
+        "closed": _history_time(closed_ms/1000), "source": str(source),
+        "resolution_window": resolution_window, "model_version": str(card.get("independent_model_version") or ""),
+        "model_basis": str(card.get("independent_prediction_basis") or card.get("prediction_basis") or ""),
+        "open_price": opening_price if opening_price and opening_price > 0 else None,
+        "open_price_ts": _history_time(opening_ts) if _history_number(opening_ts) else None,
+    }
+
+
+def _backfill_prediction_history_sqlite():
+    """Import recorded independent-model snapshots, without synthesizing gaps."""
+    import sqlite3
+    import re as _re
+
+    migration_key = "prediction-quality-minute-journal-v1"
+    path = os.path.join(ROOT, "logs", "prediction_quality.sqlite3")
+    if not os.path.isfile(path):
+        return
+    db = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True, timeout=2)
+    db.row_factory = sqlite3.Row
+    try:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(forecasts)")}
+        required = {"cid", "slug", "bucket", "captured", "closes", "p", "outcome", "version"}
+        if not required.issubset(columns):
+            return
+        diagnostics_expr = "diagnostics_json" if "diagnostics_json" in columns else "NULL"
+        rows = db.execute(f"""SELECT cid,slug,bucket,captured,closes,p,outcome,version,{diagnostics_expr} AS diagnostics
+            FROM forecasts WHERE version IN (?,?) ORDER BY captured""",
+            ("vantagepulse-independent-v1", "vantagepulse-independent-v1-next")).fetchall()
+    finally:
+        db.close()
+
+    windows = {}
+    for row in rows:
+        cid = str(row["cid"] or "").strip()
+        slug = str(row["slug"] or "").strip()
+        match = _re.fullmatch(r"(btc|eth|sol|xrp)-updown-(5m|15m)-(\d+)", slug, _re.I)
+        captured = _history_number(row["captured"])
+        closes = _history_number(row["closes"])
+        probability = _history_number(row["p"])
+        if not cid or not match or captured is None or closes is None or probability is None:
+            continue
+        asset, horizon_text, _ = match.groups()
+        horizon = 300 if horizon_text.lower() == "5m" else 900
+        opened = closes - horizon
+        version = str(row["version"])
+        is_next = version.endswith("-next")
+        window_key = cid
+        record = windows.setdefault(window_key, {
+            "condition_id": cid, "asset": asset.upper(), "horizon": horizon, "slug": slug,
+            "opened": opened, "closed": closes, "source": "", "resolution_window": 0,
+            "model_version": "vantagepulse-independent-v1",
+            "model_basis": "chainlink_settlement_plus_fitted_5m_tick_correction" if horizon == 300 else "chainlink_settlement_kernel",
+            "open_price": None, "open_price_ts": None, "outcome": None, "candidates": {},
+        })
+        outcome = row["outcome"]
+        if outcome in (0, 1):
+            record["outcome"] = "UP" if int(outcome) == 1 else "DOWN"
+        try:
+            diagnostics = json.loads(row["diagnostics"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            diagnostics = {}
+        if diagnostics:
+            source = diagnostics.get("settlement_source") or ""
+            if source:
+                record["source"] = str(source)
+                record["resolution_window"] = _history_source_window(source)
+            if not is_next and record["open_price"] is None:
+                strike = _history_number(diagnostics.get("strike"))
+                if strike is not None and strike > 0:
+                    record["open_price"] = strike
+            record["model_basis"] = str(diagnostics.get("prediction_basis") or record["model_basis"])
+
+        if is_next:
+            key, label, target = "pre_start_60s", "1 MIN BEFORE", opened - 60
+            tolerance = 15.0
+        else:
+            targets = (("open_0pct", "OPEN · 0%", 0.0),
+                       ("elapsed_20pct", "20%", 0.20),
+                       ("elapsed_40pct", "40%", 0.40),
+                       ("elapsed_60pct", "60%", 0.60),
+                       ("elapsed_80pct", "80%", 0.80))
+            key, label, target = min(targets, key=lambda item: abs(captured-(opened+item[2]*horizon)))
+            target = opened + target*horizon
+            # The former minute-bin journal resolves 15m targets to the nearest
+            # recorded minute. Keep that actual timestamp visible; 5m targets
+            # must be genuinely close to their requested point.
+            tolerance = 75.0 if horizon == 900 and key != "open_0pct" else 15.0
+        offset = captured-target
+        if abs(offset) > tolerance:
+            continue
+        side = "UP" if probability > 0.5 else "DOWN" if probability < 0.5 else "EVEN"
+        side_probability = max(probability, 1.0-probability)
+        candidate = {
+            "checkpoint_key": key, "label": label, "target": target,
+            "captured": captured, "elapsed_pct": (captured-opened)/horizon*100,
+            "offset": offset, "up_probability": probability, "side": side,
+            "side_probability": side_probability, "version": version,
+            "basis": record["model_basis"], "status": "captured",
+            "details": {"source": "Existing SQLite minute-bucket forecast journal",
+                        "historical_backfill": True, "original_capture_bucket": row["bucket"]},
+        }
+        previous = record["candidates"].get(key)
+        if previous is None or (abs(offset), -captured) < (abs(previous["offset"]), -previous["captured"]):
+            record["candidates"][key] = candidate
+
+    window_values = []
+    checkpoint_values = []
+    for key, record in windows.items():
+        window_values.append((key, record["condition_id"], record["asset"], record["horizon"],
+            record["slug"], _history_time(record["opened"]), _history_time(record["closed"]),
+            record["source"] or None, record["resolution_window"], record["model_version"],
+            record["model_basis"] or None, record["open_price"], None, record["outcome"],
+            "SQLite existing settled forecast journal" if record["outcome"] else None,
+            _history_time(record["closed"]) if record["outcome"] else None))
+        for ck, label, offset in PREDICTION_HISTORY_CHECKPOINTS:
+            target = record["opened"] + offset if ck == "pre_start_60s" else record["opened"] + offset*record["horizon"]
+            candidate = record["candidates"].get(ck)
+            if candidate:
+                checkpoint_values.append((key, ck, _history_time(target), _history_time(candidate["captured"]),
+                    candidate["elapsed_pct"], candidate["offset"], candidate["status"],
+                    candidate["up_probability"], candidate["side"], candidate["side_probability"],
+                    candidate["version"], candidate["basis"] or None, "ready", None, None, None, None,
+                    psycopg2.extras.Json(_history_json(candidate["details"]))))
+            else:
+                checkpoint_values.append((key, ck, _history_time(target), None, None, None,
+                    "not_recorded", None, None, None, None, None, "historical_gap", None, None,
+                    None, None, psycopg2.extras.Json({"source": "Existing SQLite minute-bucket forecast journal",
+                        "reason": "No recorded model snapshot close enough to this checkpoint"})))
+
+    pool, conn = _prediction_history_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM vp.prediction_history_imports WHERE migration_key=%s", (migration_key,))
+            if cur.fetchone():
+                conn.rollback()
+                return
+            if window_values:
+                psycopg2.extras.execute_values(cur, """INSERT INTO vp.prediction_history_windows
+                (window_key,condition_id,asset,horizon_seconds,slug,window_open,window_close,
+                 settlement_source,settlement_window_s,model_version,model_basis,open_price,
+                 close_price,outcome,outcome_source,resolved_at)
+                VALUES %s ON CONFLICT(window_key) DO NOTHING""", window_values, page_size=1000)
+            if checkpoint_values:
+                psycopg2.extras.execute_values(cur, """INSERT INTO vp.prediction_history_checkpoints
+                (window_key,checkpoint_key,target_at,captured_at,observed_elapsed_pct,capture_offset_s,
+                 capture_status,up_probability,side,side_probability,model_version,model_basis,model_status,
+                 spot_price,strike_price,market_up_probability,fee_adjusted_edge,details)
+                VALUES %s ON CONFLICT(window_key,checkpoint_key) DO NOTHING""",
+                checkpoint_values, page_size=1000)
+            captured_count = sum(1 for x in checkpoint_values if x[6] == "captured")
+            cur.execute("""INSERT INTO vp.prediction_history_imports
+                (migration_key,windows_imported,checkpoints_imported) VALUES (%s,%s,%s)
+                ON CONFLICT(migration_key) DO NOTHING""",
+                (migration_key, len(window_values), captured_count))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+def _record_prediction_history(board):
+    """Persist active market windows and the closest live checkpoint sample."""
+    now_ms = _history_number(board.get("inputs_at") or board.get("generated_at"))
+    if now_ms is None:
+        return
+    cards = []
+    live_rows = []
+    for item in board.get("cards") or []:
+        if isinstance(item, dict):
+            cards.append(item)
+            # Publish only actual current windows. The next-window estimate is
+            # provisional and must never authorize a live-window entry.
+            if item.get("period") == "CURRENT":
+                condition_id = str(item.get("condition_id") or "")
+                asset = str(item.get("asset") or "").upper()
+                horizon = int(item.get("horizon_seconds") or 0)
+                opened = _history_number(item.get("window_open"))
+                closed = _history_number(item.get("window_close"))
+                model_status = str(item.get("model_status") or "unknown")
+                raw_p = item.get("independent_up_probability")
+                if raw_p is None:
+                    raw_p = item.get("up_probability")
+                probability = _history_number(raw_p)
+                ready = (model_status == "ready" and probability is not None and
+                         0.0 <= probability <= 1.0)
+                if (condition_id and asset in ("BTC", "ETH", "SOL", "XRP") and
+                        horizon in (300, 900) and opened is not None and closed is not None):
+                    live_rows.append((condition_id, asset, horizon,
+                        str(item.get("slug") or ""), _history_time(opened/1000.0),
+                        _history_time(closed/1000.0), model_status,
+                        probability if ready else None,
+                        str(item.get("independent_model_version") or board.get("independent_model_version") or board.get("model_version") or ""),
+                        str(item.get("prediction_basis") or ""),
+                        _history_time(now_ms/1000.0)))
+            if isinstance(item.get("next_window"), dict):
+                cards.append(item["next_window"])
+    window_rows, pending_rows, captures = [], [], []
+    for card in cards:
+        record = _history_window_values(card)
+        if not record or record["asset"] not in ("BTC", "ETH", "SOL", "XRP") or record["horizon"] not in (300, 900):
+            continue
+        window_rows.append((record["window_key"], record["condition_id"], record["asset"], record["horizon"],
+            record["slug"], record["opened"], record["closed"], record["source"] or None,
+            record["resolution_window"], record["model_version"] or None, record["model_basis"] or None,
+            record["open_price"], record["open_price_ts"]))
+        opened_s = record["opened"].timestamp()
+        for ck, _label, offset in PREDICTION_HISTORY_CHECKPOINTS:
+            target_s = opened_s + (offset if ck == "pre_start_60s" else offset*record["horizon"])
+            pending_rows.append((record["window_key"], ck, _history_time(target_s)))
+            tolerance = 15.0 if ck in ("pre_start_60s", "open_0pct") else (8.0 if record["horizon"] == 300 else 14.0)
+            capture_offset = now_ms/1000.0-target_s
+            if abs(capture_offset) > tolerance:
+                continue
+            model_status = str(card.get("model_status") or "unknown")
+            raw_p = card.get("independent_up_probability")
+            if raw_p is None:
+                raw_p = card.get("up_probability")
+            probability = _history_number(raw_p)
+            ready = model_status in ("ready", "provisional") and probability is not None and 0 <= probability <= 1
+            side = "UP" if probability > 0.5 else "DOWN" if probability < 0.5 else "EVEN" if probability is not None else None
+            side_probability = max(probability, 1-probability) if probability is not None else None
+            details = {
+                "reference": card.get("reference"), "reference_age_s": card.get("reference_age_s"),
+                "candle_age_s": card.get("candle_age_s"), "book_age_s": card.get("book_age_s"),
+                "oracle_delta_pct": card.get("oracle_delta_pct"),
+                "coinbase_momentum_bps": card.get("coinbase_momentum_bps"),
+                "binance_momentum_bps": card.get("binance_momentum_bps"),
+                "coinbase_basis_bps": card.get("coinbase_basis_bps"),
+                "binance_basis_bps": card.get("binance_basis_bps"),
+                "technical": card.get("technical"), "input_timestamps": card.get("input_timestamps"),
+                "components": card.get("independent_components") or card.get("independent_signal_contributions"),
+                "reason": None if ready else card.get("manual_note") or model_status,
+            }
+            target_ms = int(target_s*1000)
+            captured_ms = int(now_ms)
+            captures.append((record["window_key"], ck, _history_time(target_s), _history_time(captured_ms/1000),
+                (captured_ms/1000-opened_s)/record["horizon"]*100, capture_offset,
+                "captured" if ready else "unavailable", probability if ready else None,
+                side if ready else None, side_probability if ready else None,
+                record["model_version"] or None, record["model_basis"] or None, model_status,
+                _history_number(card.get("spot")), _history_number(card.get("strike")) if not card.get("provisional") else None,
+                _history_number(card.get("polymarket_up")), _history_number(card.get("independent_conservative_edge")),
+                psycopg2.extras.Json(_history_json(details))))
+
+    if not window_rows and not live_rows:
+        return
+    pool, conn = _prediction_history_connection()
+    try:
+        with conn.cursor() as cur:
+            if live_rows:
+                psycopg2.extras.execute_values(cur, """INSERT INTO vp.prediction_gate_current
+                    (condition_id,asset,horizon_seconds,slug,window_open,window_close,
+                     model_status,up_probability,model_version,model_basis,source_updated_at)
+                    VALUES %s ON CONFLICT(condition_id) DO UPDATE SET
+                      asset=EXCLUDED.asset,horizon_seconds=EXCLUDED.horizon_seconds,
+                      slug=EXCLUDED.slug,window_open=EXCLUDED.window_open,
+                      window_close=EXCLUDED.window_close,model_status=EXCLUDED.model_status,
+                      up_probability=EXCLUDED.up_probability,model_version=EXCLUDED.model_version,
+                      model_basis=EXCLUDED.model_basis,source_updated_at=EXCLUDED.source_updated_at,
+                      published_at=clock_timestamp()""", live_rows, page_size=32)
+            if window_rows:
+                psycopg2.extras.execute_values(cur, """INSERT INTO vp.prediction_history_windows
+                (window_key,condition_id,asset,horizon_seconds,slug,window_open,window_close,
+                 settlement_source,settlement_window_s,model_version,model_basis,open_price,open_price_ts)
+                VALUES %s ON CONFLICT(window_key) DO UPDATE SET
+                  condition_id=COALESCE(vp.prediction_history_windows.condition_id,EXCLUDED.condition_id),
+                  settlement_source=COALESCE(EXCLUDED.settlement_source,vp.prediction_history_windows.settlement_source),
+                  settlement_window_s=CASE WHEN EXCLUDED.settlement_window_s>0 THEN EXCLUDED.settlement_window_s ELSE vp.prediction_history_windows.settlement_window_s END,
+                  model_version=COALESCE(EXCLUDED.model_version,vp.prediction_history_windows.model_version),
+                  model_basis=COALESCE(EXCLUDED.model_basis,vp.prediction_history_windows.model_basis),
+                  open_price=COALESCE(vp.prediction_history_windows.open_price,EXCLUDED.open_price),
+                  open_price_ts=COALESCE(vp.prediction_history_windows.open_price_ts,EXCLUDED.open_price_ts),
+                  updated_at=now()""", window_rows, page_size=100)
+                psycopg2.extras.execute_values(cur, """INSERT INTO vp.prediction_history_checkpoints
+                (window_key,checkpoint_key,target_at) VALUES %s ON CONFLICT(window_key,checkpoint_key) DO NOTHING""",
+                pending_rows, page_size=200)
+            if captures:
+                psycopg2.extras.execute_values(cur, """INSERT INTO vp.prediction_history_checkpoints
+                    (window_key,checkpoint_key,target_at,captured_at,observed_elapsed_pct,capture_offset_s,
+                     capture_status,up_probability,side,side_probability,model_version,model_basis,model_status,
+                     spot_price,strike_price,market_up_probability,fee_adjusted_edge,details)
+                    VALUES %s ON CONFLICT(window_key,checkpoint_key) DO UPDATE SET
+                      captured_at=EXCLUDED.captured_at,observed_elapsed_pct=EXCLUDED.observed_elapsed_pct,
+                      capture_offset_s=EXCLUDED.capture_offset_s,capture_status=EXCLUDED.capture_status,
+                      up_probability=EXCLUDED.up_probability,side=EXCLUDED.side,
+                      side_probability=EXCLUDED.side_probability,model_version=EXCLUDED.model_version,
+                      model_basis=EXCLUDED.model_basis,model_status=EXCLUDED.model_status,
+                      spot_price=EXCLUDED.spot_price,strike_price=EXCLUDED.strike_price,
+                      market_up_probability=EXCLUDED.market_up_probability,
+                      fee_adjusted_edge=EXCLUDED.fee_adjusted_edge,details=EXCLUDED.details
+                    WHERE vp.prediction_history_checkpoints.capture_status IN ('pending','not_recorded')
+                       OR (vp.prediction_history_checkpoints.capture_status='unavailable' AND EXCLUDED.capture_status='captured')
+                       OR (vp.prediction_history_checkpoints.capture_status='captured' AND EXCLUDED.capture_status='captured'
+                           AND abs(EXCLUDED.capture_offset_s)<abs(vp.prediction_history_checkpoints.capture_offset_s))""",
+                    captures, page_size=100)
+            cur.execute("""UPDATE vp.prediction_history_checkpoints c
+                SET capture_status='not_recorded',model_status='missed_checkpoint',
+                    details=jsonb_build_object('reason','No fresh model snapshot was captured near this checkpoint')
+                FROM vp.prediction_history_windows w
+                WHERE w.window_key=c.window_key AND c.capture_status='pending'
+                  AND c.target_at + CASE
+                    WHEN c.checkpoint_key IN ('pre_start_60s','open_0pct') THEN interval '15 seconds'
+                    WHEN w.horizon_seconds=300 THEN interval '8 seconds'
+                    ELSE interval '14 seconds' END < to_timestamp(%s/1000.0)""", (now_ms,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+def _resolve_prediction_history():
+    """Refresh reference prices from oracle ticks and resolve completed markets."""
+    from prediction_board import resolved_outcome
+    pool, conn = _prediction_history_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""WITH candidates AS (
+                SELECT w.window_key,
+                  (SELECT t.price FROM vp.oracle_ticks t
+                   WHERE t.asset=w.asset||CASE WHEN w.settlement_window_s=0 THEN ':SPOT' ELSE ':TWAP'||w.settlement_window_s::text END
+                     AND t.ts<=w.window_open AND t.ts>=w.window_open-interval '10 seconds'
+                   ORDER BY t.ts DESC LIMIT 1) AS op,
+                  (SELECT t.ts FROM vp.oracle_ticks t
+                   WHERE t.asset=w.asset||CASE WHEN w.settlement_window_s=0 THEN ':SPOT' ELSE ':TWAP'||w.settlement_window_s::text END
+                     AND t.ts<=w.window_open AND t.ts>=w.window_open-interval '10 seconds'
+                   ORDER BY t.ts DESC LIMIT 1) AS opt,
+                  (SELECT t.price FROM vp.oracle_ticks t
+                   WHERE t.asset=w.asset||CASE WHEN w.settlement_window_s=0 THEN ':SPOT' ELSE ':TWAP'||w.settlement_window_s::text END
+                     AND t.ts<=w.window_close AND t.ts>=w.window_close-interval '10 seconds'
+                   ORDER BY t.ts DESC LIMIT 1) AS cp,
+                  (SELECT t.ts FROM vp.oracle_ticks t
+                   WHERE t.asset=w.asset||CASE WHEN w.settlement_window_s=0 THEN ':SPOT' ELSE ':TWAP'||w.settlement_window_s::text END
+                     AND t.ts<=w.window_close AND t.ts>=w.window_close-interval '10 seconds'
+                   ORDER BY t.ts DESC LIMIT 1) AS cpt
+                FROM vp.prediction_history_windows w
+                WHERE (w.open_price IS NULL AND w.window_open<now())
+                   OR (w.close_price IS NULL AND w.window_close<now())
+                ORDER BY w.window_close DESC LIMIT 1000
+            )
+            UPDATE vp.prediction_history_windows w SET
+              open_price=COALESCE(w.open_price,c.op),open_price_ts=COALESCE(w.open_price_ts,c.opt),
+              close_price=COALESCE(w.close_price,c.cp),close_price_ts=COALESCE(w.close_price_ts,c.cpt),
+              updated_at=now()
+            FROM candidates c WHERE w.window_key=c.window_key""")
+            cur.execute("""SELECT window_key,condition_id,slug FROM vp.prediction_history_windows
+                WHERE condition_id IS NOT NULL AND window_close<now()-interval '120 seconds'
+                  AND outcome IS NULL AND (resolution_checked_at IS NULL OR resolution_checked_at<now()-interval '15 minutes')
+                ORDER BY window_close DESC LIMIT 16""")
+            pending = cur.fetchall()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+    if not pending:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    from urllib.parse import urlencode as _urlencode
+
+    def fetch(row):
+        key, cid, slug = row
+        try:
+            markets = _public_json("https://gamma-api.polymarket.com/markets?"+
+                _urlencode({"slug": slug, "closed": "true"}), timeout=4.0)
+            for market in markets or []:
+                outcome = resolved_outcome(market, cid)
+                if outcome is not None:
+                    return key, ("UP" if outcome else "DOWN")
+        except Exception:
+            pass
+        return key, None
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        resolved = list(executor.map(fetch, pending))
+    pool, conn = _prediction_history_connection()
+    try:
+        with conn.cursor() as cur:
+            for key, outcome in resolved:
+                cur.execute("""UPDATE vp.prediction_history_windows SET
+                    outcome=COALESCE(outcome,%s),outcome_source=CASE WHEN %s IS NULL THEN outcome_source ELSE 'Polymarket Gamma resolution' END,
+                    resolved_at=COALESCE(resolved_at,CASE WHEN %s IS NULL THEN NULL ELSE now() END),
+                    resolution_checked_at=now(),updated_at=now() WHERE window_key=%s""",
+                    (outcome, outcome, outcome, key))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+def _wilson_interval(successes, samples):
+    """Return a nominal two-sided 95% Wilson interval for a binomial rate."""
+    try:
+        n, k = int(samples), int(successes)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if n < 1 or k < 0 or k > n:
+        return None
+    z = 1.959963984540054
+    p = k / n
+    z2 = z * z
+    denominator = 1 + z2 / n
+    center = (p + z2 / (2 * n)) / denominator
+    half_width = z * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n)) / denominator
+    return max(0.0, center - half_width), min(1.0, center + half_width)
+
+
+def api_prediction_reference(asset, horizon_seconds, window_open_ms,
+                             window_close_ms=None, point_limit=600):
+    """Return actual per-source ticks and official references for one prediction window."""
+    asset = str(asset or "").upper()
+    if asset not in ASSETS:
+        return {"error": "asset must be BTC, ETH, SOL, or XRP", "series": {}}
+    try:
+        horizon_seconds = int(horizon_seconds)
+        window_open_ms = int(window_open_ms)
+        window_close_ms = int(window_close_ms) if window_close_ms not in (None, "") else None
+        point_limit = max(50, min(1200, int(point_limit)))
+    except (TypeError, ValueError, OverflowError):
+        return {"error": "invalid prediction reference window", "series": {}}
+    if horizon_seconds not in (300, 900):
+        return {"error": "horizon must be 300 or 900 seconds", "series": {}}
+    expected_close_ms = window_open_ms + horizon_seconds * 1000
+    if window_close_ms is None:
+        window_close_ms = expected_close_ms
+    if window_open_ms <= 0 or abs(window_close_ms - expected_close_ms) > 2000:
+        return {"error": "window timestamps do not match the selected horizon", "series": {}}
+
+    now_ms = int(time.time() * 1000)
+    tick_end_ms = min(now_ms, window_close_ms)
+    source_queries = (
+        ("oracle", "oracle_ticks", "asset", asset),
+        ("coinbase", "coinbase_ticks", "asset", asset),
+        ("binance", "binance_ticks", "symbol", SYMBOL[asset]),
+    )
+    series, latest, errors = {}, {}, {}
+    for name, table, key_column, key_value in source_queries:
+        # Table and key-column names come only from the constant tuple above.
+        try:
+            rows = q(f"""WITH ranked AS (
+                    SELECT ts,price,row_number() OVER (ORDER BY ts) AS rn,
+                           count(*) OVER () AS total
+                    FROM vp.{table}
+                    WHERE {key_column}=%s
+                      AND ts>=to_timestamp(%s/1000.0)
+                      AND ts<=to_timestamp(%s/1000.0)
+                )
+                SELECT (extract(epoch FROM ts)*1000)::bigint AS ts_ms,price
+                FROM ranked
+                WHERE total<=%s OR rn=1 OR rn=total
+                   OR mod(rn-1,greatest(1,ceil(total::numeric/%s)::bigint))=0
+                ORDER BY ts LIMIT %s""",
+                (key_value, window_open_ms, tick_end_ms,
+                 point_limit, point_limit, point_limit)) if tick_end_ms >= window_open_ms else []
+            series[name] = [{"ts_ms": int(row["ts_ms"]), "price": float(row["price"])}
+                            for row in rows if row.get("ts_ms") is not None and row.get("price") is not None]
+        except Exception as exc:
+            series[name] = []
+            errors[name] = str(exc)[:180]
+        try:
+            row = q(f"""SELECT (extract(epoch FROM ts)*1000)::bigint AS ts_ms,price
+                         FROM vp.{table} WHERE {key_column}=%s
+                         ORDER BY ts DESC LIMIT 1""", (key_value,), one=True)
+            latest[name] = ({"ts_ms": int(row["ts_ms"]), "price": float(row["price"]),
+                             "age_ms": max(0, now_ms - int(row["ts_ms"]))}
+                            if row and row.get("ts_ms") is not None and row.get("price") is not None else None)
+        except Exception as exc:
+            latest[name] = None
+            errors.setdefault(name, str(exc)[:180])
+
+    window = q("""SELECT (extract(epoch FROM window_open)*1000)::bigint AS window_open_ms,
+                       (extract(epoch FROM window_close)*1000)::bigint AS window_close_ms,
+                       open_price,(extract(epoch FROM open_price_ts)*1000)::bigint AS open_price_ts_ms,
+                       close_price,(extract(epoch FROM close_price_ts)*1000)::bigint AS close_price_ts_ms,
+                       settlement_source,settlement_window_s,outcome
+                FROM vp.prediction_history_windows
+                WHERE asset=%s AND horizon_seconds=%s
+                  AND window_open=to_timestamp(%s/1000.0)
+                ORDER BY updated_at DESC LIMIT 1""",
+              (asset, horizon_seconds, window_open_ms), one=True)
+    def official_reference(price_key, ts_key):
+        if not window or window.get(price_key) is None:
+            return None
+        return {"price": float(window[price_key]),
+                "ts_ms": int(window[ts_key]) if window.get(ts_key) is not None else None}
+    return {
+        "asset": asset, "horizon_seconds": horizon_seconds,
+        "window_open_ms": window_open_ms, "window_close_ms": window_close_ms,
+        "server_ts_ms": now_ms, "point_limit": point_limit,
+        "series": series, "latest": latest, "errors": errors,
+        "open_reference": official_reference("open_price", "open_price_ts_ms"),
+        "close_reference": official_reference("close_price", "close_price_ts_ms"),
+        "settlement_source": window.get("settlement_source") if window else None,
+        "settlement_window_s": window.get("settlement_window_s") if window else None,
+        "outcome": window.get("outcome") if window else None,
+    }
+
+
+def api_prediction_history(asset, horizon_seconds, limit=75, offset=0, score_days=5,
+                           score_model="all", score_checkpoint="elapsed_60pct",
+                           score_min_confidence_pct=60, outcome="all",
+                           date_from=None, date_to=None, history_model="all"):
+    _prediction_history_ensure_schema()
+    asset = str(asset or "").upper()
+    if asset not in ("BTC", "ETH", "SOL", "XRP"):
+        return {"error": "asset must be BTC, ETH, SOL, or XRP", "rows": []}
+    try:
+        horizon_seconds = int(horizon_seconds)
+        limit = max(1, min(75, int(limit)))
+        offset = max(0, min(1_000_000, int(offset)))
+        score_days = int(score_days)
+        score_model = str(score_model or "all").strip()
+        score_checkpoint = str(score_checkpoint or "elapsed_60pct").strip()
+        score_min_confidence_pct = int(score_min_confidence_pct)
+        outcome = str(outcome or "all").strip().upper()
+        date_from = str(date_from or "").strip() or None
+        date_to = str(date_to or "").strip() or None
+        history_model = str(history_model or "all").strip()
+    except (TypeError, ValueError, OverflowError):
+        return {"error": "invalid history page", "rows": []}
+    if horizon_seconds not in (300, 900):
+        return {"error": "horizon must be 300 or 900 seconds", "rows": []}
+    if score_days not in (0, 1, 5, 30):
+        return {"error": "score_days must be 0, 1, 5, or 30", "rows": []}
+    valid_checkpoints = {key for key, _label, _offset in PREDICTION_HISTORY_CHECKPOINTS}
+    if score_checkpoint not in valid_checkpoints:
+        return {"error": "score_checkpoint is not a supported checkpoint", "rows": []}
+    if score_min_confidence_pct not in range(50, 100, 5):
+        return {"error": "score_min_confidence_pct must be 50–95 in 5-point steps", "rows": []}
+    if outcome not in ("ALL", "UP", "DOWN", "PENDING"):
+        return {"error": "outcome must be all, UP, DOWN, or pending", "rows": []}
+    if outcome == "ALL":
+        outcome = "all"
+    if len(score_model) > 128 or any(not ((char.isascii() and char.isalnum()) or char in "._:-") for char in score_model):
+        return {"error": "score_model contains unsupported characters", "rows": []}
+    if len(history_model) > 128 or any(not ((char.isascii() and char.isalnum()) or char in "._:-") for char in history_model):
+        return {"error": "history_model contains unsupported characters", "rows": []}
+    for label, value in (("date_from", date_from), ("date_to", date_to)):
+        if value is not None:
+            try:
+                if datetime.strptime(value, "%Y-%m-%d").date().isoformat() != value:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return {"error": f"{label} must be an ISO UTC date (YYYY-MM-DD)", "rows": []}
+    if date_from and date_to and date_from > date_to:
+        return {"error": "date_from must be on or before date_to", "rows": []}
+    history_where = ["w.asset=%s", "w.horizon_seconds=%s"]
+    history_params = [asset, horizon_seconds]
+    if outcome == "UP" or outcome == "DOWN":
+        history_where.append("w.outcome=%s")
+        history_params.append(outcome)
+    elif outcome == "PENDING":
+        history_where.append("w.outcome IS NULL")
+    if date_from:
+        history_where.append("w.window_open >= %s::date")
+        history_params.append(date_from)
+    if date_to:
+        history_where.append("w.window_open < (%s::date + interval '1 day')")
+        history_params.append(date_to)
+    if history_model != "all":
+        history_where.append("""EXISTS (SELECT 1 FROM vp.prediction_history_checkpoints hm
+            WHERE hm.window_key=w.window_key
+              AND COALESCE(NULLIF(hm.model_version,''),NULLIF(w.model_version,''),'__legacy_unknown__')=%s)""")
+        history_params.append(history_model)
+    history_predicate = " AND ".join(history_where)
+    total_row = q(f"""SELECT count(*) AS total FROM vp.prediction_history_windows w
+        WHERE {history_predicate}""", tuple(history_params), one=True)
+    rows = q("""SELECT w.window_key,w.condition_id,w.slug,w.asset,w.horizon_seconds,
+        extract(epoch from w.window_open)*1000 AS window_open_ms,
+        extract(epoch from w.window_close)*1000 AS window_close_ms,
+        w.settlement_source,w.settlement_window_s,w.model_version,w.model_basis,
+        w.open_price,w.open_price_ts,w.close_price,w.close_price_ts,w.outcome,w.outcome_source,w.resolved_at,
+        COALESCE(jsonb_agg(jsonb_build_object(
+            'key',c.checkpoint_key,'target_at_ms',extract(epoch from c.target_at)*1000,
+            'captured_at_ms',extract(epoch from c.captured_at)*1000,
+            'observed_elapsed_pct',c.observed_elapsed_pct,'capture_offset_s',c.capture_offset_s,
+            'status',c.capture_status,'up_probability',c.up_probability,'side',c.side,
+            'side_probability',c.side_probability,'correct',CASE
+                WHEN w.outcome IS NULL OR c.side IS NULL OR c.side='EVEN' THEN NULL ELSE c.side=w.outcome END,
+            'model_version',c.model_version,'model_basis',c.model_basis,'model_status',c.model_status,
+            'spot_price',c.spot_price,'strike_price',c.strike_price,
+            'market_up_probability',c.market_up_probability,'fee_adjusted_edge',c.fee_adjusted_edge,
+            'details',c.details) ORDER BY c.target_at) FILTER (WHERE c.checkpoint_key IS NOT NULL),'[]'::jsonb) AS checkpoints
+        FROM vp.prediction_history_windows w
+        LEFT JOIN vp.prediction_history_checkpoints c ON c.window_key=w.window_key
+        WHERE """ + history_predicate + """
+        GROUP BY w.window_key ORDER BY w.window_open DESC LIMIT %s OFFSET %s""",
+        tuple(history_params + [limit, offset]))
+    checkpoint_where = list(history_where) + ["w.outcome IN ('UP','DOWN')",
+        "c.capture_status='captured'", "c.side IN ('UP','DOWN')"]
+    checkpoint_params = list(history_params)
+    if history_model != "all":
+        checkpoint_where.append("COALESCE(NULLIF(c.model_version,''),NULLIF(w.model_version,''),'__legacy_unknown__')=%s")
+        checkpoint_params.append(history_model)
+    checkpoint_rows = q("""SELECT c.checkpoint_key,count(*)::int AS samples,
+            count(*) FILTER (WHERE c.side=w.outcome)::int AS correct
+        FROM vp.prediction_history_windows w
+        JOIN vp.prediction_history_checkpoints c ON c.window_key=w.window_key
+        WHERE """ + " AND ".join(checkpoint_where) + """
+        GROUP BY c.checkpoint_key""", tuple(checkpoint_params))
+    checkpoint_by_key = {str(row.get("checkpoint_key")): row for row in (checkpoint_rows or [])}
+    checkpoint_accuracy = []
+    for key, label, _ in PREDICTION_HISTORY_CHECKPOINTS:
+        row = checkpoint_by_key.get(key) or {}
+        samples = int(row.get("samples") or 0)
+        correct = int(row.get("correct") or 0)
+        checkpoint_accuracy.append({"key": key, "label": label, "samples": samples,
+                                    "correct": correct,
+                                    "accuracy": correct/samples if samples else None})
+    # Score only captured forecasts with resolved outcomes. Directional model/CLOB
+    # comparisons share the same non-tied midpoint sample; proper scores use paired probabilities.
+    score_rows = q("""SELECT c.checkpoint_key,
+        count(*) FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+            AND c.side IN ('UP','DOWN'))::int AS model_samples,
+        count(*) FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+            AND c.side IN ('UP','DOWN') AND c.side=w.outcome)::int AS model_correct,
+        count(*) FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+            AND c.side IN ('UP','DOWN') AND c.side_probability IS NOT NULL)::int AS confidence_eligible,
+        count(*) FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+            AND c.side IN ('UP','DOWN') AND c.side_probability IS NOT NULL
+            AND c.side_probability >= %s)::int AS confidence_samples,
+        count(*) FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+            AND c.side IN ('UP','DOWN') AND c.side_probability IS NOT NULL
+            AND c.side_probability >= %s AND c.side=w.outcome)::int AS confidence_correct,
+        count(*) FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+            AND c.side IN ('UP','DOWN') AND c.market_up_probability IS NOT NULL
+            AND c.market_up_probability<>0.5)::int AS paired_directional_samples,
+        count(*) FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+            AND c.side IN ('UP','DOWN') AND c.market_up_probability IS NOT NULL
+            AND c.market_up_probability<>0.5 AND c.side=w.outcome)::int AS paired_model_correct,
+        count(*) FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+            AND c.side IN ('UP','DOWN') AND c.market_up_probability IS NOT NULL
+            AND ((c.market_up_probability>0.5 AND w.outcome='UP')
+              OR (c.market_up_probability<0.5 AND w.outcome='DOWN')))::int AS paired_market_correct,
+        count(*) FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+            AND c.up_probability IS NOT NULL AND c.market_up_probability IS NOT NULL)::int AS paired_brier_samples,
+        avg(power(c.up_probability-CASE WHEN w.outcome='UP' THEN 1.0 ELSE 0.0 END,2))
+            FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+              AND c.up_probability IS NOT NULL AND c.market_up_probability IS NOT NULL) AS model_brier,
+        avg(power(c.market_up_probability-CASE WHEN w.outcome='UP' THEN 1.0 ELSE 0.0 END,2))
+            FILTER (WHERE w.outcome IS NOT NULL AND c.capture_status='captured'
+              AND c.up_probability IS NOT NULL AND c.market_up_probability IS NOT NULL) AS market_brier,
+        avg(CASE WHEN w.outcome='UP' THEN
+            -ln(GREATEST(1e-12::double precision,LEAST((1.0-1e-12)::double precision,c.up_probability)))
+          ELSE -ln(1.0-GREATEST(1e-12::double precision,LEAST((1.0-1e-12)::double precision,c.up_probability)))
+          END) FILTER (WHERE w.outcome IN ('UP','DOWN') AND c.capture_status='captured'
+            AND c.up_probability IS NOT NULL AND c.market_up_probability IS NOT NULL) AS model_log_loss,
+        avg(CASE WHEN w.outcome='UP' THEN
+            -ln(GREATEST(1e-12::double precision,LEAST((1.0-1e-12)::double precision,c.market_up_probability)))
+          ELSE -ln(1.0-GREATEST(1e-12::double precision,LEAST((1.0-1e-12)::double precision,c.market_up_probability)))
+          END) FILTER (WHERE w.outcome IN ('UP','DOWN') AND c.capture_status='captured'
+            AND c.up_probability IS NOT NULL AND c.market_up_probability IS NOT NULL) AS market_log_loss
+        FROM vp.prediction_history_windows w
+        JOIN vp.prediction_history_checkpoints c ON c.window_key=w.window_key
+        WHERE w.asset=%s AND w.horizon_seconds=%s
+          AND (%s=0 OR w.window_close>=now()-(%s*interval '1 day'))
+          AND (%s='all' OR COALESCE(NULLIF(c.model_version,''),'__legacy_unknown__')=%s)
+        GROUP BY c.checkpoint_key""",
+        (score_min_confidence_pct/100.0, score_min_confidence_pct/100.0,
+         asset, horizon_seconds, score_days, score_days, score_model, score_model))
+    score_by_key = {str(row.get("checkpoint_key")): row for row in (score_rows or [])}
+    scorecards = []
+    for key, label, _ in PREDICTION_HISTORY_CHECKPOINTS:
+        row = score_by_key.get(key) or {}
+        model_samples = int(row.get("model_samples") or 0)
+        model_correct = int(row.get("model_correct") or 0)
+        confidence_eligible = int(row.get("confidence_eligible") or 0)
+        confidence_samples = int(row.get("confidence_samples") or 0)
+        confidence_correct = int(row.get("confidence_correct") or 0)
+        confidence_interval = _wilson_interval(confidence_correct, confidence_samples)
+        paired_directional_samples = int(row.get("paired_directional_samples") or 0)
+        paired_brier_samples = int(row.get("paired_brier_samples") or 0)
+        paired_model_correct = int(row.get("paired_model_correct") or 0)
+        paired_market_correct = int(row.get("paired_market_correct") or 0)
+        scorecards.append({
+            "key": key, "label": label, "model_samples": model_samples,
+            "model_correct": model_correct,
+            "model_accuracy": model_correct/model_samples if model_samples else None,
+            "confidence_eligible": confidence_eligible,
+            "confidence_samples": confidence_samples,
+            "confidence_correct": confidence_correct,
+            "confidence_accuracy": confidence_correct/confidence_samples if confidence_samples else None,
+            "confidence_accuracy_ci_low": confidence_interval[0] if confidence_interval else None,
+            "confidence_accuracy_ci_high": confidence_interval[1] if confidence_interval else None,
+            "confidence_coverage": confidence_samples/confidence_eligible if confidence_eligible else None,
+            "confidence_threshold_pct": score_min_confidence_pct,
+            "paired_directional_samples": paired_directional_samples,
+            "paired_model_correct": paired_model_correct,
+            "paired_model_accuracy": paired_model_correct/paired_directional_samples if paired_directional_samples else None,
+            "paired_market_correct": paired_market_correct,
+            "paired_market_accuracy": paired_market_correct/paired_directional_samples if paired_directional_samples else None,
+            "paired_brier_samples": paired_brier_samples,
+            "model_brier": row.get("model_brier"), "market_brier": row.get("market_brier"),
+            "model_log_loss": row.get("model_log_loss"),
+            "market_log_loss": row.get("market_log_loss"),
+        })
+    version_rows = q("""SELECT DISTINCT COALESCE(NULLIF(c.model_version,''),'__legacy_unknown__') AS model_version
+        FROM vp.prediction_history_windows w
+        JOIN vp.prediction_history_checkpoints c ON c.window_key=w.window_key
+        WHERE w.asset=%s AND w.horizon_seconds=%s AND w.outcome IS NOT NULL
+          AND c.capture_status='captured'
+          AND (%s=0 OR w.window_close>=now()-(%s*interval '1 day'))
+        ORDER BY model_version""", (asset, horizon_seconds, score_days, score_days))
+    history_version_rows = q("""SELECT DISTINCT COALESCE(NULLIF(c.model_version,''),
+            NULLIF(w.model_version,''),'__legacy_unknown__') AS model_version
+        FROM vp.prediction_history_windows w
+        LEFT JOIN vp.prediction_history_checkpoints c ON c.window_key=w.window_key
+        WHERE w.asset=%s AND w.horizon_seconds=%s
+        ORDER BY model_version""", (asset, horizon_seconds))
+    available_models = sorted({str(row.get("model_version") or "__legacy_unknown__")
+                               for row in (version_rows or [])})
+    history_models = sorted({str(row.get("model_version") or "__legacy_unknown__")
+                             for row in (history_version_rows or [])})
+    # Reliability uses one checkpoint per market window, avoiding six repeated
+    # observations of the same outcome. CLOB values use the exact paired model sample.
+    calibration_rows = q("""WITH resolved AS (
+        SELECT c.up_probability,c.market_up_probability,
+               (w.outcome='UP')::int AS outcome_up
+        FROM vp.prediction_history_windows w
+        JOIN vp.prediction_history_checkpoints c ON c.window_key=w.window_key
+        WHERE w.asset=%s AND w.horizon_seconds=%s AND w.outcome IS NOT NULL
+          AND c.capture_status='captured' AND c.up_probability IS NOT NULL
+          AND c.market_up_probability IS NOT NULL
+          AND c.checkpoint_key=%s
+          AND (%s=0 OR w.window_close>=now()-(%s*interval '1 day'))
+          AND (%s='all' OR COALESCE(NULLIF(c.model_version,''),'__legacy_unknown__')=%s)
+    ), forecasts AS (
+        SELECT 'MODEL'::text AS source,up_probability AS forecast_up,outcome_up FROM resolved
+        UNION ALL
+        SELECT 'CLOB'::text AS source,market_up_probability AS forecast_up,outcome_up
+        FROM resolved WHERE market_up_probability IS NOT NULL
+    ), bucketed AS (
+        SELECT source,LEAST(9,FLOOR(forecast_up*10)::int) AS probability_bin,
+               forecast_up,outcome_up
+        FROM forecasts
+    )
+    SELECT source,probability_bin,count(*)::int AS samples,
+           sum(outcome_up)::int AS observed_up_count,
+           avg(forecast_up) AS mean_forecast_up,avg(outcome_up::double precision) AS observed_up
+    FROM bucketed GROUP BY source,probability_bin ORDER BY probability_bin,source""",
+        (asset, horizon_seconds, score_checkpoint, score_days, score_days, score_model, score_model))
+    calibration = [{"bin": index, "label": f"{index*10}–{(index+1)*10}%",
+                    "model": None, "clob": None} for index in range(10)]
+    for row in calibration_rows or []:
+        index = int(row.get("probability_bin", -1))
+        source = str(row.get("source") or "").lower()
+        if 0 <= index < len(calibration) and source in ("model", "clob"):
+            samples = int(row.get("samples") or 0)
+            observed_up = (float(row["observed_up"])
+                           if row.get("observed_up") is not None else None)
+            interval = _wilson_interval(row.get("observed_up_count"), samples)
+            calibration[index][source] = {
+                "samples": samples,
+                "mean_forecast_up": (float(row["mean_forecast_up"])
+                                     if row.get("mean_forecast_up") is not None else None),
+                "observed_up": observed_up,
+                "observed_up_ci_low": interval[0] if interval else None,
+                "observed_up_ci_high": interval[1] if interval else None,
+            }
+    import_status = q("""SELECT windows_imported,checkpoints_imported,applied_at
+        FROM vp.prediction_history_imports WHERE migration_key='prediction-quality-minute-journal-v1'""", one=True)
+    importing = import_status is None and os.path.isfile(os.path.join(ROOT, "logs", "prediction_quality.sqlite3"))
+    total = int((total_row or {}).get("total") or 0)
+    return {"asset": asset, "horizon_seconds": horizon_seconds, "limit": limit,
+            "offset": offset, "total": total, "has_more": offset+len(rows)<total,
+            "rows": rows, "import": import_status, "importing": importing,
+            "history_filters_supported": True,
+            "history_filters": {"outcome": outcome, "model": history_model,
+                                "date_from": date_from, "date_to": date_to},
+            "checkpoint_accuracy": checkpoint_accuracy,
+            "score_days": score_days, "score_model": score_model,
+            "score_min_confidence_pct": score_min_confidence_pct,
+            "score_models": available_models, "history_models": history_models,
+            "scorecards": scorecards,
+            "score_checkpoint": score_checkpoint, "calibration": calibration,
+            "checkpoint_labels": [{"key":k,"label":label} for k,label,_ in PREDICTION_HISTORY_CHECKPOINTS]}
 
 
 def _public_json(url, timeout=5.0, data=None):
@@ -2441,59 +3593,93 @@ def _public_json(url, timeout=5.0, data=None):
         return json.load(response)
 
 
-def _prediction_news():
-    """Fetch a small, cached multi-source crypto headline set and sentiment."""
-    with _manual_news_lock:
-        if _manual_news_cache[1] is not None and time.monotonic() - _manual_news_cache[0] < 300:
-            return _manual_news_cache[1]
-    import email.utils
-    import urllib.request
-    import xml.etree.ElementTree as ET
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+def _bounded_prediction_news(stories, now_s=None):
+    """Keep recent official editorials visible without dropping signal headlines."""
+    now_s = time.time() if now_s is None else float(now_s)
 
-    feeds = {
-        "CoinDesk": "https://www.coindesk.com/arc/outboundfeeds/rss/",
-        "Cointelegraph": "https://cointelegraph.com/rss",
-        "Decrypt": "https://decrypt.co/feed",
-    }
+    def published_at(story, default=0.0):
+        try:
+            value = float(story.get("published", default))
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return value if math.isfinite(value) else default
+
+    dedup = {}
+    for story in stories:
+        if not isinstance(story, dict):
+            continue
+        title = str(story.get("title") or "").strip()
+        if not title:
+            continue
+        key = title.lower()
+        existing = dedup.get(key)
+        if existing is None or (existing.get("context_only") and not story.get("context_only")):
+            dedup[key] = story
+    regular = [story for story in dedup.values() if not story.get("context_only")]
+    editorial = [story for story in dedup.values() if story.get("context_only") and
+                 0 < published_at(story) <= now_s and
+                 now_s-published_at(story) <= 14*86400]
+    selected = sorted(regular, key=published_at, reverse=True)[:23]
+    if editorial:
+        selected.append(max(editorial, key=published_at))
+    return sorted(selected, key=published_at, reverse=True)[:24]
+
+
+def _parse_prediction_rss(source, payload, context_only=False, now_s=None):
+    """Parse bounded RSS titles; editorial sources never receive sentiment labels."""
+    import email.utils
+    import xml.etree.ElementTree as ET
+
+    now_s = time.time() if now_s is None else float(now_s)
+    root = ET.fromstring(payload)
     positive = ("surge", "rally", "gain", "bull", "approval", "inflow", "record high",
                 "adoption", "partnership", "upgrade", "breakout", "rate cut", "buy")
     negative = ("hack", "exploit", "crash", "plunge", "drop", "bear", "outflow",
                 "lawsuit", "crackdown", "liquidation", "sell-off", "selloff", "ban")
+    out = []
+    for item in root.findall(".//item")[:20]:
+        title = (item.findtext("title") or "").strip()
+        if not title:
+            continue
+        link = (item.findtext("link") or "").strip()
+        pub = (item.findtext("pubDate") or "").strip()
+        try:
+            published = int(email.utils.parsedate_to_datetime(pub).timestamp())
+        except Exception:
+            published = int(now_s)
+        low = title.lower()
+        sentiment = 0 if context_only else sum(1 for word in positive if word in low) - sum(
+            1 for word in negative if word in low)
+        out.append({"source": source, "title": title[:240], "url": link[:2048],
+                    "published": published, "sentiment": max(-2, min(2, sentiment)),
+                    "context_only": bool(context_only)})
+    return out
 
-    def fetch_one(source, url):
+
+def _prediction_news():
+    """Fetch cached crypto headlines plus explicitly context-only editorials."""
+    with _manual_news_lock:
+        if _manual_news_cache[1] is not None and time.monotonic() - _manual_news_cache[0] < 300:
+            return _manual_news_cache[1]
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def fetch_one(source, url, context_only):
         req = urllib.request.Request(url, headers={"User-Agent": "PolySparQ++/1.0"})
         with urllib.request.urlopen(req, timeout=6) as response:
-            root = ET.fromstring(response.read(1_500_000))
-        out = []
-        for item in root.findall(".//item")[:20]:
-            title = (item.findtext("title") or "").strip()
-            link = (item.findtext("link") or "").strip()
-            pub = (item.findtext("pubDate") or "").strip()
-            try:
-                published = int(email.utils.parsedate_to_datetime(pub).timestamp())
-            except Exception:
-                published = int(time.time())
-            low = title.lower()
-            sentiment = sum(1 for word in positive if word in low) - sum(
-                1 for word in negative if word in low)
-            out.append({"source": source, "title": title, "url": link,
-                        "published": published,
-                        "sentiment": max(-2, min(2, sentiment))})
-        return out
+            payload = response.read(1_500_000)
+        return _parse_prediction_rss(source, payload, context_only)
 
     stories = []
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(fetch_one, source, url) for source, url in feeds.items()]
+    with ThreadPoolExecutor(max_workers=len(PREDICTION_NEWS_FEEDS)) as pool:
+        futures = [pool.submit(fetch_one, source, url, context_only)
+                   for source, url, context_only in PREDICTION_NEWS_FEEDS]
         for future in as_completed(futures):
             try:
                 stories.extend(future.result())
             except Exception:
                 pass
-    dedup = {}
-    for story in stories:
-        dedup.setdefault(story["title"].lower(), story)
-    stories = sorted(dedup.values(), key=lambda row: row["published"], reverse=True)[:24]
+    stories = _bounded_prediction_news(stories)
     result = {"stories": stories, "sources": sorted({s["source"] for s in stories})}
     with _manual_news_lock:
         _manual_news_cache[:] = [time.monotonic(), result]
@@ -2509,6 +3695,8 @@ def _asset_news_score(asset, stories):
     now_s, weighted, weight = time.time(), 0.0, 0.0
     relevant = []
     for story in stories:
+        if story.get("context_only"):
+            continue
         title = f" {story['title'].lower()} "
         direct = any(alias in title for alias in aliases)
         broad = any(term in title for term in general)
@@ -2659,7 +3847,10 @@ def api_manual_predictions(force=False, after_version=None, wait_s=0):
         if _manual_prediction_service is None:
             _manual_prediction_service = PredictionService(
                 q, _public_json, ROOT, _prediction_news,
-                gate_writer=_record_prediction_gate_current)
+                gate_writer=_record_prediction_gate_current,
+                history_init=_prediction_history_schema_init,
+                history_writer=_record_prediction_history,
+                history_resolver=_resolve_prediction_history)
             _manual_prediction_service.start()
     return _manual_prediction_service.snapshot(force, after_version, wait_s)
 
@@ -2836,7 +4027,7 @@ def api_v4_loss_review(days=7, instance="", mode="paper", cohort_since_ms=None):
 _V3_GROUPS = ["Sizing & Exposure", "Oracle & Entry Gates", "Confidence & Trend",
               "Autopilot & Timing", "Order Execution", "Predictor & Digital Fair Value",
               "Momentum Scalp V2/V3", "WPRED Checkpoints", "Adaptive Entry",
-              "Exit & Settlement", "Endgame", "Fees & Safety", "Advanced Admin"]
+              "Exit & Settlement", "Endgame", "Fees & Safety", "Shadow Research", "Advanced Admin"]
 
 def _k(group, key, section, label, unit="", typ="num", lo=None, hi=None, hint="", enum=None, step=None):
     return {"g": group, "key": key, "sec": section, "label": label, "unit": unit,
@@ -2894,9 +4085,19 @@ _V3_REGISTRY = [
     _k("Order Execution","maker_max_age_ms","strategy.hot","Maker Max Age (ms)","ms",lo=0,hi=60000,step=50,hint="Entry quote lifetime; expiry cancels without taker fallback."),
     _k("Order Execution","maker_cancel_before_close_ms","strategy.hot","Maker Cancel Before Close (ms)","ms",lo=0,hi=60000,step=250,hint="Pull quotes this long before window close."),
     # Predictor & Digital FV
+    _k("Predictor & Digital Fair Value","predictor_mode","strategy.hot","Predictor Mode","",typ="bool",hint="Main prediction-model entry path."),
     _k("Predictor & Digital Fair Value","prediction_page_gate_enabled","strategy.hot","Prediction Page Gate","",typ="bool",hint="Blocks automatic buys unless the current Predictions page forecast is fresh, agrees with the order side, and meets the configured side-chance floor."),
     _k("Predictor & Digital Fair Value","prediction_page_min_chance_pct","strategy.hot","Prediction Page Min Side Chance (%)","percentage points",lo=0,hi=100,step=1,hint="Minimum UP or DOWN probability shown by the current Predictions page before an automatic buy can be posted."),
-    _k("Predictor & Digital Fair Value","predictor_mode","strategy.hot","Predictor Mode","",typ="bool",hint="Main prediction-model entry path."),
+    _k("Predictor & Digital Fair Value","prediction_2m_order_usd","strategy.hot","Prediction 2m Clip (USD)","USD",lo=1,hi=25,step=0.25,hint="Budget for one entry at the configured Predictor checkpoint. Share quantity is rounded down to 0.01 so notional never exceeds this amount."),
+    _k("Predictor & Digital Fair Value","prediction_2m_taker_enabled","strategy.hot","Prediction 2m Taker Mode","",typ="bool",hint="PAPER ONLY. Buy the fresh executable ask with a one-shot FAK order on the side selected by the current Predictions-tab snapshot. Requires Prediction 2m enabled."),
+    _k("Predictor & Digital Fair Value","prediction_2m_min_edge_pct","strategy.hot","Prediction 2m Min Model Edge %","%",lo=0,hi=50,step=0.5,hint="The model's side probability must exceed the executable ask by this margin before a quote is posted. 0 disables the value gate and is not recommended."),
+    _k("Predictor & Digital Fair Value","prediction_2m_min_price","strategy.hot","Prediction 2m Min Price","",lo=0.01,hi=0.97,step=0.01,hint="Lowest quote this path will place."),
+    _k("Predictor & Digital Fair Value","prediction_2m_max_price","strategy.hot","Prediction 2m Max Price","",lo=0.01,hi=0.97,step=0.01,hint="Maximum best ask the Predictor path may buy."),
+    _k("Predictor & Digital Fair Value","prediction_2m_take_profit_price","strategy.hot","Prediction 2m Maker Take Profit","share price",lo=0,hi=0.999,step=0.01,hint="PAPER only. Posts a fixed maker sell for all filled shares at this target; zero disables."),
+    _k("Predictor & Digital Fair Value","prediction_2m_maker_offset_ticks","strategy.hot","Prediction 2m Maker Offset (ticks)","ticks",lo=0,hi=50,step=1,hint="Quote this many ticks below the executable ask. A large offset only fills after the book has moved against the position, which is adverse selection rather than edge."),
+    _k("Predictor & Digital Fair Value","prediction_2m_fade_enabled","strategy.hot","Prediction 2m Fade Experiment","",typ="bool",hint="PAPER ONLY. After a model-side maker entry fills, take the opposite side at its executable ask. The entry is a small signal clip; the fade is the value bet. Unproven."),
+    _k("Predictor & Digital Fair Value","prediction_2m_fade_order_usd","strategy.hot","Prediction 2m Fade Clip (USD)","USD",lo=1,hi=25,step=1,hint="Taker clip for the contrarian fade. Must fit inside max_order_usd and leave room for the signal clip under max_per_window_usd."),
+    _k("Predictor & Digital Fair Value","prediction_2m_fade_max_price","strategy.hot","Prediction 2m Fade Max Price","",lo=0.01,hi=0.97,step=0.01,hint="Only fade when the opposite side is still cheap enough. Above this price the executable opposite quote has already repriced."),
     _k("Predictor & Digital Fair Value","min_predictor_edge","strategy.hot","Min Predictor Edge","",lo=0,hi=0.5,step=0.005,hint="Fee-inclusive edge required."),
     _k("Predictor & Digital Fair Value","min_predictor_conf","strategy.hot","Min Predictor Confidence","",lo=0,hi=1,step=0.01,hint="Model confidence floor."),
     _k("Predictor & Digital Fair Value","predictor_max_token_price","strategy.hot","Predictor Max Token Price","",lo=0.05,hi=1,step=0.01,hint="Cap on model-path entry price."),
@@ -2949,12 +4150,34 @@ _V3_REGISTRY = [
     _k("Endgame","endgame_min_price","strategy.hot","Endgame Min Price","",lo=0.05,hi=1,step=0.01,hint="Favourite band floor."),
     _k("Endgame","endgame_max_price","strategy.hot","Endgame Max Price","",lo=0.05,hi=1,step=0.01,hint="Favourite band ceiling. 0.80+ = pays pennies, risks dollars."),
     _k("Endgame","endgame_min_oracle_pct","strategy.hot","Endgame Min Oracle %","%",lo=0,hi=5,step=0.005,hint="Direction confirmation only."),
+    _k("Endgame","late_window_sniper_enabled","strategy.hot","Late Window Sniper Enabled","",typ="bool",hint="Posts a passive maker quote in the configured late-window time and price bands. A positive minimum opening move selects UP or DOWN by the fresh Chainlink move sign."),
+    _k("Endgame","late_window_sniper_min_secs_5m","strategy.hot","Late Sniper 5m Start (s left)","s",lo=1,hi=119,step=1,hint="Earliest remaining time for 5-minute entries. It may equal the end value for a single-second checkpoint."),
+    _k("Endgame","late_window_sniper_max_secs_5m","strategy.hot","Late Sniper 5m End (s left)","s",lo=2,hi=120,step=1,hint="Latest remaining time for 5-minute entries. It may equal the start value for a single-second checkpoint."),
+    _k("Endgame","late_window_sniper_min_secs_15m","strategy.hot","Late Sniper 15m Start (s left)","s",lo=1,hi=199,step=1,hint="Earliest remaining time for 15-minute entries."),
+    _k("Endgame","late_window_sniper_max_secs_15m","strategy.hot","Late Sniper 15m End (s left)","s",lo=2,hi=200,step=1,hint="Latest remaining time for 15-minute entries."),
+    _k("Endgame","late_window_sniper_min_price","strategy.hot","Late Sniper Min Price","share price",lo=0.50,hi=0.96,step=0.01,hint="Lowest allowed passive maker entry price."),
+    _k("Endgame","late_window_sniper_max_price","strategy.hot","Late Sniper Max Price","share price",lo=0.71,hi=0.97,step=0.01,hint="Highest allowed passive maker entry price."),
+    _k("Endgame","late_window_sniper_min_open_delta_pct","strategy.hot","Min Chainlink Move From Open","%",lo=0,hi=5,step=0.001,hint="When positive, require this absolute Chainlink percent move from the market open and choose UP or DOWN by its sign. Zero keeps forecast-value selection."),
+    _k("Endgame","late_window_sniper_min_net_edge_pct","strategy.hot","Minimum Book Edge (%)","percentage points",lo=0,hi=25,step=0.1,hint="Requires the conservative settlement and ensemble probability to exceed the passive quote by this many points."),
+    _k("Endgame","late_window_sniper_order_usd","strategy.hot","Late Sniper Order (USD)","USD",lo=1,hi=25,step=1,hint="Dollar amount per maker entry; the risk caps still apply."),
+    _k("Endgame","late_window_sniper_order_shares","strategy.hot","Late Sniper Exact Shares","shares",lo=0,hi=5000,step=1,hint="Optional exact share quantity. Zero uses dollar sizing; a positive quantity requires risk caps to cover shares times the maximum entry price."),
+    _k("Endgame","late_window_sniper_max_entries_per_window","strategy.hot","Late Sniper Max Entries","orders",lo=1,hi=10,step=1,hint="Maximum accepted maker entries per asset and market window."),
+    _k("Endgame","late_window_sniper_hard_stop_ticks","strategy.hot","Late Sniper Hard Stop (ticks)","ticks",lo=0,hi=1000,step=1,hint="Entry-relative emergency exit; zero disables this stop."),
+    _k("Endgame","late_window_sniper_stop_price","strategy.hot","Late Sniper Absolute Stop","share price",lo=0,hi=1,step=0.01,hint="Absolute bid stop; zero disables. When enabled, the stop path may use its configured emergency taker exit."),
+    _k("Endgame","late_window_sniper_take_profit_price","strategy.hot","Late Sniper Maker Take Profit","share price",lo=0,hi=0.999,step=0.01,hint="Fixed post-only sell target; zero disables. The quote remains open until it fills or the market closes."),
+    _k("Exit & Settlement","hold_to_settlement","strategy.hot","Hold To Settlement","",typ="bool",hint="Keeps positions open for market settlement instead of taking profit early."),
     # Fees & Safety
     _k("Fees & Safety","taker_fee_rate","strategy.hot","Taker Fee Rate","",lo=0,hi=0.2,step=0.001,hint="Venue taker fee coefficient."),
     _k("Fees & Safety","fee_exponent","strategy.hot","Fee Exponent","",lo=0,hi=4,step=1,hint="Fee curve exponent (p(1-p))^e."),
     _k("Fees & Safety","consecutive_loss_pause","strategy.hot","Consecutive Loss Pause","",lo=0,hi=50,step=1,hint="Pause entries after N straight losses. 0=off."),
     _k("Fees & Safety","consecutive_pause_secs","strategy.hot","Loss Pause Duration (s)","s",lo=0,hi=86400,step=30,hint="How long the pause lasts."),
     _k("Fees & Safety","settlement_grace_ms","strategy.hot","Settlement Grace (ms)","ms",lo=0,hi=120000,step=1000,hint="Wait after window close before settling."),
+    # Shadow Research
+    _k("Shadow Research","cross_asset_sync_shadow_enabled","strategy.hot","Cross-Asset Sync Shadow Monitor","",typ="bool",hint="Collects synchronized BTC/ETH/SOL/XRP 5m divergence observations. Research only; never submits orders."),
+    _k("Shadow Research","cross_asset_sync_min_divergence_pct","strategy.hot","Minimum Divergence","percentage points",lo=0,hi=50,step=0.5,hint="Minimum gap between an asset's midpoint proxy and the median of its eligible peers."),
+    _k("Shadow Research","cross_asset_sync_max_book_age_ms","strategy.hot","Maximum Book Age","ms",lo=100,hi=30000,step=100,hint="Both outcome books must be this fresh or fresher."),
+    _k("Shadow Research","cross_asset_sync_max_spread","strategy.hot","Maximum Book Spread","share price",lo=0.001,hi=1,step=0.01,hint="Rejects wide UP or DOWN books before comparing a market."),
+    _k("Shadow Research","cross_asset_sync_min_touch_depth_usd","strategy.hot","Minimum Ask Touch Depth","USD",lo=0,hi=100000,step=1,hint="Minimum notional at the hypothetical side's best ask; this is touch depth, not market-wide volume."),
     # Advanced Admin
     _k("Advanced Admin","config_hot_reload_interval_ms","runtime","Config Hot Reload (ms)","ms",lo=1000,hi=60000,step=500,hint="Config re-read cadence."),
     _k("Advanced Admin","cockpit_command_poll_ms","runtime","Cockpit Command Poll (ms)","ms",lo=250,hi=10000,step=250,hint="Command polling cadence."),
@@ -2977,7 +4200,7 @@ def _v3_toml_get(parsed, sec, key):
 _V3_GROUP_ORDER = ["Sizing & Exposure", "Oracle & Entry Gates", "Confidence & Trend",
                    "Autopilot & Timing", "Order Execution", "Predictor & Digital Fair Value",
                    "Momentum Scalp V2/V3", "WPRED Checkpoints", "Adaptive Entry",
-                   "Exit & Settlement", "Endgame", "Fees & Safety", "Advanced Admin"]
+                   "Exit & Settlement", "Endgame", "Fees & Safety", "Shadow Research", "Advanced Admin"]
 
 _V3_GROUP_HINTS = {
     "Sizing & Exposure": "Position sizing, capital allocation and exposure limits.",
@@ -2992,10 +4215,17 @@ _V3_GROUP_HINTS = {
     "Exit & Settlement": "Protects capital: exits, loss control and settlement timing.",
     "Endgame": "Late-window rules and final guards.",
     "Fees & Safety": "Trading frictions, daily limits and protective controls.",
+    "Shadow Research": "Read-only experiments with explicit data-quality gates and auditable settled outcomes.",
     "Advanced Admin": "Runtime, infrastructure and operational controls.",
 }
 
 def _v3_group_for(key):
+    if key.startswith("cross_asset_sync_"):
+        return "Shadow Research"
+    if key.startswith("prediction_page_") or key.startswith("prediction_2m_"):
+        return "Predictor & Digital Fair Value"
+    if key.startswith("late_window_sniper_"):
+        return "Endgame"
     if key.startswith("recycler_"): return "Order Execution"
     if key.startswith("scalp_v2_") or key in ("momentum_scalp_enabled",) or key.startswith("scalp_v3_"):
         return "Momentum Scalp V2/V3"
@@ -3003,8 +4233,6 @@ def _v3_group_for(key):
         return "WPRED Checkpoints"
     if key.startswith("adaptive_"):
         return "Adaptive Entry"
-    if key.startswith("prediction_page_"):
-        return "Predictor & Digital Fair Value"
     if key.startswith("digital_fv_") or key.startswith("predictor_") or key in ("min_predictor_edge","min_predictor_conf"):
         return "Predictor & Digital Fair Value"
     if key.startswith("maker_") or key in ("entry_order_mode","manual_buy_slippage_pct","manual_buy_slippage_extra","token_quarantine_payload_ms","token_quarantine_no_match_ms","min_position_shares","dust_position_shares","price_history_max_points","price_velocity_lookback_ms","sparkline_points","tick_buffer_max_age_us","tick_buffer_max_entries","max_book_age_ms"):
@@ -3040,7 +4268,7 @@ def _v3_knobs_impl(instance):
     """
     if not re.match(r'^[\w-]+$', instance):
         return {"error": "invalid instance"}
-    path = os.path.join(CONFIG_DIR, f"polypulse-{instance}.toml")
+    path = _instance_config_file(instance)
     if not os.path.exists(path):
         return {"error": "config not found"}
     try:
@@ -3065,8 +4293,20 @@ def _v3_knobs_impl(instance):
             elif k in COCKPIT_TUNABLE and prefix in ("strategy.hot", "risk"):
                 present[(prefix, k)] = v
     walk("", parsed)
-    from cockpit_fleet import EXECUTION_DEFAULTS
+    from cockpit_fleet import EXECUTION_DEFAULTS, RECYCLER_ENGINE_DEFAULTS
     for key, value in EXECUTION_DEFAULTS.items():
+        # Bot-creation presets are intentionally allowed to differ from the
+        # engine. A missing TOML key shown in this editor must use the value
+        # Config::load actually supplies, not the provisioning preset.
+        present.setdefault(("strategy.hot", key),
+                           RECYCLER_ENGINE_DEFAULTS.get(key, value))
+    for key, value in {
+        "cross_asset_sync_shadow_enabled": False,
+        "cross_asset_sync_min_divergence_pct": 4.0,
+        "cross_asset_sync_max_book_age_ms": 1500,
+        "cross_asset_sync_max_spread": 0.08,
+        "cross_asset_sync_min_touch_depth_usd": 5.0,
+    }.items():
         present.setdefault(("strategy.hot", key), value)
     cur_labels = {rk["key"]: rk for rk in _V3_REGISTRY}
     groups = {g: [] for g in _V3_GROUP_ORDER}
@@ -3150,7 +4390,7 @@ def _api_v3_config_write_locked(body):
     if not isinstance(changes, list) or not 1 <= len(changes) <= 100 or \
        any(not isinstance(change, dict) for change in changes):
         return 400, {"error": "changes must be a list of 1–100 objects"}
-    path = os.path.join(CONFIG_DIR, f"polypulse-{instance}.toml")
+    path = _instance_config_file(instance)
     if not os.path.exists(path):
         return 404, {"error": "config not found"}
     try:
@@ -3169,11 +4409,15 @@ def _api_v3_config_write_locked(body):
                 cur[dk] = v
                 bare_map.setdefault(k, []).append(dk)
     _walk2("", parsed)
-    from cockpit_fleet import EXECUTION_DEFAULTS, set_value
+    from cockpit_fleet import EXECUTION_DEFAULTS, RECYCLER_ENGINE_DEFAULTS, set_value
     for key,value in EXECUTION_DEFAULTS.items():
         dk="strategy.hot."+key
         if dk not in cur:
-            cur[dk]=value;bare_map.setdefault(key,[]).append(dk)
+            # Keep the editor's current-value/audit baseline faithful to the
+            # engine when the profile omits a key. Creation still writes its
+            # explicit provisioning preset into newly created profiles.
+            cur[dk]=RECYCLER_ENGINE_DEFAULTS.get(key,value)
+            bare_map.setdefault(key,[]).append(dk)
 
     with open(path,"rb") as source:
         current_hash = hashlib.sha256(source.read()).hexdigest()[:12]
@@ -3235,10 +4479,33 @@ def _api_v3_config_write_locked(body):
         a, b = effective("strategy.hot." + low), effective("strategy.hot." + high)
         if a is not None and b is not None and a > b:
             return 422, {"ok": False, "error": f"{low} exceeds {high}"}
-    rc={key:effective("strategy.hot."+key) for key in COCKPIT_TUNABLE if key.startswith("recycler_")}
+    for low, high in (("late_window_sniper_min_secs_5m", "late_window_sniper_max_secs_5m"),
+                      ("late_window_sniper_min_secs_15m", "late_window_sniper_max_secs_15m")):
+        a, b = effective("strategy.hot." + low), effective("strategy.hot." + high)
+        if a is not None and b is not None and a > b:
+            return 422, {"ok": False, "error": f"{low} must not exceed {high}"}
+    a, b = (effective("strategy.hot." + key) for key in
+            ("late_window_sniper_min_price", "late_window_sniper_max_price"))
+    if a is not None and b is not None and a >= b:
+        return 422, {"ok": False, "error": "late_window_sniper_min_price must be below late_window_sniper_max_price"}
+    sniper_stop = effective("strategy.hot.late_window_sniper_stop_price")
+    sniper_min = effective("strategy.hot.late_window_sniper_min_price")
+    if sniper_stop is not None and sniper_min is not None and sniper_stop > 0 and sniper_stop >= sniper_min:
+        return 422, {"ok": False, "error": "late_window_sniper_stop_price must be below late_window_sniper_min_price"}
+    sniper_take_profit = effective("strategy.hot.late_window_sniper_take_profit_price")
+    sniper_max = effective("strategy.hot.late_window_sniper_max_price")
+    if (sniper_take_profit is not None and sniper_max is not None and
+            sniper_take_profit > 0 and sniper_take_profit <= sniper_max):
+        return 422, {"ok": False, "error": "late_window_sniper_take_profit_price must exceed late_window_sniper_max_price"}
+    rc=dict(parsed.get('strategy',{}).get('hot',{}))
+    for key,value in wanted.items():
+        section,_,bare=key.rpartition('.')
+        if section=='strategy.hot' and bare.startswith('recycler_'):
+            rc[bare]=value
     from cockpit_fleet import validate_recycler
     try:
-        validate_recycler({k:v for k,v in rc.items() if v is not None}, parsed.get('runtime',{}).get('mode','paper'))
+        validate_recycler(rc, parsed.get('runtime',{}).get('mode','paper'),
+                          parsed.get('polymarket',{}))
         if 'strategy.hot.recycler_mode' in wanted and wanted['strategy.hot.recycler_mode']!=cur.get('strategy.hot.recycler_mode','off'):
             from cockpit_fleet import _flat
             _flat(_CockpitServices(),instance)
@@ -3302,7 +4569,7 @@ def _api_v3_config_write_locked(body):
     before_version = store.config(instance,safe_before,body.get("_actor","operator"),"before edit")
     import tempfile
     import stat
-    fd, tmp = tempfile.mkstemp(prefix=".cockpit-", dir=CONFIG_DIR, text=True)
+    fd, tmp = tempfile.mkstemp(prefix=".cockpit-", dir=os.path.dirname(path), text=True)
     try:
         os.fchmod(fd, stat.S_IMODE(os.stat(path).st_mode))
         with os.fdopen(fd, "w") as f:
@@ -3337,7 +4604,7 @@ def api_v3_preset_save(body):
     src = body.get("instance", "")
     if not re.match(r'^[\w-]+$', name) or not re.match(r'^[\w-]+$', src):
         return 400, {"error": "bad name/instance"}
-    srcp = os.path.join(CONFIG_DIR, f"polypulse-{src}.toml")
+    srcp = _instance_config_file(src)
     if not os.path.exists(srcp): return 404, {"error": "instance config missing"}
     pdir = os.path.join(CONFIG_DIR, "presets")
     os.makedirs(pdir, exist_ok=True)
@@ -3758,6 +5025,7 @@ def api_markets(limit=40):
                m.window_open, m.window_close, m.resolved_outcome, m.question,
                up.best_bid AS up_bid, up.best_ask AS up_ask, up.midprice AS up_mid,
                dn.best_bid AS down_bid, dn.best_ask AS down_ask, dn.midprice AS down_mid,
+               up.ts AS up_book_ts, dn.ts AS down_book_ts,
                GREATEST(up.ts, dn.ts) AS book_ts
         FROM vp.pm_markets m
         LEFT JOIN LATERAL (
@@ -3787,14 +5055,28 @@ def api_markets(limit=40):
     return {"markets": rows}
 
 
-def api_v5_market_motion(condition_ids_raw=""):
-    """Read-only in-window movement from the stored CLOB tape for cockpit V5.
+def api_market_motion(condition_ids_raw=""):
+    """Read-only in-window movement from the stored CLOB tape.
 
     This is descriptive telemetry only. It does not feed strategy decisions or
-    infer missing book observations as zero movement.
+    infer missing book observations as zero movement. BBO tick-rule flow stays
+    separate from the BUY/SELL side reported by Polymarket's last-trade event;
+    the response compares those observations without treating either as a
+    forecast or execution gate. Trade-size coverage distinguishes parsed size
+    values, absent/malformed optional sizes, and legacy rows; trade-time
+    provenance distinguishes venue timestamps from receive-time fallback and
+    legacy rows without provenance. The response also includes at most the 40
+    largest active-window prints whose individual sizes were explicitly parsed;
+    it has no wallet identity and cannot represent a trader's combined position.
+    The root Predictions Window Tape presents this as read-only context.
     """
+    raw_ids = str(condition_ids_raw or "")
+    # Match the parser's 16-ID / 160-character-per-ID limits before splitting,
+    # so a giant duplicate-filled query cannot consume unbounded parse work.
+    if len(raw_ids) > 16 * 160 + 15:
+        return {"markets": [], "error": "condition_ids query is too long"}
     condition_ids = []
-    for raw in str(condition_ids_raw or "").split(","):
+    for raw in raw_ids.split(","):
         cid = raw.strip()
         if not cid:
             continue
@@ -3809,14 +5091,42 @@ def api_v5_market_motion(condition_ids_raw=""):
 
     rows = q("""
         SELECT m.condition_id, m.asset, m.horizon_seconds,
+               (EXTRACT(EPOCH FROM m.window_open)*1000)::bigint AS window_open_ms,
+               (EXTRACT(EPOCH FROM m.window_close)*1000)::bigint AS window_close_ms,
                first_book.ts AS first_book_ts,
                first_book.midprice::float8 AS first_up_mid,
                latest_book.ts AS latest_book_ts,
                latest_book.midprice::float8 AS latest_up_mid,
+               first_book_down.ts AS first_down_book_ts,
+               first_book_down.midprice::float8 AS first_down_mid,
+               latest_book_down.ts AS latest_down_book_ts,
+               latest_book_down.midprice::float8 AS latest_down_mid,
                COALESCE(tape.trade_count, 0)::int AS trade_count,
                COALESCE(tape.notional_usd, 0)::float8 AS notional_usd,
+               COALESCE(tape.size_source_known_count, 0)::int AS size_source_known_count,
+               COALESCE(tape.size_missing_count, 0)::int AS size_missing_count,
+               COALESCE(tape.timestamp_source_known_count, 0)::int AS timestamp_source_known_count,
+               COALESCE(tape.timestamp_receive_fallback_count, 0)::int AS timestamp_receive_fallback_count,
+               COALESCE(tape.timestamp_database_fallback_count, 0)::int AS timestamp_database_fallback_count,
+               COALESCE(tape.classified_trade_count, 0)::int AS classified_trade_count,
+               COALESCE(tape.unclassified_trade_count, 0)::int AS unclassified_trade_count,
+               tape.classified_notional_usd::float8 AS classified_notional_usd,
+               tape.net_up_flow_usd::float8 AS net_up_flow_usd,
+               COALESCE(tape.reported_side_trade_count, 0)::int AS reported_side_trade_count,
+               COALESCE(tape.reported_side_unclassified_count, 0)::int AS reported_side_unclassified_count,
+               tape.reported_side_notional_usd::float8 AS reported_side_notional_usd,
+               tape.reported_net_up_flow_usd::float8 AS reported_net_up_flow_usd,
+               COALESCE(tape.reported_side_match_count, 0)::int AS reported_side_match_count,
+               COALESCE(tape.reported_side_comparable_count, 0)::int AS reported_side_comparable_count,
+               COALESCE(tape.flow_buckets, '[]'::json) AS flow_buckets,
                tape.last_trade_ts,
-               motion.path AS up_midpoints
+               COALESCE(prints.large_prints, '[]'::json) AS large_prints,
+               motion.paths->'UP'->'mid' AS up_midpoints,
+               motion.paths->'DOWN'->'mid' AS down_midpoints,
+               motion.paths->'UP'->'spread' AS up_spread_cents,
+               motion.paths->'DOWN'->'spread' AS down_spread_cents,
+               motion.paths->'UP'->'imbalance' AS up_imbalance_pct,
+               motion.paths->'DOWN'->'imbalance' AS down_imbalance_pct
         FROM vp.pm_markets m
         LEFT JOIN LATERAL (
             SELECT ts, midprice FROM vp.pm_book_snapshots
@@ -3833,28 +5143,166 @@ def api_v5_market_motion(condition_ids_raw=""):
             ORDER BY ts DESC LIMIT 1
         ) latest_book ON true
         LEFT JOIN LATERAL (
-            SELECT COUNT(*) AS trade_count,
-                   SUM(price * size)::float8 AS notional_usd,
-                   MAX(ts) AS last_trade_ts
-            FROM vp.pm_trades
-            WHERE condition_id=m.condition_id
+            SELECT ts, midprice FROM vp.pm_book_snapshots
+            WHERE condition_id=m.condition_id AND side_label='DOWN'
               AND ts >= m.window_open AND ts <= LEAST(now(), m.window_close)
-        ) tape ON true
+              AND midprice IS NOT NULL
+            ORDER BY ts ASC LIMIT 1
+        ) first_book_down ON true
         LEFT JOIN LATERAL (
-            SELECT json_agg(json_build_array(b.bucket_index, b.midprice)
-                            ORDER BY b.bucket_index) AS path
+            SELECT ts, midprice FROM vp.pm_book_snapshots
+            WHERE condition_id=m.condition_id AND side_label='DOWN'
+              AND ts >= m.window_open AND ts <= LEAST(now(), m.window_close)
+              AND midprice IS NOT NULL
+            ORDER BY ts DESC LIMIT 1
+        ) latest_book_down ON true
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(b.trade_count), 0)::int AS trade_count,
+                   COALESCE(SUM(b.notional_usd), 0)::float8 AS notional_usd,
+                   COALESCE(SUM(b.size_source_known_count), 0)::int AS size_source_known_count,
+                   COALESCE(SUM(b.size_missing_count), 0)::int AS size_missing_count,
+                   COALESCE(SUM(b.timestamp_source_known_count), 0)::int AS timestamp_source_known_count,
+                   COALESCE(SUM(b.timestamp_receive_fallback_count), 0)::int AS timestamp_receive_fallback_count,
+                   COALESCE(SUM(b.timestamp_database_fallback_count), 0)::int AS timestamp_database_fallback_count,
+                   COALESCE(SUM(b.classified_trade_count), 0)::int AS classified_trade_count,
+                   COALESCE(SUM(b.unclassified_trade_count), 0)::int AS unclassified_trade_count,
+                   CASE WHEN SUM(b.classified_trade_count) > 0
+                        THEN SUM(b.classified_notional_usd)::float8 END AS classified_notional_usd,
+                   CASE WHEN SUM(b.classified_trade_count) > 0
+                        THEN SUM(b.up_flow_usd - b.down_flow_usd)::float8 END AS net_up_flow_usd,
+                   COALESCE(SUM(b.reported_side_trade_count), 0)::int AS reported_side_trade_count,
+                   COALESCE(SUM(b.reported_side_unclassified_count), 0)::int AS reported_side_unclassified_count,
+                   CASE WHEN SUM(b.reported_side_trade_count) > 0
+                        THEN SUM(b.reported_side_notional_usd)::float8 END AS reported_side_notional_usd,
+                   CASE WHEN SUM(b.reported_side_trade_count) > 0
+                        THEN SUM(b.reported_up_flow_usd - b.reported_down_flow_usd)::float8
+                        END AS reported_net_up_flow_usd,
+                   COALESCE(SUM(b.reported_side_match_count), 0)::int AS reported_side_match_count,
+                   COALESCE(SUM(b.reported_side_comparable_count), 0)::int AS reported_side_comparable_count,
+                   COALESCE(json_agg(json_build_array(
+                       b.bucket_index, b.up_flow_usd-b.down_flow_usd,
+                       b.up_flow_usd, b.down_flow_usd,
+                       b.classified_trade_count, b.unclassified_trade_count)
+                       ORDER BY b.bucket_index) FILTER (WHERE b.trade_count > 0),
+                       '[]'::json) AS flow_buckets,
+                   MAX(b.last_trade_ts) AS last_trade_ts
             FROM (
                 SELECT floor(extract(epoch FROM ts) / 15)::bigint AS bucket_index,
-                       AVG(midprice)::float8 AS midprice
-                FROM vp.pm_book_snapshots
-                WHERE condition_id=m.condition_id AND side_label='UP'
+                       COUNT(*)::int AS trade_count,
+                       SUM(price * size)::float8 AS notional_usd,
+                       (COUNT(*) FILTER (WHERE COALESCE(raw ? 'size_available', false)))::int
+                           AS size_source_known_count,
+                       (COUNT(*) FILTER (WHERE raw->>'size_available'='false'))::int
+                           AS size_missing_count,
+                       (COUNT(*) FILTER (WHERE raw->>'timestamp_source' IN
+                           ('exchange','receive','database')))::int AS timestamp_source_known_count,
+                       (COUNT(*) FILTER (WHERE raw->>'timestamp_source'='receive'))::int
+                           AS timestamp_receive_fallback_count,
+                       (COUNT(*) FILTER (WHERE raw->>'timestamp_source'='database'))::int
+                           AS timestamp_database_fallback_count,
+                       (COUNT(*) FILTER (WHERE aggressor IS NOT NULL))::int AS classified_trade_count,
+                       (COUNT(*) FILTER (WHERE aggressor IS NULL))::int AS unclassified_trade_count,
+                       COALESCE(SUM(price * size) FILTER (WHERE
+                           (side_label='UP' AND aggressor='buy') OR
+                           (side_label='DOWN' AND aggressor='sell')), 0)::float8 AS up_flow_usd,
+                       COALESCE(SUM(price * size) FILTER (WHERE
+                           (side_label='UP' AND aggressor='sell') OR
+                           (side_label='DOWN' AND aggressor='buy')), 0)::float8 AS down_flow_usd,
+                       (SUM(price * size) FILTER (WHERE aggressor IS NOT NULL))::float8 AS classified_notional_usd,
+                       (COUNT(*) FILTER (WHERE raw->>'reported_side' IN ('buy','sell')))
+                           ::int AS reported_side_trade_count,
+                       (COUNT(*) FILTER (WHERE raw->>'reported_side' IS NULL OR
+                                               raw->>'reported_side' NOT IN ('buy','sell')))
+                           ::int AS reported_side_unclassified_count,
+                       SUM(price * size) FILTER (WHERE raw->>'reported_side' IN ('buy','sell'))
+                           ::float8 AS reported_side_notional_usd,
+                       COALESCE(SUM(price * size) FILTER (WHERE
+                           (side_label='UP' AND raw->>'reported_side'='buy') OR
+                           (side_label='DOWN' AND raw->>'reported_side'='sell')), 0)
+                           ::float8 AS reported_up_flow_usd,
+                       COALESCE(SUM(price * size) FILTER (WHERE
+                           (side_label='UP' AND raw->>'reported_side'='sell') OR
+                           (side_label='DOWN' AND raw->>'reported_side'='buy')), 0)
+                           ::float8 AS reported_down_flow_usd,
+                       (COUNT(*) FILTER (WHERE aggressor IS NOT NULL AND
+                           raw->>'reported_side' IN ('buy','sell')))
+                           ::int AS reported_side_comparable_count,
+                       (COUNT(*) FILTER (WHERE aggressor IS NOT NULL AND
+                           raw->>'reported_side' IN ('buy','sell') AND
+                           raw->>'reported_side'=aggressor::text))
+                           ::int AS reported_side_match_count,
+                       MAX(ts) AS last_trade_ts
+                FROM vp.pm_trades
+                WHERE condition_id=m.condition_id
                   AND ts >= m.window_open AND ts <= LEAST(now(), m.window_close)
-                  AND midprice IS NOT NULL
                 GROUP BY 1
-                ORDER BY 1
             ) b
+        ) tape ON true
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(json_agg(json_build_object(
+                       'ts_ms', (EXTRACT(EPOCH FROM p.ts)*1000)::bigint,
+                       'outcome', p.side_label::text,
+                       'price', p.price::float8,
+                       'size_shares', p.size::float8,
+                       'notional_usd', p.notional_usd::float8,
+                       'reported_side', NULLIF(p.raw->>'reported_side', ''),
+                       'aggressor', p.aggressor::text,
+                       'timestamp_source', COALESCE(NULLIF(p.raw->>'timestamp_source', ''), 'unknown')
+                   ) ORDER BY p.ts DESC, p.id DESC), '[]'::json) AS large_prints
+            FROM (
+                SELECT t.id, t.ts, t.side_label, t.price, t.size, t.raw, t.aggressor,
+                       t.price*t.size AS notional_usd
+                FROM vp.pm_trades t
+                WHERE t.condition_id=m.condition_id
+                  AND t.ts >= m.window_open AND t.ts <= LEAST(now(), m.window_close)
+                  AND t.raw->>'size_available'='true'
+                  AND t.size > 0 AND t.price > 0 AND t.price < 1
+                ORDER BY t.price*t.size DESC, t.ts DESC, t.id DESC
+                LIMIT 40
+            ) p
+        ) prints ON true
+        LEFT JOIN LATERAL (
+            SELECT json_object_agg(paths.side_label, json_build_object(
+                       'mid', paths.mid_path,
+                       'spread', paths.spread_path,
+                       'imbalance', paths.imbalance_path)) AS paths
+            FROM (
+                SELECT b.side_label::text AS side_label,
+                       json_agg(json_build_array(b.bucket_index, b.midprice)
+                                ORDER BY b.bucket_index) AS mid_path,
+                       json_agg(json_build_array(b.bucket_index, b.spread_cents)
+                                ORDER BY b.bucket_index)
+                           FILTER (WHERE b.spread_cents IS NOT NULL) AS spread_path,
+                       json_agg(json_build_array(b.bucket_index, b.imbalance_pct)
+                                ORDER BY b.bucket_index)
+                           FILTER (WHERE b.imbalance_pct IS NOT NULL) AS imbalance_path
+                FROM (
+                    SELECT side_label,
+                           floor(extract(epoch FROM ts) / 15)::bigint AS bucket_index,
+                           AVG(midprice)::float8 AS midprice,
+                           AVG(spread)::float8 * 100.0 AS spread_cents,
+                           (AVG(imbalance_top1) FILTER (WHERE jsonb_array_length(bids) > 0
+                               AND jsonb_array_length(asks) > 0
+                               AND (bids->0->>1)::float8 > 0
+                               AND (asks->0->>1)::float8 > 0))::float8 * 100.0 AS imbalance_pct
+                    FROM vp.pm_book_snapshots
+                    WHERE condition_id=m.condition_id
+                      AND side_label IN ('UP', 'DOWN')
+                      AND ts >= m.window_open AND ts <= LEAST(now(), m.window_close)
+                      AND (midprice IS NOT NULL OR spread IS NOT NULL
+                           OR imbalance_top1 IS NOT NULL)
+                    GROUP BY side_label, 2
+                ) b
+                GROUP BY b.side_label
+            ) paths
         ) motion ON true
+        -- The tape panel is for the active 5m/15m market only. Rejecting
+        -- expired, upcoming, and other-horizon IDs here bounds both scan work
+        -- and the meaning of the displayed movement.
         WHERE m.condition_id = ANY(%s::text[])
+          AND m.horizon_seconds IN (300, 900)
+          AND m.window_open <= now()
+          AND m.window_close >= now()
     """, (condition_ids,))
 
     now_ms = int(time.time() * 1000)
@@ -3863,6 +5311,11 @@ def api_v5_market_motion(condition_ids_raw=""):
         latest = row.get("latest_up_mid")
         row["move_cents"] = (round((float(latest) - float(first)) * 100.0, 3)
                               if first is not None and latest is not None else None)
+        first_down = row.get("first_down_mid")
+        latest_down = row.get("latest_down_mid")
+        row["down_move_cents"] = (
+            round((float(latest_down) - float(first_down)) * 100.0, 3)
+            if first_down is not None and latest_down is not None else None)
         row["book_span_s"] = (
             max(0.0, (int(row["latest_book_ts"]) - int(row["first_book_ts"])) / 1000.0)
             if row.get("first_book_ts") is not None and row.get("latest_book_ts") is not None
@@ -3870,9 +5323,41 @@ def api_v5_market_motion(condition_ids_raw=""):
         row["book_age_s"] = (
             max(0.0, (now_ms - int(row["latest_book_ts"])) / 1000.0)
             if row.get("latest_book_ts") is not None else None)
+        row["down_book_span_s"] = (
+            max(0.0, (int(row["latest_down_book_ts"]) - int(row["first_down_book_ts"])) / 1000.0)
+            if row.get("first_down_book_ts") is not None and row.get("latest_down_book_ts") is not None
+            else None)
+        row["down_book_age_s"] = (
+            max(0.0, (now_ms - int(row["latest_down_book_ts"])) / 1000.0)
+            if row.get("latest_down_book_ts") is not None else None)
+        row["size_source_known_count"] = int(row.get("size_source_known_count") or 0)
+        row["size_missing_count"] = int(row.get("size_missing_count") or 0)
+        row["size_source_unknown_count"] = max(
+            0, int(row.get("trade_count") or 0) - row["size_source_known_count"])
+        row["timestamp_source_known_count"] = int(
+            row.get("timestamp_source_known_count") or 0)
+        row["timestamp_receive_fallback_count"] = int(
+            row.get("timestamp_receive_fallback_count") or 0)
+        row["timestamp_database_fallback_count"] = int(
+            row.get("timestamp_database_fallback_count") or 0)
+        row["timestamp_source_unknown_count"] = max(
+            0, int(row.get("trade_count") or 0) -
+            row["timestamp_source_known_count"])
         row["up_midpoints"] = row.get("up_midpoints") or []
+        row["down_midpoints"] = row.get("down_midpoints") or []
+        row["up_spread_cents"] = row.get("up_spread_cents") or []
+        row["down_spread_cents"] = row.get("down_spread_cents") or []
+        row["up_imbalance_pct"] = row.get("up_imbalance_pct") or []
+        row["down_imbalance_pct"] = row.get("down_imbalance_pct") or []
+        row["flow_buckets"] = row.get("flow_buckets") or []
+        row["large_prints"] = row.get("large_prints") or []
     return {"markets": rows, "server_ts": now_ms,
-            "method": "UP midpoint from first stored in-window book to latest; 15-second buckets; public trades from stored tape"}
+            "method": "UP and DOWN midpoints, spreads, and top-of-book size imbalance from stored in-window books; local BBO-inferred public-trade flow and separately reported Polymarket trade sides are compared; trade size, side, and timestamp provenance coverage are counted separately; up to 40 largest current-window prints with explicitly parsed sizes are included without wallet identity"}
+
+
+def api_v5_market_motion(condition_ids_raw=""):
+    """Compatibility wrapper for the V5 market-motion route."""
+    return api_market_motion(condition_ids_raw)
 
 
 # Mobile market data is proxied by the cockpit so the app uses the same trusted
@@ -3880,21 +5365,89 @@ def api_v5_market_motion(condition_ids_raw=""):
 _mobile_gamma_cache = {}
 _mobile_gamma_lock = threading.Lock()
 _mobile_book_cache = {}
+_mobile_book_batch_cache = {}
+_mobile_book_retry_at = 0.0
+_mobile_book_retry_keys = {}
+_mobile_book_failures = {}
+_mobile_public_trades_cache = {}
+_mobile_public_trades_lock = threading.Lock()
+_mobile_public_trades_retry_at = 0.0
+_mobile_public_trades_retry_keys = {}
+_mobile_public_trades_failures = {}
+_mobile_gamma_retry_at = {}
+_mobile_gamma_failures = {}
+_mobile_gamma_host_retry_at = 0.0
+
+
+class _MobileUpstreamCooldown(RuntimeError):
+    """A public market-data request is deferred until its retry window ends."""
+
+
+def _mobile_gamma_retry_delay(exc, failure_count):
+    """Return a bounded cooldown for retryable upstream failures only."""
+    import urllib.error
+
+    retry_after = None
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 429:
+            headers = getattr(exc, "headers", None) or getattr(exc, "hdrs", None)
+            value = headers.get("Retry-After") if headers else None
+            if value:
+                try:
+                    retry_after = float(value)
+                except (TypeError, ValueError):
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        retry_date = parsedate_to_datetime(str(value))
+                        if retry_date.tzinfo is None:
+                            retry_date = retry_date.replace(tzinfo=timezone.utc)
+                        retry_after = retry_date.timestamp() - time.time()
+                    except (TypeError, ValueError, OverflowError):
+                        retry_after = None
+        elif exc.code not in (500, 502, 503, 504):
+            return None
+    elif not isinstance(exc, (TimeoutError, urllib.error.URLError, ConnectionError)):
+        return None
+
+    if retry_after is not None and math.isfinite(retry_after):
+        return min(300.0, max(1.0, retry_after))
+    exponent = min(max(int(failure_count) - 1, 0), 6)
+    return min(30.0, 0.5 * (2 ** exponent))
 
 
 def _mobile_cached_json(key, url, ttl=15.0, timeout=5.0):
+    global _mobile_gamma_host_retry_at
     now = time.monotonic()
     with _mobile_gamma_lock:
         cached = _mobile_gamma_cache.get(key)
         if cached and now - cached[0] < ttl:
             return cached[1], False
+        retry_at = max(_mobile_gamma_retry_at.get(key, 0.0), _mobile_gamma_host_retry_at)
+        if retry_at > now:
+            if cached:
+                return cached[1], True
+            raise _MobileUpstreamCooldown(
+                f"public market data retry deferred for {retry_at - now:.1f}s")
     try:
         value = _public_json(url, timeout=timeout)
         with _mobile_gamma_lock:
             _mobile_gamma_cache[key] = (time.monotonic(), value)
+            _mobile_gamma_retry_at.pop(key, None)
+            _mobile_gamma_failures.pop(key, None)
         return value, False
-    except Exception:
+    except Exception as exc:
         with _mobile_gamma_lock:
+            failure_count = _mobile_gamma_failures.get(key, 0) + 1
+            delay = _mobile_gamma_retry_delay(exc, failure_count)
+            if delay is not None:
+                _mobile_gamma_failures[key] = failure_count
+                retry_at = time.monotonic() + delay
+                _mobile_gamma_retry_at[key] = retry_at
+                import urllib.error
+                if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+                    # Gamma may rate-limit by host/IP rather than query key;
+                    # suppress all catalog/detail reads until its retry window.
+                    _mobile_gamma_host_retry_at = max(_mobile_gamma_host_retry_at, retry_at)
             cached = _mobile_gamma_cache.get(key)
         if cached:
             return cached[1], True
@@ -3921,7 +5474,7 @@ def _mobile_number(value):
         return None
 
 
-def _mobile_normalize_market(raw, event_title=""):
+def _mobile_normalize_market(raw, event_title="", event_slug=""):
     if not isinstance(raw, dict):
         return None
     condition_id = str(raw.get("conditionId") or raw.get("condition_id") or "")
@@ -3944,9 +5497,11 @@ def _mobile_normalize_market(raw, event_title=""):
         "id": str(raw.get("id") or ""),
         "condition_id": condition_id,
         "slug": str(raw.get("slug") or ""),
+        "event_slug": str(event_slug or raw.get("eventSlug") or raw.get("event_slug") or ""),
         "question": str(raw.get("question") or raw.get("title") or "Untitled market"),
         "event_title": event_title or str(raw.get("eventTitle") or raw.get("event_title") or ""),
-        "description": str(raw.get("description") or ""),
+        "description": str(raw.get("description") or "")[:12000],
+        "resolution_source": str(raw.get("resolutionSource") or raw.get("resolution_source") or "")[:1000],
         "category": str(raw.get("category") or ""),
         "end_date": raw.get("endDate") or raw.get("end_date"),
         "active": bool(raw.get("active", True)),
@@ -4010,8 +5565,9 @@ def api_mobile_market_search(query="", limit=30, offset=0):
                             if not isinstance(event, dict):
                                 continue
                             title = futures[future] or str(event.get("title") or "")
+                            event_slug = str(event.get("slug") or "")
                             for raw in event.get("markets", []) if isinstance(event.get("markets"), list) else []:
-                                item = _mobile_normalize_market(raw, title)
+                                item = _mobile_normalize_market(raw, title, event_slug)
                                 if item and item["active"] and not item["closed"]:
                                     markets.append(item)
                         except Exception:
@@ -4124,6 +5680,557 @@ def api_mobile_market_book(condition_id, outcome_index):
         return 200, payload
     except Exception:
         return 502, {"error": "Polymarket order book is temporarily unavailable"}
+
+
+def _mobile_book_summary(condition_id, outcome_index, token_id, book):
+    if not isinstance(book, dict):
+        return None
+    returned_token = str(book.get("asset_id") or "")
+    returned_condition = str(book.get("market") or "")
+    if ((returned_token and returned_token != token_id)
+            or (returned_condition and returned_condition.lower() != condition_id)):
+        return None
+    bids = book.get("bids") if isinstance(book.get("bids"), list) else []
+    asks = book.get("asks") if isinstance(book.get("asks"), list) else []
+    valid_bids = [(_mobile_number(row.get("price")), _mobile_number(row.get("size")))
+                  for row in bids if isinstance(row, dict)]
+    valid_bids = [(price, size) for price, size in valid_bids
+                  if price is not None and 0 < price <= 1]
+    valid_asks = [(_mobile_number(row.get("price")), _mobile_number(row.get("size")))
+                  for row in asks if isinstance(row, dict)]
+    valid_asks = [(price, size) for price, size in valid_asks
+                  if price is not None and 0 < price <= 1]
+    best_bid = max((price for price, _ in valid_bids), default=0)
+    best_ask = min((price for price, _ in valid_asks), default=0)
+
+    def size_at_best(levels, best):
+        if not best:
+            return None
+        sizes = [size for price, size in levels
+                 if price == best and size is not None and 0 <= size <= 1e12]
+        return sum(sizes) if sizes else None
+
+    def visible_levels(levels, reverse):
+        """Keep a small, validated ladder for the read-only root market detail."""
+        grouped = {}
+        for price, size in levels:
+            if price is None or size is None or not 0 < price <= 1 or not 0 < size <= 1e12:
+                continue
+            grouped[price] = grouped.get(price, 0.0) + size
+        return [{"price": price, "size": size}
+                for price, size in sorted(grouped.items(), reverse=reverse)[:8]]
+
+    best_bid_size = size_at_best(valid_bids, best_bid)
+    best_ask_size = size_at_best(valid_asks, best_ask)
+    top_size_total = (best_bid_size + best_ask_size
+                      if best_bid_size is not None and best_ask_size is not None
+                      else None)
+    top_imbalance_pct = (
+        100 * (best_bid_size - best_ask_size) / top_size_total
+        if top_size_total and top_size_total > 0 else None)
+    microprice = (
+        (best_ask * best_bid_size + best_bid * best_ask_size) / top_size_total
+        if (top_size_total and top_size_total > 0 and best_bid and best_ask)
+        else None)
+    stamp = _mobile_number(book.get("timestamp"))
+    now_ms = time.time() * 1000
+    age_s = max(0.0, (now_ms - stamp) / 1000) if stamp else None
+    timestamp_valid = bool(stamp and stamp <= now_ms + 5_000)
+    return {
+        "condition_id": condition_id,
+        "outcome_index": outcome_index,
+        "best_bid": best_bid or None,
+        "best_ask": best_ask or None,
+        "best_bid_size": best_bid_size,
+        "best_ask_size": best_ask_size,
+        "bid_levels": visible_levels(valid_bids, True),
+        "ask_levels": visible_levels(valid_asks, False),
+        "top_imbalance_pct": top_imbalance_pct,
+        "microprice": microprice,
+        "book_age_s": age_s,
+        "fresh": bool(timestamp_valid and age_s is not None and age_s <= 15
+                       and (best_bid or best_ask)),
+        "timestamp": stamp,
+        "tick_size": _mobile_number(book.get("tick_size") or book.get("minimum_tick_size")),
+        "min_order_size": _mobile_number(book.get("min_order_size")),
+        "server_ts": int(now_ms),
+        "stale": False,
+    }
+
+
+def api_mobile_market_books(condition_id):
+    """Fetch both binary outcome books with one public CLOB /books request."""
+    global _mobile_book_retry_at
+    condition = str(condition_id or "").strip().lower()
+    if not re.fullmatch(r"0x[0-9a-f]{64}", condition):
+        return 400, {"error": "invalid market condition ID"}
+    market, market_stale = _mobile_market_for_condition(condition)
+    if not market and market_stale:
+        return 502, {"error": "market details are temporarily unavailable"}
+    if not market or len(market.get("outcomes", [])) != 2:
+        return 404, {"error": "binary market outcomes were not found"}
+    if market_stale:
+        return 409, {"error": "market details are stale; refresh before reading the book"}
+    token_ids = [str(outcome.get("token_id") or "").strip()
+                 for outcome in market["outcomes"]]
+    if any(not re.fullmatch(r"[0-9]{1,78}", token_id) for token_id in token_ids) \
+            or token_ids[0] == token_ids[1]:
+        return 502, {"error": "market outcome token IDs are invalid"}
+
+    cache_key = "books:" + condition
+    now = time.monotonic()
+    with _mobile_gamma_lock:
+        cached = _mobile_book_batch_cache.get(cache_key)
+        if cached and now - cached[0] < 1.0:
+            return 200, cached[1]
+        host_retry_at = _mobile_book_retry_at
+        key_retry_at = _mobile_book_retry_keys.get(cache_key, 0.0)
+        retry_at = max(host_retry_at, key_retry_at)
+        if retry_at > now:
+            retry_after = max(1, int(math.ceil(retry_at - now)))
+            if cached:
+                stale_books = [({**book, "fresh": False, "stale": True}
+                                if isinstance(book, dict) else None)
+                               for book in cached[1].get("books", [])]
+                return 200, {**cached[1], "books": stale_books,
+                             "stale": True, "retry_after_seconds": retry_after}
+            status = 429 if host_retry_at > now else 503
+            return status, {
+                "error": ("Polymarket is rate limiting order-book snapshots"
+                          if status == 429 else
+                          "Polymarket order-book snapshots are temporarily unavailable"),
+                "retry_after_seconds": retry_after,
+            }
+
+    try:
+        url = "https://clob.polymarket.com/books"
+        # Keep both outcome token IDs in one official batch response so their
+        # quote timestamps travel together; the batch body is a list of token_id objects.
+        response = _public_json(
+            url, timeout=4.0,
+            data=[{"token_id": token_id} for token_id in token_ids])
+        if not isinstance(response, list):
+            return 502, {"error": "Polymarket returned an invalid order-book batch"}
+        by_token = {}
+        for raw in response:
+            asset_id = str(raw.get("asset_id") or "") if isinstance(raw, dict) else ""
+            if asset_id in token_ids and asset_id not in by_token:
+                by_token[asset_id] = raw
+        books = [_mobile_book_summary(condition, index, token_id, by_token.get(token_id))
+                 for index, token_id in enumerate(token_ids)]
+        payload = {"condition_id": condition, "books": books,
+                   "server_ts": int(time.time() * 1000), "stale": False,
+                   "retry_after_seconds": 0}
+        with _mobile_gamma_lock:
+            cached_at = time.monotonic()
+            _mobile_book_batch_cache[cache_key] = (cached_at, payload)
+            for token_id, book in zip(token_ids, books):
+                if book:
+                    _mobile_book_cache["book:" + token_id] = (cached_at, book)
+            _mobile_book_retry_keys.pop(cache_key, None)
+            _mobile_book_failures.pop(cache_key, None)
+            if _mobile_book_retry_at <= cached_at:
+                _mobile_book_retry_at = 0.0
+            while len(_mobile_book_batch_cache) > 64:
+                _mobile_book_batch_cache.pop(next(iter(_mobile_book_batch_cache)))
+        return 200, payload
+    except Exception as exc:
+        import urllib.error
+
+        rate_limited = isinstance(exc, urllib.error.HTTPError) and exc.code == 429
+        with _mobile_gamma_lock:
+            failure_count = _mobile_book_failures.get(cache_key, 0) + 1
+            delay = _mobile_gamma_retry_delay(exc, failure_count)
+            if delay is not None:
+                _mobile_book_failures[cache_key] = failure_count
+                retry_at = time.monotonic() + delay
+                if rate_limited:
+                    _mobile_book_retry_at = max(_mobile_book_retry_at, retry_at)
+                else:
+                    _mobile_book_retry_keys[cache_key] = retry_at
+            cached = _mobile_book_batch_cache.get(cache_key)
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
+        if delay is not None:
+            retry_after = max(1, int(math.ceil(delay)))
+            if cached:
+                stale_books = [({**book, "fresh": False, "stale": True}
+                                if isinstance(book, dict) else None)
+                               for book in cached[1].get("books", [])]
+                return 200, {**cached[1], "books": stale_books,
+                             "stale": True, "retry_after_seconds": retry_after}
+            status = 429 if rate_limited else 502
+            return status, {
+                "error": ("Polymarket is rate limiting order-book snapshots"
+                          if rate_limited else
+                          "Polymarket order-book snapshots are temporarily unavailable"),
+                "retry_after_seconds": retry_after,
+            }
+        return 502, {"error": "Polymarket order-book snapshots are temporarily unavailable"}
+
+
+def api_mobile_market_books_watchlist(condition_ids_raw):
+    """Return paired books for a bounded saved-market list in one CLOB request."""
+    global _mobile_book_retry_at
+    raw_ids = str(condition_ids_raw or "")
+    pieces = raw_ids.split(",") if raw_ids else []
+    if not pieces or len(pieces) > 12:
+        return 400, {"error": "watchlist book refresh accepts 1 to 12 market IDs"}
+    conditions = []
+    for piece in pieces:
+        condition = piece.strip().lower()
+        if not re.fullmatch(r"0x[0-9a-f]{64}", condition):
+            return 400, {"error": "invalid market condition ID in watchlist"}
+        if condition not in conditions:
+            conditions.append(condition)
+
+    cache_key = "books-watch:" + hashlib.sha256(",".join(conditions).encode("ascii")).hexdigest()
+
+    def stale_payload(retry_after, batch_payload=None):
+        """Return cached per-market books with their freshness explicitly revoked."""
+        cached_rows = {}
+        if isinstance(batch_payload, dict):
+            cached_rows = {
+                str(row.get("condition_id") or "").lower(): row
+                for row in batch_payload.get("markets", []) if isinstance(row, dict)
+            }
+        with _mobile_gamma_lock:
+            for condition in conditions:
+                existing = cached_rows.get(condition, {})
+                existing_books = (existing.get("books", [])
+                                  if isinstance(existing, dict) else [])
+                if isinstance(existing_books, list) and any(
+                        isinstance(book, dict) for book in existing_books):
+                    continue
+                cached = _mobile_book_batch_cache.get("books:" + condition)
+                if cached and isinstance(cached[1], dict):
+                    cached_rows[condition] = {
+                        "condition_id": condition,
+                        "books": cached[1].get("books", []),
+                        "error": "",
+                    }
+        markets = []
+        has_cached_book = False
+        for condition in conditions:
+            row = cached_rows.get(condition, {})
+            books = row.get("books", []) if isinstance(row, dict) else []
+            books = books[:2] if isinstance(books, list) else []
+            stale_books = [({**book, "fresh": False, "stale": True}
+                            if isinstance(book, dict) else None)
+                           for book in books]
+            stale_books.extend([None] * (2 - len(stale_books)))
+            has_cached_book = has_cached_book or any(book is not None for book in stale_books)
+            markets.append({
+                "condition_id": condition,
+                "books": stale_books,
+                "stale": True,
+                "error": (str(row.get("error") or "") if condition in cached_rows
+                          else "No cached book is available during the CLOB retry cooldown."),
+            })
+        if not has_cached_book:
+            return None
+        return {"markets": markets, "server_ts": int(time.time() * 1000),
+                "stale": True, "retry_after_seconds": retry_after}
+
+    now = time.monotonic()
+    with _mobile_gamma_lock:
+        cached = _mobile_book_batch_cache.get(cache_key)
+        if cached and now - cached[0] < 1.0:
+            return 200, cached[1]
+        host_retry_at = _mobile_book_retry_at
+        key_retry_at = _mobile_book_retry_keys.get(cache_key, 0.0)
+        retry_at = max(host_retry_at, key_retry_at)
+        cooldown_active = retry_at > now
+        retry_after = max(1, int(math.ceil(retry_at - now))) if cooldown_active else 0
+
+    if cooldown_active:
+        stale = stale_payload(retry_after, cached[1] if cached else None)
+        if stale:
+            return 200, stale
+        status = 429 if host_retry_at > now else 503
+        return status, {
+            "error": ("Polymarket is rate limiting order-book snapshots"
+                      if status == 429 else
+                      "Polymarket order-book snapshots are temporarily unavailable"),
+            "retry_after_seconds": retry_after,
+        }
+
+    # Resolve and validate each Gamma market first, then send at most 24 token
+    # IDs to the official CLOB /books endpoint in a single operator-triggered read.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    details = {}
+    with ThreadPoolExecutor(max_workers=min(4, len(conditions))) as workers:
+        futures = {workers.submit(_mobile_market_for_condition, condition): condition
+                   for condition in conditions}
+        for future in as_completed(futures):
+            condition = futures[future]
+            try:
+                details[condition] = future.result()
+            except Exception:
+                details[condition] = (None, True)
+
+    result_rows = {}
+    usable = []
+    token_owners = {}
+    for condition in conditions:
+        market, market_stale = details.get(condition, (None, True))
+        row = {"condition_id": condition, "books": [None, None], "stale": False, "error": ""}
+        result_rows[condition] = row
+        if market_stale:
+            row["error"] = "Market details are stale; refresh the saved markets and try again."
+            row["stale"] = True
+            continue
+        if not market or str(market.get("condition_id") or "").lower() != condition:
+            row["error"] = "Market details are unavailable."
+            continue
+        outcomes = market.get("outcomes", [])
+        if len(outcomes) != 2:
+            row["error"] = "Binary market outcomes were not found."
+            continue
+        token_ids = [str(outcome.get("token_id") or "").strip() for outcome in outcomes]
+        if (any(not re.fullmatch(r"[0-9]{1,78}", token_id) for token_id in token_ids)
+                or token_ids[0] == token_ids[1]):
+            row["error"] = "Market outcome token IDs are invalid."
+            continue
+        if any(token_id in token_owners for token_id in token_ids):
+            row["error"] = "A token ID was duplicated across saved markets."
+            continue
+        for token_id in token_ids:
+            token_owners[token_id] = condition
+        usable.append((condition, market, token_ids))
+
+    if not usable:
+        payload = {"markets": [result_rows[condition] for condition in conditions],
+                   "server_ts": int(time.time() * 1000), "stale": False,
+                   "retry_after_seconds": 0}
+        with _mobile_gamma_lock:
+            _mobile_book_batch_cache[cache_key] = (time.monotonic(), payload)
+            while len(_mobile_book_batch_cache) > 64:
+                _mobile_book_batch_cache.pop(next(iter(_mobile_book_batch_cache)))
+        return 200, payload
+
+    token_ids = [token_id for _, _, market_tokens in usable for token_id in market_tokens]
+    try:
+        response = _public_json(
+            "https://clob.polymarket.com/books", timeout=6.0,
+            data=[{"token_id": token_id} for token_id in token_ids])
+        if not isinstance(response, list):
+            raise ValueError("invalid order-book batch")
+        by_token = {}
+        for raw in response:
+            asset_id = str(raw.get("asset_id") or "") if isinstance(raw, dict) else ""
+            if asset_id in token_ids and asset_id not in by_token:
+                by_token[asset_id] = raw
+
+        server_ts = int(time.time() * 1000)
+        for condition, market, market_tokens in usable:
+            books = [_mobile_book_summary(condition, index, token_id, by_token.get(token_id))
+                     for index, token_id in enumerate(market_tokens)]
+            row = result_rows[condition]
+            row["books"] = books
+            if any(book is None for book in books):
+                row["error"] = "One or more CLOB books were unavailable for this market."
+            single_payload = {"condition_id": condition, "books": books,
+                              "server_ts": server_ts, "stale": False,
+                              "retry_after_seconds": 0}
+            with _mobile_gamma_lock:
+                _mobile_book_batch_cache["books:" + condition] = (time.monotonic(), single_payload)
+                for token_id, book in zip(market_tokens, books):
+                    if book:
+                        _mobile_book_cache["book:" + token_id] = (time.monotonic(), book)
+
+        payload = {"markets": [result_rows[condition] for condition in conditions],
+                   "server_ts": server_ts, "stale": False, "retry_after_seconds": 0}
+        with _mobile_gamma_lock:
+            cached_at = time.monotonic()
+            _mobile_book_batch_cache[cache_key] = (cached_at, payload)
+            _mobile_book_retry_keys.pop(cache_key, None)
+            _mobile_book_failures.pop(cache_key, None)
+            if _mobile_book_retry_at <= cached_at:
+                _mobile_book_retry_at = 0.0
+            while len(_mobile_book_batch_cache) > 64:
+                _mobile_book_batch_cache.pop(next(iter(_mobile_book_batch_cache)))
+        return 200, payload
+    except Exception as exc:
+        import urllib.error
+
+        rate_limited = isinstance(exc, urllib.error.HTTPError) and exc.code == 429
+        with _mobile_gamma_lock:
+            failure_count = _mobile_book_failures.get(cache_key, 0) + 1
+            delay = _mobile_gamma_retry_delay(exc, failure_count)
+            if delay is not None:
+                _mobile_book_failures[cache_key] = failure_count
+                retry_at = time.monotonic() + delay
+                if rate_limited:
+                    _mobile_book_retry_at = max(_mobile_book_retry_at, retry_at)
+                else:
+                    _mobile_book_retry_keys[cache_key] = retry_at
+            cached = _mobile_book_batch_cache.get(cache_key)
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
+        if delay is not None:
+            retry_after = max(1, int(math.ceil(delay)))
+            stale = stale_payload(retry_after, cached[1] if cached else None)
+            if stale:
+                return 200, stale
+            status = 429 if rate_limited else 502
+            return status, {
+                "error": ("Polymarket is rate limiting order-book snapshots"
+                          if rate_limited else
+                          "Polymarket order-book snapshots are temporarily unavailable"),
+                "retry_after_seconds": retry_after,
+            }
+        return 502, {"error": "Polymarket order-book snapshots are temporarily unavailable"}
+
+
+def api_mobile_public_trades(condition_id, limit=20, cursor=None):
+    """Fetch a bounded, read-only first page of public trades for one market."""
+    global _mobile_public_trades_retry_at
+    condition = str(condition_id or "").strip().lower()
+    if not re.fullmatch(r"0x[0-9a-f]{64}", condition):
+        return 400, {"error": "invalid market condition ID"}
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return 400, {"error": "invalid public trade page size"}
+    if limit < 1:
+        return 400, {"error": "public trade page size must be positive"}
+    limit = min(20, limit)
+    cursor = "" if cursor is None else str(cursor)
+    if (len(cursor) > 4096 or cursor.strip() != cursor
+            or any(ord(char) < 32 for char in cursor)):
+        return 400, {"error": "invalid public trade cursor"}
+
+    cache_key = (condition, limit, hashlib.sha256(cursor.encode("utf-8")).hexdigest())
+    now = time.monotonic()
+    with _mobile_public_trades_lock:
+        cached = _mobile_public_trades_cache.get(cache_key)
+        if cached and now - cached[0] < 12.0:
+            return 200, cached[1]
+        host_retry_at = _mobile_public_trades_retry_at
+        key_retry_at = _mobile_public_trades_retry_keys.get(cache_key, 0.0)
+        retry_at = max(host_retry_at, key_retry_at)
+        if retry_at > now:
+            retry_after = max(1, int(math.ceil(retry_at - now)))
+            if cached:
+                stale_payload = {**cached[1], "stale": True,
+                                 "retry_after_seconds": retry_after}
+                return 200, stale_payload
+            status = 429 if host_retry_at > now else 503
+            return status, {
+                "error": ("Polymarket is rate limiting public trades"
+                          if status == 429 else
+                          "Polymarket public trades are temporarily unavailable"),
+                "retry_after_seconds": retry_after,
+            }
+
+    try:
+        params = {"condition": condition, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        response = _polymarket_data_v2_get("trades", params)
+        rows = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(rows, list):
+            return 502, {"error": "Polymarket returned an invalid public trades page"}
+        pagination = response.get("pagination") if isinstance(response, dict) else None
+        pagination = pagination if isinstance(pagination, dict) else {}
+        next_cursor = pagination.get("next_cursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            next_cursor = None
+        elif (len(next_cursor) > 4096 or next_cursor.strip() != next_cursor
+                or any(ord(char) < 32 for char in next_cursor)):
+            next_cursor = None
+        has_more = pagination.get("has_more") is True and next_cursor is not None
+
+        trades = []
+        for raw in rows[:limit]:
+            if not isinstance(raw, dict):
+                continue
+            returned_condition = str(raw.get("condition_id") or raw.get("conditionId") or "").strip().lower()
+            if returned_condition and returned_condition != condition:
+                continue
+            price = _mobile_number(raw.get("price"))
+            size = _mobile_number(raw.get("size"))
+            timestamp = _mobile_number(raw.get("timestamp"))
+            if (price is None or not 0 <= price <= 1 or size is None or not 0 < size <= 1e12
+                    or timestamp is None or timestamp <= 0 or timestamp > time.time() + 300):
+                continue
+            wallet = str(raw.get("proxy_wallet") or raw.get("wallet") or "").strip()
+            if not re.fullmatch(r"0x[0-9a-fA-F]{40}", wallet):
+                wallet = ""
+            tx_hash = str(raw.get("transaction_hash") or raw.get("transactionHash") or "").strip()
+            if not re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash):
+                tx_hash = ""
+            outcome = str(raw.get("outcome") or "").strip()[:80]
+            side = str(raw.get("side") or "").strip().upper()
+            if side not in ("BUY", "SELL"):
+                side = "UNKNOWN"
+            pseudonym = str(raw.get("pseudonym") or raw.get("name") or "").strip()[:60]
+            trades.append({
+                "condition_id": condition,
+                "side": side,
+                "outcome": outcome,
+                "price": price,
+                "size": size,
+                "gross_notional": price * size,
+                "timestamp": timestamp,
+                "proxy_wallet": wallet,
+                "pseudonym": pseudonym,
+                "transaction_hash": tx_hash,
+            })
+        trades.sort(key=lambda row: row["timestamp"], reverse=True)
+        payload = {"trades": trades[:limit], "condition_id": condition,
+                   "limit": limit, "has_more": has_more,
+                   "next_cursor": next_cursor if has_more else None,
+                   "server_ts": int(time.time() * 1000), "stale": False,
+                   "retry_after_seconds": 0}
+        with _mobile_public_trades_lock:
+            _mobile_public_trades_cache[cache_key] = (time.monotonic(), payload)
+            _mobile_public_trades_retry_keys.pop(cache_key, None)
+            _mobile_public_trades_failures.pop(cache_key, None)
+            if _mobile_public_trades_retry_at <= time.monotonic():
+                _mobile_public_trades_retry_at = 0.0
+            while len(_mobile_public_trades_cache) > 64:
+                _mobile_public_trades_cache.pop(next(iter(_mobile_public_trades_cache)))
+        return 200, payload
+    except Exception as exc:
+        import urllib.error
+
+        rate_limited = isinstance(exc, urllib.error.HTTPError) and exc.code == 429
+        with _mobile_public_trades_lock:
+            failure_count = _mobile_public_trades_failures.get(cache_key, 0) + 1
+            delay = _mobile_gamma_retry_delay(exc, failure_count)
+            if delay is not None:
+                _mobile_public_trades_failures[cache_key] = failure_count
+                retry_at = time.monotonic() + delay
+                if rate_limited:
+                    # Data API limits may apply to this server's IP, so share
+                    # the server-provided cooldown across public-trade pages.
+                    _mobile_public_trades_retry_at = max(
+                        _mobile_public_trades_retry_at, retry_at)
+                else:
+                    _mobile_public_trades_retry_keys[cache_key] = retry_at
+                cached = _mobile_public_trades_cache.get(cache_key)
+            else:
+                retry_at = 0.0
+                cached = _mobile_public_trades_cache.get(cache_key)
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
+        if delay is not None:
+            retry_after = max(1, int(math.ceil(delay)))
+            if cached:
+                stale_payload = {**cached[1], "stale": True,
+                                 "retry_after_seconds": retry_after}
+                return 200, stale_payload
+            status = 429 if rate_limited else 502
+            return status, {
+                "error": ("Polymarket is rate limiting public trades"
+                          if status == 429 else
+                          "Polymarket public trades are temporarily unavailable"),
+                "retry_after_seconds": retry_after,
+            }
+        return 502, {"error": "Polymarket public trades are temporarily unavailable"}
 
 
 def api_strategy():
@@ -4290,18 +6397,26 @@ def fleet_instances():
     up / disappears in both automatically instead of being hard-coded."""
     all_insts = list(dict.fromkeys(INSTANCES))
     backup_re = re.compile(r'-\d{8}')
-    try:
-        for fn in sorted(os.listdir(CONFIG_DIR)):
-            if not fn.startswith("polypulse-") or not fn.endswith(".toml"):
-                continue
-            inst = fn[len("polypulse-"):-len(".toml")]
-            if inst not in all_insts and re.match(r'^[\w-]+$', inst) and \
-                    not backup_re.search(inst) and inst != "template":
-                all_insts.append(inst)
-    except Exception:
-        pass
+    for directory, prefix in ((CONFIG_DIR, "polypulse-"),
+                              (USER_BOT_CONFIG_DIR, "")):
+        try:
+            for fn in sorted(os.listdir(directory)):
+                if not fn.endswith(".toml"):
+                    continue
+                stem = fn[:-len(".toml")]
+                if prefix:
+                    if not stem.startswith(prefix):
+                        continue
+                    inst = stem[len(prefix):]
+                else:
+                    inst = stem.removeprefix("polypulse-")
+                if inst not in all_insts and re.match(r'^[\w-]+$', inst) and \
+                        not backup_re.search(inst) and inst != "template":
+                    all_insts.append(inst)
+        except OSError:
+            pass
     return [i for i in all_insts
-            if os.path.exists(os.path.join(CONFIG_DIR, f"polypulse-{i}.toml"))]
+            if os.path.isfile(_instance_config_file(i))]
 
 
 def _admin_wallet_instances():
@@ -4325,10 +6440,18 @@ def api_tournament():
     """Leaderboard: per instance — active strategy, model, live PnL, status."""
     out = []
     names = instance_names()
+    pnl_rows = api_pnl_by_instance().get("instances", {})
     for inst in fleet_instances():
         mode = current_mode(inst)
+        pnl = pnl_rows.get(inst, {})
         row = {"instance": inst, "name": names.get(inst, inst),
-               "running": instance_running(inst), "mode": mode}
+               "running": bool(pnl.get("running")),
+               "mode": mode,
+               "session_start": pnl.get("session_start"),
+               "session_end": pnl.get("session_end"),
+               "pnl_scope": pnl.get("pnl_scope"),
+               "pnl_available": pnl.get("pnl_available", False),
+               "accounting_status": pnl.get("accounting_status")}
         srow = q("""SELECT s.strategy_id, s.llm_model, s.reason, r.started_at
                     FROM vp.strategy_runs r JOIN vp.strategies s USING (strategy_id)
                     WHERE r.instance=%s ORDER BY r.started_at DESC LIMIT 1""", (inst,))
@@ -4337,25 +6460,9 @@ def api_tournament():
                         "model": srow[0]["llm_model"],
                         "reason": srow[0]["reason"],
                         "run_started": srow[0]["started_at"]})
-        since = accounting_since(inst, mode)
-        if mode.lower() != "paper" or since:
-            since_clause = "AND f.ts >= %s::timestamptz" if since else ""
-            args = [inst, mode]
-            if since:
-                args.append(since)
-            agg = q(f"""SELECT count(*) AS fills,
-                               count(*) FILTER (WHERE o.source='settle' AND f.price>0.5)  AS wins,
-                               count(*) FILTER (WHERE o.source='settle' AND f.price<=0.5) AS losses,
-                               COALESCE(SUM(CASE WHEN o.direction='buy'
-                                    THEN -f.price*f.size_shares ELSE f.price*f.size_shares END
-                                    - COALESCE(f.fee_usd,0)), 0) AS net
-                        FROM vp.orders o JOIN vp.fills f ON f.client_order_id=o.client_order_id
-                        WHERE o.instance=%s AND o.mode=%s AND o.status='filled'
-                          {since_clause}""", tuple(args))
-            if agg:
-                row.update({"fills": agg[0]["fills"], "wins": agg[0]["wins"],
-                            "losses": agg[0]["losses"],
-                            "net_pnl": round(float(agg[0]["net"] or 0), 2)})
+        row.update({k: pnl.get(k) for k in (
+            "fills", "wins", "losses", "net_pnl", "realized_pnl",
+            "fees_usd", "open_positions", "accounting_errors")})
         out.append(row)
     return {"instances": out}
 
@@ -4387,6 +6494,7 @@ _live_cache = {}   # instance-key -> (built_monotonic, payload)
 _live_lite_cache = {}
 _activity_cache = {}
 _exit_performance_cache = {}
+_execution_maker_pressure_cache = {}
 _wallet_mode_lock = threading.Lock()
 ADMIN_WALLET_CREDENTIALS_FILE = "./secrets/polymarket_admin_credentials.json"
 ADMIN_WALLET_PRIVATE_KEY_FILE = "./secrets/polymarket_admin_private_key.txt"
@@ -4422,6 +6530,9 @@ def api_live(instance=None):
     return out
 
 
+OPERATOR_RADAR_BOOK_HEALTH_STALE_AFTER_S = 90
+
+
 def build_operator_radar(status, positions_payload, markets_payload, health):
     alerts = []
     st_mode = str(status.get("mode") or "paper").lower()
@@ -4432,6 +6543,13 @@ def build_operator_radar(status, positions_payload, markets_payload, health):
             "title": "LIVE TRADING",
             "detail": "Real-money mode is active",
         })
+    if not status.get("running"):
+        alerts.append({
+            "kind": "service",
+            "level": "info",
+            "title": "BOT ENGINE STOPPED",
+            "detail": "No active bot process is reported for the current cockpit scope.",
+        })
     if health.get("oracle_source") and health.get("oracle_source") != "chainlink":
         alerts.append({
             "kind": "oracle",
@@ -4441,12 +6559,40 @@ def build_operator_radar(status, positions_payload, markets_payload, health):
         })
     stale = status.get("health_stale")
     total = status.get("health_total")
-    if stale:
+    health_age = status.get("health_age_s")
+    try:
+        age_seconds = float(health_age)
+    except (TypeError, ValueError):
+        age_seconds = math.nan
+    counts_known = (
+        isinstance(stale, int) and not isinstance(stale, bool)
+        and isinstance(total, int) and not isinstance(total, bool)
+        and total > 0 and 0 <= stale <= total
+    )
+    if not math.isfinite(age_seconds) or age_seconds < 0:
+        health_detail = "No valid timestamped orderbook-health sample; book freshness is unknown."
+    elif age_seconds > OPERATOR_RADAR_BOOK_HEALTH_STALE_AFTER_S:
+        health_detail = (
+            f"Latest orderbook-health sample is {age_seconds:.0f}s old; "
+            "current book freshness is unknown."
+        )
+    elif not counts_known:
+        health_detail = "The latest orderbook-health sample has no valid monitored-book counts."
+    else:
+        health_detail = ""
+    if health_detail:
         alerts.append({
             "kind": "books",
-            "level": "warn" if stale < (total or 1) else "critical",
+            "level": "warn",
+            "title": "BOOK HEALTH UNKNOWN",
+            "detail": health_detail,
+        })
+    elif stale:
+        alerts.append({
+            "kind": "books",
+            "level": "warn" if stale < total else "critical",
             "title": "STALE BOOKS",
-            "detail": f"{stale}/{total or '?'} stale",
+            "detail": f"{stale}/{total} stale · health sample {age_seconds:.0f}s old",
         })
     if health.get("parsefail"):
         alerts.append({
@@ -4632,6 +6778,61 @@ def api_exit_performance(instance=None, hours=24):
     return result
 
 
+def api_activity_fill_events(order_rows, instance=None, limit=200):
+    """Return bounded timestamped fills for recent and still-open orders.
+
+    The order-id lookup uses the existing fills(client_order_id) index, so the
+    activity refresh never scans the full fills ledger. Including open order
+    IDs catches fills on quotes that were posted before the recent-order page.
+    """
+    order_ids = list(dict.fromkeys(
+        str(row.get("client_order_id")) for row in (order_rows or [])
+        if isinstance(row, dict) and row.get("client_order_id")
+    ))[:200]
+    open_instance_clause = "AND o.instance=%s" if instance else ""
+    fill_instance_clause = "AND o.instance=%s" if instance else ""
+    args = [order_ids]
+    if instance:
+        args.append(instance)
+        args.append(instance)
+    args.append(max(1, min(int(limit), 200)))
+    return q(f"""
+        WITH recent_orders AS (
+          SELECT unnest(%s::uuid[]) AS client_order_id
+        ), open_orders AS (
+          SELECT o.client_order_id
+          FROM vp.orders o
+          WHERE o.status IN ('submitted','acked','partial','uncertain')
+            AND (o.mode::text <> 'paper' OR EXISTS (
+              SELECT 1 FROM vp.strategy_runs r
+              WHERE r.instance IS NOT DISTINCT FROM o.instance
+                AND r.session_id IS NOT DISTINCT FROM o.session_id
+                AND r.ended_at IS NULL
+            ))
+            {open_instance_clause}
+          ORDER BY o.ts_created DESC LIMIT 200
+        ), candidate_orders AS (
+          SELECT client_order_id FROM recent_orders
+          UNION
+          SELECT client_order_id FROM open_orders
+        )
+        SELECT f.id, f.ts, f.price, f.size_shares, f.fee_usd,
+               o.client_order_id::text AS client_order_id,
+               o.instance, o.mode::text AS mode, o.direction::text AS direction,
+               COALESCE(NULLIF(to_jsonb(o)->>'outcome_label',''),o.side_label::text) AS side_label,
+               COALESCE(NULLIF(o.source,''),'unknown') AS source,
+               o.execution_mode, o.post_only, o.status::text AS order_status,
+               COALESCE(NULLIF(to_jsonb(o)->>'manual_market_question',''),m.question) AS question,
+               COALESCE(m.asset,'') AS asset, COALESCE(m.horizon_seconds,0) AS horizon_seconds
+        FROM vp.fills f
+        JOIN vp.orders o ON o.client_order_id=f.client_order_id
+        LEFT JOIN vp.pm_markets m ON m.condition_id=o.condition_id
+        WHERE f.client_order_id IN (SELECT client_order_id FROM candidate_orders)
+          {fill_instance_clause}
+        ORDER BY f.ts DESC,f.id DESC LIMIT %s
+    """, tuple(args))
+
+
 def api_activity(instance=None):
     """Slower activity payload with durable cross-mode trade history."""
     key = instance or ""
@@ -4643,8 +6844,17 @@ def api_activity(instance=None):
         exit_performance = api_exit_performance(instance)
     except Exception:
         exit_performance = {"groups": [], "error": "Exit ledger temporarily unavailable"}
+    orders = api_orders(200, instance, all_modes=True)
+    fill_events_available = True
+    try:
+        fill_events = api_activity_fill_events(orders.get("orders", []), instance)
+    except Exception:
+        fill_events = []
+        fill_events_available = False
     out = {
-        "orders": api_orders(200, instance, all_modes=True),
+        "orders": orders,
+        "fill_events": fill_events,
+        "fill_events_available": fill_events_available,
         "settles": api_settles(100, instance, all_modes=True),
         "orderstats": api_orderstats(24),
         "source_pnl": api_source_pnl(instance),
@@ -4683,20 +6893,72 @@ def api_execution(instance=None):
         GROUP BY o.client_order_id,m.asset,m.horizon_seconds,m.window_close
         ORDER BY o.ts_submitted DESC LIMIT 100
     """, tuple(args))
+    # Use positive fill-ledger rows for execution counts: an order may be
+    # cancelled after a partial fill, while a rejected order never rested.
+    # Quote lifetime below uses only closed post-only rows with real terminal
+    # timestamps so rejected rows cannot inherit an artificial "now" time.
     stats = q(f"""
-        SELECT execution_mode,
+        SELECT o.execution_mode,
                COUNT(*) AS orders,
-               COUNT(*) FILTER (WHERE status='filled') AS filled,
-               COUNT(*) FILTER (WHERE status='partial') AS partial,
-               COUNT(*) FILTER (WHERE status='cancelled') AS cancelled,
-               COUNT(*) FILTER (WHERE status='rejected') AS rejected,
-               COALESCE(SUM(notional_usd) FILTER (WHERE status='filled'),0) AS filled_usd,
-               COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(ts_terminal,now())-ts_submitted))*1000)
-                        FILTER (WHERE status IN ('filled','cancelled','rejected')),0) AS avg_lifetime_ms
+               COUNT(*) FILTER (WHERE o.status::text='filled') AS filled,
+               COUNT(*) FILTER (WHERE o.status::text='partial') AS partial,
+               COUNT(*) FILTER (WHERE o.status::text='cancelled') AS cancelled,
+               COUNT(*) FILTER (WHERE o.status::text='rejected') AS rejected,
+               COUNT(*) FILTER (WHERE COALESCE(fill_state.has_any_fill,FALSE))
+                   AS orders_with_fill_rows,
+               COUNT(*) FILTER (WHERE o.post_only IS TRUE
+                                 AND o.status::text IN ('submitted','acked','partial',
+                                                        'filled','cancelled','uncertain'))
+                   AS post_only_attempts,
+               COUNT(*) FILTER (WHERE o.post_only IS TRUE
+                                 AND o.status::text IN ('submitted','acked','partial',
+                                                        'filled','cancelled','uncertain')
+                                 AND COALESCE(fill_state.has_any_fill,FALSE))
+                   AS post_only_with_fill_rows,
+               COUNT(*) FILTER (WHERE o.post_only IS TRUE
+                                 AND o.status::text IN ('filled','cancelled')
+                                 AND o.ts_submitted IS NOT NULL
+                                 AND o.ts_terminal IS NOT NULL
+                                 AND o.ts_terminal >= o.ts_submitted)
+                   AS post_only_lifetime_samples,
+               COALESCE(SUM(o.notional_usd) FILTER (WHERE o.status::text='filled'),0) AS filled_usd,
+               COALESCE(AVG(EXTRACT(EPOCH FROM
+                         (COALESCE(o.ts_terminal,now())-o.ts_submitted))*1000)
+                        FILTER (WHERE o.status::text IN ('filled','cancelled','rejected')),0)
+                   AS avg_lifetime_ms,
+               COALESCE(AVG(EXTRACT(EPOCH FROM
+                         (o.ts_terminal-o.ts_submitted))*1000)
+                        FILTER (WHERE o.post_only IS TRUE
+                                  AND o.status::text IN ('filled','cancelled')
+                                  AND o.ts_submitted IS NOT NULL
+                                  AND o.ts_terminal IS NOT NULL
+                                  AND o.ts_terminal >= o.ts_submitted),0)
+                   AS avg_post_only_lifetime_ms
         FROM vp.orders o
+        LEFT JOIN LATERAL (
+            SELECT BOOL_OR(f.size_shares > 0) AS has_any_fill
+            FROM vp.fills f WHERE f.client_order_id=o.client_order_id
+        ) fill_state ON TRUE
         WHERE o.mode=%s AND o.ts_created>now()-interval '24 hours' {inst_clause}
-        GROUP BY execution_mode ORDER BY execution_mode
+        GROUP BY o.execution_mode ORDER BY o.execution_mode
     """, tuple(args))
+    recent_rejections = q(f"""
+        SELECT o.client_order_id::text AS client_order_id, o.ts_created,
+               o.instance, o.execution_mode, o.post_only, o.source,
+               o.direction::text AS direction, o.side_label::text AS side_label,
+               o.price, o.notional_usd, o.reject_reason, o.condition_id,
+               COALESCE(m.asset,'') AS asset,
+               COALESCE(m.horizon_seconds,0) AS horizon_seconds,
+               COALESCE(m.question,'') AS question
+        FROM vp.orders o
+        LEFT JOIN vp.pm_markets m ON m.condition_id=o.condition_id
+        WHERE o.mode=%s AND o.status='rejected'
+          AND o.ts_created > now()-interval '24 hours' {inst_clause}
+        ORDER BY o.ts_created DESC LIMIT 12
+    """, tuple(args))
+    for row in recent_rejections:
+        if row.get("reject_reason"):
+            row["reject_reason"] = _polytron_redact(str(row["reject_reason"]))[:1200]
     policy = {}
     if instance:
         try:
@@ -4710,21 +6972,331 @@ def api_execution(instance=None):
             pass
     return {"mode": mode, "instance": instance or "", "policy": policy,
             "open_orders": open_orders, "stats": stats,
+            "recent_rejections": recent_rejections,
+            "maker_pressure": api_execution_maker_pressure(instance, mode),
             "server_ts": int(time.time() * 1000)}
+
+
+def api_execution_maker_pressure(instance=None, mode=None):
+    """Summarize local public-trade pressure during recent PAPER maker quotes.
+
+    This is descriptive evidence only: public prints cannot reveal a quote's
+    true venue queue position or prove that the order should have filled.
+    """
+    if str(mode or "").lower() != "paper":
+        return {"available": False,
+                "reason": "Public tape pressure is summarized for PAPER mode only.",
+                "lookback_hours": 6, "quotes": []}
+
+    key = (instance or "", "paper")
+    now = time.monotonic()
+    cached = _execution_maker_pressure_cache.get(key)
+    if cached and now - cached[0] < 5.0:
+        return cached[1]
+
+    try:
+        tables = q("""SELECT to_regclass('vp.order_events')::text AS events,
+                            to_regclass('vp.pm_trades')::text AS trades""", one=True)
+        if not tables or not tables.get("events") or not tables.get("trades"):
+            result = {"available": False,
+                      "reason": "The order-event or public-trade recorder is unavailable.",
+                      "lookback_hours": 6, "quotes": []}
+        else:
+            rows = q("""
+                WITH selected_orders AS MATERIALIZED (
+                    SELECT o.client_order_id, o.instance, o.condition_id, o.token_id,
+                           o.side_label::text AS side, o.direction::text AS direction,
+                           o.source, o.status::text AS status, o.price AS limit_price,
+                           o.size_shares AS quote_shares,
+                           COALESCE(f.matched_shares, 0) AS matched_shares,
+                           (EXTRACT(EPOCH FROM o.ts_created) * 1000)::bigint AS created_ms,
+                           (EXTRACT(EPOCH FROM o.ts_submitted) * 1000)::bigint AS submitted_ms,
+                           CASE WHEN o.ts_terminal IS NULL THEN NULL
+                                ELSE (EXTRACT(EPOCH FROM o.ts_terminal) * 1000)::bigint
+                           END AS terminal_ms,
+                           o.ts_terminal
+                    FROM vp.orders o
+                    LEFT JOIN LATERAL (
+                        SELECT SUM(size_shares) AS matched_shares
+                        FROM vp.fills WHERE client_order_id = o.client_order_id
+                    ) f ON TRUE
+                    WHERE o.mode::text = 'paper' AND o.post_only IS TRUE
+                      AND o.execution_mode IN ('maker','hybrid')
+                      AND o.ts_submitted >= now() - interval '6 hours'
+                      AND o.status::text IN
+                          ('submitted','acked','partial','filled','cancelled','uncertain')
+                      AND (%s = '' OR o.instance = %s)
+                      AND (o.status::text NOT IN ('submitted','acked','partial','uncertain')
+                           OR EXISTS (
+                               SELECT 1 FROM vp.strategy_runs r
+                               WHERE r.instance IS NOT DISTINCT FROM o.instance
+                                 AND r.session_id IS NOT DISTINCT FROM o.session_id
+                                 AND r.ended_at IS NULL
+                           ))
+                    ORDER BY o.ts_submitted DESC
+                    LIMIT 24
+                ), selected_markets AS MATERIALIZED (
+                    SELECT condition_id, asset, horizon_seconds
+                    FROM vp.pm_markets
+                    WHERE condition_id IN (SELECT condition_id FROM selected_orders)
+                ), event_candidates AS (
+                    SELECT oe.client_order_id::text AS order_id,
+                           oe.event_ts, oe.event_id, oe.status,
+                           oe.price, oe.size_shares,
+                           COUNT(*) OVER (PARTITION BY oe.client_order_id) AS event_count,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY oe.client_order_id
+                               ORDER BY oe.event_ts DESC, oe.event_id DESC
+                           ) AS event_rank
+                    FROM vp.order_events oe
+                    JOIN selected_orders so ON so.client_order_id = oe.client_order_id
+                ), bounded_events AS (
+                    SELECT * FROM event_candidates WHERE event_rank <= 12
+                ), quote_segments AS (
+                    SELECT so.client_order_id::text AS order_id,
+                           so.condition_id, so.token_id, so.side, so.direction,
+                           COALESCE(be.price, so.limit_price) AS limit_price,
+                           be.event_ts AS active_from,
+                           COALESCE(
+                               LEAD(be.event_ts) OVER (
+                                   PARTITION BY be.order_id
+                                   ORDER BY be.event_ts, be.event_id
+                               ), so.ts_terminal, now()
+                           ) AS active_until,
+                           be.event_count
+                    FROM bounded_events be
+                    JOIN selected_orders so
+                      ON so.client_order_id::text = be.order_id
+                    WHERE be.status IN ('acked','repriced')
+                ), segment_summary AS (
+                    SELECT order_id, COUNT(*) AS resting_intervals,
+                           BOOL_OR(event_count > 12) AS event_history_truncated
+                    FROM quote_segments GROUP BY order_id
+                ), pressure AS (
+                    SELECT qs.order_id,
+                           SUM(p.at_limit_prints) AS at_limit_prints,
+                           SUM(p.through_limit_prints) AS through_limit_prints,
+                           MIN(p.first_evidence) AS first_evidence,
+                           MAX(p.last_evidence) AS last_evidence
+                    FROM quote_segments qs
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            COUNT(*) FILTER (WHERE
+                                ABS(t.price - qs.limit_price) <= 0.0025
+                                AND ((qs.direction = 'buy' AND t.aggressor::text = 'sell')
+                                     OR (qs.direction = 'sell' AND t.aggressor::text = 'buy'))
+                            ) AS at_limit_prints,
+                            COUNT(*) FILTER (WHERE
+                                (qs.direction = 'buy' AND t.price < qs.limit_price - 0.0025)
+                                OR (qs.direction = 'sell' AND t.price > qs.limit_price + 0.0025)
+                            ) AS through_limit_prints,
+                            MIN(t.ts) FILTER (WHERE
+                                ((ABS(t.price - qs.limit_price) <= 0.0025
+                                  AND ((qs.direction = 'buy' AND t.aggressor::text = 'sell')
+                                       OR (qs.direction = 'sell' AND t.aggressor::text = 'buy')))
+                                 OR (qs.direction = 'buy' AND t.price < qs.limit_price - 0.0025)
+                                 OR (qs.direction = 'sell' AND t.price > qs.limit_price + 0.0025)
+                            )) AS first_evidence,
+                            MAX(t.ts) FILTER (WHERE
+                                ((ABS(t.price - qs.limit_price) <= 0.0025
+                                  AND ((qs.direction = 'buy' AND t.aggressor::text = 'sell')
+                                       OR (qs.direction = 'sell' AND t.aggressor::text = 'buy')))
+                                 OR (qs.direction = 'buy' AND t.price < qs.limit_price - 0.0025)
+                                 OR (qs.direction = 'sell' AND t.price > qs.limit_price + 0.0025)
+                            )) AS last_evidence
+                        FROM vp.pm_trades t
+                        WHERE t.condition_id = qs.condition_id
+                          AND t.token_id = qs.token_id
+                          AND t.side_label::text = qs.side
+                          AND t.ts > qs.active_from AND t.ts <= qs.active_until
+                          AND ((qs.direction = 'buy' AND t.price <= qs.limit_price + 0.0025)
+                               OR (qs.direction = 'sell' AND t.price >= qs.limit_price - 0.0025))
+                    ) p ON TRUE
+                    GROUP BY qs.order_id
+                )
+                SELECT so.client_order_id::text AS order_id, so.instance,
+                       COALESCE(m.asset, '') AS asset,
+                       COALESCE(m.horizon_seconds, 0) AS horizon_seconds,
+                       so.side, so.direction,
+                       so.source, so.status, so.limit_price, so.quote_shares,
+                       so.matched_shares, so.created_ms, so.submitted_ms,
+                       so.terminal_ms,
+                       COALESCE(ss.resting_intervals, 0) AS resting_intervals,
+                       COALESCE(ss.event_history_truncated, FALSE) AS event_history_truncated,
+                       COALESCE(p.at_limit_prints, 0) AS at_limit_prints,
+                       COALESCE(p.through_limit_prints, 0) AS through_limit_prints,
+                       CASE WHEN p.first_evidence IS NULL THEN NULL
+                            ELSE (EXTRACT(EPOCH FROM p.first_evidence) * 1000)::bigint
+                       END AS first_evidence_ms,
+                       CASE WHEN p.last_evidence IS NULL THEN NULL
+                            ELSE (EXTRACT(EPOCH FROM p.last_evidence) * 1000)::bigint
+                       END AS last_evidence_ms
+                FROM selected_orders so
+                LEFT JOIN selected_markets m ON m.condition_id = so.condition_id
+                LEFT JOIN segment_summary ss ON ss.order_id = so.client_order_id::text
+                LEFT JOIN pressure p ON p.order_id = so.client_order_id::text
+                ORDER BY so.submitted_ms DESC
+            """, (instance or "", instance or ""))
+            quotes = []
+            for row in rows:
+                item = dict(row)
+                item["quote_shares"] = float(item.get("quote_shares") or 0)
+                item["matched_shares"] = float(item.get("matched_shares") or 0)
+                item["limit_price"] = float(item.get("limit_price") or 0)
+                item["at_limit_prints"] = int(item.get("at_limit_prints") or 0)
+                item["through_limit_prints"] = int(item.get("through_limit_prints") or 0)
+                item["resting_intervals"] = int(item.get("resting_intervals") or 0)
+                quotes.append(item)
+            result = {
+                "available": True,
+                "lookback_hours": 6,
+                "quotes_checked": len(quotes),
+                "quotes_with_at_limit": sum(qt["at_limit_prints"] > 0 for qt in quotes),
+                "quotes_with_through_limit": sum(qt["through_limit_prints"] > 0 for qt in quotes),
+                "quotes_without_recorded_pressure": sum(
+                    qt["resting_intervals"] > 0
+                    and not qt["at_limit_prints"]
+                    and not qt["through_limit_prints"] for qt in quotes),
+                "quotes_with_incomplete_event_history": sum(
+                    bool(qt.get("event_history_truncated")) for qt in quotes),
+                "quotes": quotes,
+            }
+    except Exception:
+        result = {"available": False,
+                  "reason": "Local maker pressure data could not be loaded.",
+                  "lookback_hours": 6, "quotes": []}
+
+    _execution_maker_pressure_cache[key] = (time.monotonic(), result)
+    if len(_execution_maker_pressure_cache) > 64:
+        _execution_maker_pressure_cache.clear()
+        _execution_maker_pressure_cache[key] = (time.monotonic(), result)
+    return result
+
+
+def api_root_state_at(as_of_ms=None, instance=None, mode=None):
+    """Reconstruct a bounded, read-only root-cockpit view from stored records."""
+    now_ms = int(time.time() * 1000)
+    try:
+        as_of_ms = int(as_of_ms) if as_of_ms not in (None, "") else now_ms - 60_000
+    except (TypeError, ValueError, OverflowError):
+        return {"error": "Choose a valid timestamp."}
+    if as_of_ms <= 0 or as_of_ms > now_ms:
+        return {"error": "Choose a past timestamp."}
+    if instance and not re.fullmatch(r"[\w-]+", str(instance)):
+        return {"error": "Invalid bot instance."}
+    selected_mode = str(mode or current_mode(instance) or "paper").strip().lower()
+    if selected_mode not in ("paper", "live", "replay"):
+        return {"error": "Mode must be PAPER, LIVE, or REPLAY."}
+
+    snapshot_scope = "AND h.instance=%s" if instance else ""
+    snapshot_args = [as_of_ms, selected_mode] + ([instance] if instance else [])
+    try:
+        snapshots = q(f"""
+            SELECT DISTINCT ON (h.instance)
+                   h.instance, h.mode::text AS mode, h.ts,
+                   h.cash_usd, h.equity_usd, h.realized_pnl, h.unrealized_pnl,
+                   h.deployed_usd, COALESCE(h.open_positions,'[]'::jsonb) AS open_positions
+            FROM vp.positions_history h
+            WHERE h.ts<=to_timestamp(%s/1000.0) AND h.mode=%s {snapshot_scope}
+            ORDER BY h.instance,h.ts DESC,h.id DESC LIMIT 101
+        """, tuple(snapshot_args))
+    except Exception:
+        return {"error": "Stored position snapshots are temporarily unavailable."}
+    snapshots_truncated = len(snapshots) > 100
+    snapshots = snapshots[:100]
+    for row in snapshots:
+        positions = row.get("open_positions")
+        if isinstance(positions, str):
+            try:
+                positions = json.loads(positions)
+            except (TypeError, ValueError):
+                positions = []
+        if not isinstance(positions, list):
+            positions = []
+        row["open_position_count"] = len(positions)
+        row["open_positions_truncated"] = len(positions) > 50
+        row["open_positions"] = positions[:50]
+
+    order_scope = "AND o.instance=%s" if instance else ""
+    order_args = [as_of_ms, as_of_ms, selected_mode] + ([instance] if instance else [])
+    try:
+        orders = q(f"""
+            SELECT o.client_order_id::text AS client_order_id, o.instance, o.mode::text AS mode,
+                   o.ts_created, o.condition_id, o.side_label::text AS side_label,
+                   o.direction::text AS direction, o.execution_mode, o.post_only,
+                   o.source, o.price, o.size_shares, o.notional_usd,
+                   COALESCE(m.asset,'') AS asset, COALESCE(m.horizon_seconds,0) AS horizon_seconds,
+                   COALESCE(m.question,'') AS question
+            FROM vp.orders o
+            LEFT JOIN vp.pm_markets m ON m.condition_id=o.condition_id
+            WHERE o.ts_created<=to_timestamp(%s/1000.0)
+              AND o.ts_created>to_timestamp(%s/1000.0)-interval '30 minutes'
+              AND o.mode=%s {order_scope}
+            ORDER BY o.ts_created DESC LIMIT 101
+        """, tuple(order_args))
+    except Exception:
+        return {"error": "Stored order records are temporarily unavailable."}
+    orders_truncated = len(orders) > 100
+    orders = orders[:100]
+    return {
+        "as_of_ms": as_of_ms, "mode": selected_mode, "instance": instance or "",
+        "snapshots": snapshots, "orders": orders,
+        "snapshots_truncated": snapshots_truncated,
+        "orders_truncated": orders_truncated,
+        "method": "Latest stored position snapshot per bot at or before the selected time; order creation records from the preceding 30 minutes. Current order status is omitted because it may have changed later. This does not reconstruct intermediate books or strategy configuration.",
+        "server_ts": now_ms,
+    }
 
 
 # ── Extended APIs: configs, bot-control, cb-edge, performance, SSE ──────────
 
-def api_configs():
+def api_configs(allowed_instances=None):
     out = []
+    seen = set()
+    if allowed_instances is not None:
+        # An assigned user may select their external profile without exposing
+        # the rest of the operator's user-config directory.
+        for name in sorted(set(allowed_instances)):
+            if not isinstance(name, str) or not re.fullmatch(r'[\w-]{1,80}', name):
+                continue
+            path = _instance_config_file(name)
+            if not os.path.isfile(path):
+                continue
+            out.append({"name": name, "file": os.path.basename(path),
+                        "mtime": int(os.path.getmtime(path) * 1000),
+                        "label": _instance_display_name(name),
+                        "external": _instance_config_is_external(name)})
+        return {"configs": out}
     try:
         for fn in sorted(os.listdir(CONFIG_DIR)):
             if fn.startswith("polypulse-") and fn.endswith(".toml"):
                 name = fn[len("polypulse-"):-len(".toml")]
                 path = os.path.join(CONFIG_DIR, fn)
                 out.append({"name": name, "file": fn,
-                             "mtime": int(os.path.getmtime(path) * 1000)})
+                             "mtime": int(os.path.getmtime(path) * 1000),
+                             "label": _instance_display_name(name),
+                             "external": False})
+                seen.add(name)
     except Exception:
+        pass
+    try:
+        for fn in sorted(os.listdir(USER_BOT_CONFIG_DIR)):
+            if not fn.endswith(".toml"):
+                continue
+            stem = fn[:-len(".toml")]
+            name = stem.removeprefix("polypulse-")
+            if name in seen or not re.match(r'^[\w-]+$', name) or \
+                    name == "template" or re.search(r'-\d{8}', name):
+                continue
+            path = os.path.join(USER_BOT_CONFIG_DIR, fn)
+            if not os.path.isfile(path):
+                continue
+            out.append({"name": name, "file": fn,
+                        "mtime": int(os.path.getmtime(path) * 1000),
+                        "label": _instance_display_name(name),
+                        "external": True})
+            seen.add(name)
+    except OSError:
         pass
     return {"configs": out}
 
@@ -4732,27 +7304,42 @@ def api_configs():
 def _redact_sensitive_toml(raw_text):
     """Remove credential-bearing TOML tables before returning raw config text."""
     sensitive = {"wallet", "postgres", "polygon"}
+    secret_key_pattern = re.compile(
+        r"(?:^|[.\s,{])(?:\"|')?(?:api_key|api_secret|api_passphrase|password|"
+        r"private_key|conninfo|rpc_url)(?:\"|')?\s*=", re.IGNORECASE)
+    lines = raw_text.splitlines()
+    # Keep TOML comments and formatting for ordinary tables, while hiding a
+    # complete table if it contains any credential field. Hiding the complete
+    # table also safely handles multiline strings, array-of-table entries, and
+    # inline credential maps without trying to parse/rewrite TOML syntax.
+    sections = []
+    current = {"header": None, "lines": []}
+    for line in lines:
+        if re.match(r'^\s*\[{1,2}[^\]]+\]{1,2}\s*(?:#.*)?$', line):
+            sections.append(current)
+            current = {"header": line, "lines": []}
+        current["lines"].append(line)
+    sections.append(current)
+
     output = []
-    hidden = False
-    for line in raw_text.splitlines():
-        match = re.match(r'^\s*\[([^\]]+)\]\s*(?:#.*)?$', line)
-        if match:
-            root_table = match.group(1).split('.', 1)[0].strip()
-            hidden = root_table in sensitive
-            if hidden:
-                output.append(f"# [{root_table}] redacted")
-            else:
-                output.append(line)
-            continue
-        if not hidden:
-            output.append(line)
+    for section in sections:
+        header = section["header"]
+        header_match = re.match(r'^\s*\[\[?([^\]]+)\]\]?\s*(?:#.*)?$', header or "")
+        table_name = header_match.group(1).split('.', 1)[0].strip() if header_match else ""
+        hidden = table_name in sensitive or any(secret_key_pattern.search(line)
+                                                  for line in section["lines"])
+        if hidden:
+            label = table_name or "root"
+            output.append(f"# [{label}] redacted")
+        else:
+            output.extend(section["lines"])
     return "\n".join(output) + ("\n" if raw_text.endswith("\n") else "")
 
 
 def api_config_read(name, full=True):
     if not name or not re.match(r'^[\w-]+$', name):
         return {"error": "invalid name"}
-    path = os.path.join(CONFIG_DIR, f"polypulse-{name}.toml")
+    path = _instance_config_file(name)
     if not os.path.exists(path):
         return {"error": "not found"}
     try:
@@ -4760,11 +7347,61 @@ def api_config_read(name, full=True):
             raw = f.read()
         t = _redact_config_tree(tomllib.loads(raw.decode()))
         tunable_keys, tunable_specs = _config_editor_catalog(t, full=full)
+        # A reproducibility aid for the visible profile only. Hash canonical
+        # redacted settings so credential rotations do not create a browser-
+        # visible fingerprint; runtime overrides/defaults are not represented.
+        fingerprint_payload = json.dumps(t, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False, default=str).encode("utf-8")
         return {"name": name, "config": t, "raw": _redact_sensitive_toml(raw.decode()),
                 "tunable_keys": tunable_keys, "tunable_specs": tunable_specs,
-                "full_editor": bool(full)}
+                "full_editor": bool(full),
+                "external_profile": _instance_config_is_external(name),
+                "redacted_config_sha256": hashlib.sha256(fingerprint_payload).hexdigest()}
     except Exception as e:
         return {"error": str(e)}
+
+
+def api_config_runtime(name):
+    """Compare a same-name bot's verified loaded source with its current profile.
+
+    The raw digests stay server-side because the TOML source can contain
+    credentials. A match only proves that the process loaded byte-identical
+    source; some settings still require restart or have narrower hot-reload
+    semantics.
+    """
+    if not name or not re.fullmatch(r'[\w-]{1,80}', name):
+        return {"error": "invalid instance name"}
+    path = _instance_config_file(name)
+    if not os.path.isfile(path):
+        return {"instance": name, "state": "profile_missing"}
+    try:
+        with open(path, "rb") as source:
+            current_digest = hashlib.sha256(source.read()).hexdigest()
+    except OSError:
+        return {"instance": name, "state": "profile_unreadable"}
+
+    service = _systemd_bot_status(f"polypulse-bot@{name}.service") or {}
+    if not service.get("running"):
+        return {"instance": name, "state": "stopped"}
+    observed = _observed_runtime_status(name, service.get("pid"))
+    if not observed:
+        return {"instance": name, "state": "runtime_unverified"}
+    loaded_digest = observed.get("config_source_sha256")
+    loaded_ms = observed.get("config_source_loaded_ms")
+    runtime_ms = observed.get("ts_ms")
+    if (not isinstance(loaded_digest, str) or
+            not re.fullmatch(r'[0-9a-f]{64}', loaded_digest) or
+            type(loaded_ms) is not int or loaded_ms <= 0 or
+            type(runtime_ms) is not int or loaded_ms > runtime_ms + 1000):
+        return {"instance": name, "state": "runtime_unsupported",
+                "mode": observed.get("mode")}
+    return {"instance": name,
+            "state": "in_sync" if loaded_digest == current_digest else "file_ahead",
+            "mode": observed.get("mode"),
+            "risk_limits": _runtime_risk_limits(observed),
+            "loaded_at_ms": loaded_ms,
+            "runtime_updated_ms": observed.get("ts_ms"),
+            "checked_at_ms": int(time.time() * 1000)}
 
 
 def _set_config_value(content, section, key, nv):
@@ -4791,7 +7428,7 @@ def _set_config_value(content, section, key, nv):
 def api_config_write(name, updates, allow_server_keys=False, allow_all_config=False):
     if not re.match(r'^[\w-]+$', name):
         return (400, {"error": "invalid name"})
-    path = os.path.join(CONFIG_DIR, f"polypulse-{name}.toml")
+    path = _instance_config_file(name)
     if not os.path.exists(path):
         return (404, {"error": "config not found"})
     try:
@@ -4851,7 +7488,7 @@ def api_config_write(name, updates, allow_server_keys=False, allow_all_config=Fa
         # The legacy editor uses the same all-or-nothing write discipline as v3.
         tomllib.loads(content)
         st = os.stat(path)
-        fd, tmp = tempfile.mkstemp(prefix=".cockpit-config-", dir=CONFIG_DIR)
+        fd, tmp = tempfile.mkstemp(prefix=".cockpit-config-", dir=os.path.dirname(path))
         try:
             os.fchmod(fd, stat.S_IMODE(st.st_mode))
             with os.fdopen(fd, "w") as f:
@@ -4985,12 +7622,13 @@ def api_bot_control(action, inst, strategy_id=None, config_name=None,
 
     # LAUNCH NEW BOT: starting an instance that has no config file yet. The
     # "Launch New Bot" modal passes the chosen base config as config_name; clone
-    # it to config/polypulse-<inst>.toml so the service can actually boot. Without
-    # this, systemd starts polypulse-bot@<inst> with no config, the bot ABRTs on
-    # startup, auto-restart-loops, and never registers on the dashboard.
+    # it to config/polypulse-<inst>.toml so the service can actually boot. An
+    # existing operator-owned profile may instead live in USER_BOT_CONFIG_DIR;
+    # use the common resolver first so Fleet start/restart does not mistake it
+    # for a missing config and demand a duplicate repository-local profile.
     if action in ("start", "restart"):
-        inst_cfg = os.path.join(CONFIG_DIR, f"polypulse-{inst}.toml")
-        if not os.path.exists(inst_cfg):
+        inst_cfg = _instance_config_file(inst)
+        if not os.path.isfile(inst_cfg):
             if not config_name:
                 return (400, {"error": f"no config/polypulse-{inst}.toml exists and no base "
                                        f"config was selected — pick a STRATEGY CONFIG to clone"})
@@ -5192,43 +7830,175 @@ def api_supervisor_log(limit=20):
 
 def api_pnl_by_instance():
     now = time.monotonic()
-    if _pnl_cache[1] and now - _pnl_cache[0] < 3.0:
+    if _pnl_cache[1] and now - _pnl_cache[0] < 10.0:
         return _pnl_cache[1]
-    mode = current_mode()
     names = instance_names()
     all_insts = fleet_instances()
-    # fallback since: earliest paper fill in the last 48h (covers the case where
-    # session_start is indeterminate but bots are clearly running)
-    _fallback_since = None
-    if mode.lower() == "paper":
-        # ::text so _clean() keeps it a castable string (not epoch-ms int)
-        row = q("""SELECT MIN(ts_created)::text AS t FROM vp.orders
-                   WHERE mode='paper' AND status='filled'
-                     AND ts_created > now() - interval '48 hours'""", one=True)
-        _fallback_since = row.get("t") if row else None
-    out = {}
+    if not all_insts:
+        result = {"instances": {}, "rows": [], "pnl_scope": "realized_session_after_fees"}
+        _pnl_cache[0], _pnl_cache[1] = time.monotonic(), result
+        return result
+
+    # strategy_runs is keyed by bot process session and persists its net
+    # realized P&L. It avoids rebuilding a fake "profit" from a time window of
+    # buy/sell cash flows, which can cross paper-session resets.
+    run_rows = q("""SELECT DISTINCT ON (instance)
+                       instance,session_id::text AS session_id,started_at,ended_at,
+                       fills,settles,wins,losses,net_pnl::float8 AS net_pnl,
+                       fees::float8 AS fees
+                    FROM vp.strategy_runs
+                    WHERE instance=ANY(%s)
+                    ORDER BY instance,started_at DESC NULLS LAST""", (all_insts,))
+    runs = {r["instance"]: r for r in run_rows}
+    paper_runs = [r for r in run_rows if r.get("session_id")]
+    session_ids = [r["session_id"] for r in paper_runs]
+    paper_fills = []
+    ledger_by_session = {}
+    if session_ids:
+        paper_fills = q("""SELECT f.id,f.ts,f.price,f.size_shares,f.fee_usd,
+                    o.client_order_id,o.mode,o.instance,o.session_id,o.condition_id,
+                    o.token_id,o.side_label,o.direction,o.source,o.ts_created
+                FROM vp.orders o JOIN vp.fills f USING(client_order_id)
+                WHERE o.mode='paper' AND o.instance=ANY(%s)
+                  AND o.session_id=ANY(%s::uuid[])
+                ORDER BY o.instance,o.session_id,f.ts,f.id""",
+                (all_insts, session_ids))
+        if paper_fills:
+            from accounting import replay_fills
+            ledger = replay_fills(paper_fills)
+            for e in ledger["exits"]:
+                sid = str(e.get("session_id") or "")
+                item = ledger_by_session.setdefault(sid, {
+                    "realized": 0.0, "open_entry_fees": 0.0,
+                    "closed_orders": 0, "errors": 0, "error_details": []})
+                if e.get("matched"):
+                    item["realized"] += float(e.get("realized_pnl") or 0.0)
+                    item["closed_orders"] += 1
+            for p in ledger["positions"]:
+                sid = str(p.get("session_id") or "")
+                item = ledger_by_session.setdefault(sid, {
+                    "realized": 0.0, "open_entry_fees": 0.0,
+                    "closed_orders": 0, "errors": 0, "error_details": []})
+                item["open_entry_fees"] += float(p.get("entry_fees") or 0.0)
+            for detail in ledger.get("error_details", []):
+                sid = str(detail.get("session_id") or "")
+                item = ledger_by_session.setdefault(sid, {
+                    "realized": 0.0, "open_entry_fees": 0.0,
+                    "closed_orders": 0, "errors": 0, "error_details": []})
+                item["errors"] += 1
+                if len(item["error_details"]) < 3:
+                    item["error_details"].append(detail)
+
+    snapshot_rows = []
+    if session_ids:
+        snapshot_rows = q("""SELECT instance,session_id::text AS session_id,ts,
+                    realized_pnl::float8 AS pnl,deployed_usd::float8 AS deployed_usd,
+                    open_positions
+                FROM (
+                  SELECT instance,session_id,ts,realized_pnl,deployed_usd,open_positions,
+                         row_number() OVER (PARTITION BY instance,session_id
+                                            ORDER BY ts DESC) AS seq
+                  FROM vp.positions_history
+                  WHERE instance=ANY(%s) AND session_id=ANY(%s::uuid[])
+                ) latest
+                WHERE seq<=120
+                ORDER BY instance,session_id,ts""", (all_insts, session_ids))
+    points_by_session = {}
+    latest_snapshot_by_session = {}
+    for snap in snapshot_rows:
+        sid = str(snap.get("session_id") or "")
+        points_by_session.setdefault(sid, []).append({
+            "ts": snap["ts"], "pnl": round(float(snap.get("pnl") or 0.0), 2)})
+        latest_snapshot_by_session[sid] = snap
+
+    now_ms = int(time.time() * 1000)
+    max_stale_ms = 7 * 24 * 60 * 60 * 1000
+    out, rows = {}, []
     for inst in all_insts:
-        since = normalize_since(paper_since(inst) or _fallback_since)
-        if not since:
-            continue
-        rows = q("""
-            SELECT DATE_TRUNC('minute', f.ts) AS ts,
-                   SUM(CASE WHEN o.direction='buy' THEN -f.price*f.size_shares
-                            ELSE f.price*f.size_shares END
-                       - COALESCE(f.fee_usd,0)) AS delta
-            FROM vp.orders o
-            JOIN vp.fills f ON f.client_order_id=o.client_order_id
-            WHERE o.mode=%s AND o.status='filled' AND o.instance=%s
-              AND f.ts >= %s::timestamptz
-            GROUP BY 1 ORDER BY 1
-        """, (mode, inst, since))
-        if rows:
-            cum, pts = 0.0, []
-            for r in rows:
-                cum += float(r["delta"] or 0)
-                pts.append({"ts": r["ts"], "pnl": round(cum, 2)})
-            out[inst] = {"name": names.get(inst, inst), "points": pts}
-    result = {"instances": out}
+        mode = str(current_mode(inst) or "paper").lower()
+        running = instance_running(inst)
+        run = runs.get(inst)
+        row = {"instance": inst, "name": names.get(inst, inst), "mode": mode,
+               "running": running, "pnl_scope": "realized_session_after_fees",
+               "session_id": run.get("session_id") if run else None,
+               "session_start": run.get("started_at") if run else None,
+               "session_end": run.get("ended_at") if run else None,
+               "fills": int((run or {}).get("fills") or 0),
+               "wins": int((run or {}).get("wins") or 0),
+               "losses": int((run or {}).get("losses") or 0),
+               "fees_usd": float((run or {}).get("fees") or 0.0),
+               "open_positions": None, "unrealized_pnl": None,
+               "accounting_complete": False, "accounting_reconciled": False,
+               "accounting_errors": 0, "accounting_error_details": [],
+               "pnl_available": False, "net_pnl": None, "realized_pnl": None,
+               "accounting_status": "no_session_data", "points": []}
+        if mode == "paper" and run:
+            sid = str(run.get("session_id") or "")
+            audit = ledger_by_session.get(sid, {
+                "realized": 0.0, "open_entry_fees": 0.0,
+                "closed_orders": 0, "errors": 0, "error_details": []})
+            snapshot = latest_snapshot_by_session.get(sid)
+            row["points"] = points_by_session.get(sid, [])
+            if not row["points"] and run.get("net_pnl") is not None:
+                row["points"] = [{"ts": run.get("ended_at") or run.get("started_at"),
+                                   "pnl": round(float(run["net_pnl"]), 2)}]
+            if snapshot:
+                open_positions = snapshot.get("open_positions") or []
+                row["open_positions"] = len(open_positions) if isinstance(open_positions, list) else None
+                row["deployed_usd"] = float(snapshot.get("deployed_usd") or 0.0)
+                row["as_of"] = snapshot.get("ts")
+            row["accounting_errors"] = int(audit["errors"])
+            row["accounting_error_details"] = audit["error_details"]
+            expected = audit["realized"] - audit["open_entry_fees"]
+            recorded = run.get("net_pnl")
+            delta = (abs(float(recorded) - expected)
+                     if recorded is not None else float("inf"))
+            fill_rows_present = bool(audit["closed_orders"] or row["open_positions"])
+            no_trades = int(run.get("fills") or 0) == 0 and int(run.get("settles") or 0) == 0
+            reconciled = (not audit["errors"] and
+                          (no_trades or fill_rows_present) and delta <= 0.03)
+            run_age = now_ms - int(run.get("started_at") or 0)
+            snapshot_age = (now_ms - int(row["as_of"])
+                            if row.get("as_of") is not None else None)
+            stale = (not running and run_age > max_stale_ms) or (
+                running and (snapshot_age is None or snapshot_age > 120_000))
+            row["accounting_reconciled"] = reconciled
+            row["accounting_complete"] = reconciled and not stale
+            row["pnl_available"] = row["accounting_complete"]
+            row["accounting_status"] = (
+                "stale_session" if stale else
+                "unmatched_sells" if audit["errors"] else
+                "fill_ledger_mismatch" if not reconciled else
+                "current_session" if running else "last_session")
+            if row["pnl_available"] and recorded is not None:
+                row["net_pnl"] = round(float(recorded), 2)
+                row["realized_pnl"] = row["net_pnl"]
+        elif mode == "live":
+            # LIVE P&L spans process restarts, so replay its complete fill
+            # history and include only fresh executable marks for open shares.
+            pos = reconstructed_positions(mode, None, inst)
+            acct = ledger_accounting(mode, pos, None, inst)
+            marks_complete = all(p.get("mark_is_live") for p in pos.get("positions", []))
+            complete = bool(acct.get("accounting_complete") and marks_complete)
+            row.update({"pnl_scope": "live_lifetime_net_after_fees",
+                        "open_positions": len(pos.get("positions") or []),
+                        "unrealized_pnl": round(float(acct.get("unrealized_pnl") or 0.0), 2)
+                            if complete else None,
+                        "accounting_errors": len(pos.get("accounting_errors") or []),
+                        "accounting_complete": complete,
+                        "accounting_reconciled": not bool(pos.get("accounting_errors")),
+                        "pnl_available": complete,
+                        "accounting_status": "live_marked" if complete else "live_mark_or_ledger_incomplete",
+                        "fees_usd": round(float(acct.get("fees_usd") or 0.0), 2)})
+            if complete:
+                row["net_pnl"] = round(float(acct.get("net_pnl") or 0.0), 2)
+                row["realized_pnl"] = round(float(acct.get("realized_pnl") or 0.0), 2)
+        rows.append(row)
+        out[inst] = row
+
+    result = {"instances": out, "rows": rows,
+              "pnl_scope": "session_realized_after_fees",
+              "server_ts": now_ms}
     _pnl_cache[0], _pnl_cache[1] = time.monotonic(), result
     return result
 
@@ -5264,7 +8034,7 @@ def _models_env():
 
 def _strategy_summary(inst):
     """Human-readable strategy chips from the instance's TOML config."""
-    path = os.path.join(CONFIG_DIR, f"polypulse-{inst}.toml")
+    path = _instance_config_file(inst)
     try:
         with open(path, "rb") as f:
             t = tomllib.load(f)
@@ -5273,6 +8043,9 @@ def _strategy_summary(inst):
     st = t.get("strategy", {}).get("hot", {})
     risk = t.get("risk", {})
     scalp = bool(st.get("scalp_v3_enabled"))
+    sniper = bool(st.get("late_window_sniper_enabled"))
+    predictor_tab = bool(st.get("prediction_2m_enabled") and
+                         st.get("prediction_page_gate_enabled"))
     signals = []
     if st.get("coinbase_lead_mode"):
         signals.append(f"CB≥{st.get('coinbase_lead_min_delta_pct', '?')}%")
@@ -5280,32 +8053,85 @@ def _strategy_summary(inst):
         signals.append("ORACLE-LAG")
     if scalp:
         signals.append("SCALP-V3")
-    if st.get("predictor_mode"):
+    if sniper:
+        signals.append("LATE-SNIPER")
+    if predictor_tab:
+        signals.append("PREDICTOR-TAB")
+    elif st.get("predictor_mode"):
         signals.append("PREDICTOR")
     exits = []
     if scalp:
         if st.get("scalp_v3_reversal_exit"): exits.append("REVERSAL")
         if st.get("scalp_v3_trailing_stop"): exits.append(f"TRAIL-{st.get('scalp_v3_trail_start_loss','?')}")
         if st.get("scalp_v3_profit_take"): exits.append(f"TP@{st.get('scalp_v3_profit_target','?')}")
+    elif sniper:
+        stop = float(st.get("late_window_sniper_stop_price") or 0)
+        take_profit = float(st.get("late_window_sniper_take_profit_price") or 0)
+        if take_profit > 0:
+            exits.append(f"MAKER-TP@{take_profit:g}")
+        if stop > 0:
+            exits.append(f"STOP@{stop:g}")
+        if not exits:
+            exits.append("HOLD→SETTLE")
+    elif predictor_tab:
+        take_profit = float(st.get("prediction_2m_take_profit_price") or 0)
+        stop = float(st.get("stop_loss_price") or 0)
+        if take_profit > 0:
+            exits.append(f"MAKER-TP@{take_profit:g}")
+        if st.get("stop_loss_mode"):
+            exits.append(f"STOP@{stop:g}" if stop > 0 else
+                         f"SL-{st.get('stop_loss_pct','?')}%")
+        if not exits:
+            exits.append("HOLD→SETTLE")
     else:
         if st.get("profit_take_mode"): exits.append("PROFIT-TAKE")
         if st.get("stop_loss_mode"): exits.append(f"SL-{st.get('stop_loss_pct','?')}%")
         if not exits: exits.append("HOLD→SETTLE")
-    lo = st.get("scalp_v3_min_price") if scalp else st.get("min_entry_share_price")
-    hi = st.get("scalp_v3_max_price") if scalp else st.get("max_entry_share_price")
-    per = st.get("scalp_v3_per_entry_usd") if scalp else st.get("per_click_size_usd")
+    if predictor_tab:
+        band = f"buy ≤{float(st.get('prediction_2m_max_price') or 1.0):.2f}"
+    else:
+        lo = (st.get("scalp_v3_min_price") if scalp else
+              st.get("late_window_sniper_min_price") if sniper else
+              st.get("min_entry_share_price"))
+        hi = (st.get("scalp_v3_max_price") if scalp else
+              st.get("late_window_sniper_max_price") if sniper else
+              st.get("max_entry_share_price"))
+        band = f"{lo}–{hi}" if lo is not None else "?"
+    per = (st.get("prediction_2m_order_usd") if predictor_tab else
+           st.get("scalp_v3_per_entry_usd") if scalp else
+           st.get("late_window_sniper_order_usd") if sniper else
+           st.get("per_click_size_usd"))
     return {
-        "band": f"{lo}–{hi}" if lo is not None else "?",
+        "band": band,
         "per_entry_usd": per,
         "max_window_usd": risk.get("max_per_window_usd"),
         "max_deployed_usd": risk.get("max_deployed_usd"),
         "signals": signals,
         "exits": exits,
         "blocked": st.get("blocked_assets") or [],
-        "entries_per_window": st.get("scalp_v3_max_entries_per_window") if scalp
-                              else st.get("max_entries_per_window"),
+        "entries_per_window": (1 if predictor_tab else
+                                st.get("scalp_v3_max_entries_per_window") if scalp else
+                                st.get("late_window_sniper_max_entries_per_window") if sniper else
+                                st.get("max_entries_per_window")),
         "stake": float(t.get("wallet", {}).get("starting_balance_usd") or 0),
     }
+
+
+def _instance_display_name(inst, names=None):
+    configured = (names or {}).get(inst)
+    if configured:
+        return configured
+    try:
+        with open(_instance_config_file(inst), "rb") as f:
+            runtime = tomllib.load(f).get("runtime", {})
+        label = str(runtime.get("instance_label") or "").strip()
+        if label:
+            return label
+    except Exception:
+        pass
+    if _instance_config_is_external(inst):
+        return inst.replace("-", " ").title()
+    return inst
 
 
 def api_fleet_detail():
@@ -5316,6 +8142,11 @@ def api_fleet_detail():
     names = instance_names()
     env = _models_env()
     all_insts = fleet_instances()
+    runtime_by_instance = {
+        row.get("instance"): row
+        for row in _fleet_runtime_snapshot().get("fleet", [])
+        if isinstance(row, dict) and isinstance(row.get("instance"), str)
+    }
     # Available configs: all .toml files that are NOT timestamped backups
     # (backups match polypulse-*-YYYYMMDD*.toml or *-YYYYMMDD_*.toml patterns)
     _backup_re = re.compile(r'-\d{8}')
@@ -5332,7 +8163,24 @@ def api_fleet_detail():
         pass
     out = []
     for inst in all_insts:
-        if not os.path.exists(os.path.join(CONFIG_DIR, f"polypulse-{inst}.toml")):
+        observed = runtime_by_instance.get(inst) or {}
+        runtime_verified = observed.get("mode_verified") is True
+        risk_state = observed.get("risk_state")
+        if risk_state not in ("NORMAL", "LOSS_LIMIT_HALT", "ORDER_UNCERTAIN_HALT"):
+            risk_state = "UNKNOWN"
+        autopilot = observed.get("autopilot")
+        daily_kill_fired = observed.get("daily_kill_fired")
+        runtime = {
+            "verified": runtime_verified,
+            "mode": observed.get("mode") if runtime_verified else None,
+            "risk_state": risk_state if runtime_verified else "UNKNOWN",
+            "autopilot": autopilot if type(autopilot) is bool else None,
+            "daily_kill_fired": daily_kill_fired if type(daily_kill_fired) is bool else None,
+            "updated_ms": observed.get("runtime_updated_ms")
+            if type(observed.get("runtime_updated_ms")) is int else None,
+        }
+        config_path = _instance_config_file(inst)
+        if not os.path.isfile(config_path):
             continue
         sup_run = _supervisor_running(inst)
         last = q("""SELECT s.strategy_id, s.llm_model, s.reason, s.created_at
@@ -5344,9 +8192,10 @@ def api_fleet_detail():
                       ORDER BY created_at DESC LIMIT 12""", (inst,))
         out.append({
             "instance": inst,
-            "name": names.get(inst, inst),
+            "name": _instance_display_name(inst, names),
             "running": instance_running(inst),
             "current_config": _read_swap_origin(inst) or f"polypulse-{inst}",  # resolved source, not just the file name
+            "config_external": _instance_config_is_external(inst),
             "strategy": _strategy_summary(inst),
             "supervisor": {
                 "running": sup_run,
@@ -5357,6 +8206,7 @@ def api_fleet_detail():
             },
             "recent_strategies": [{"id": r["strategy_id"], "reason": r.get("reason") or ""} for r in recent],
             "wallet": _wallet_status_for(inst) or {},
+            "runtime": runtime,
         })
     result = {"fleet": out, "available_configs": avail_configs}
     _fleet_cache[0], _fleet_cache[1] = time.monotonic(), result
@@ -5385,6 +8235,7 @@ _WINDOW_BOT_IDS = {
     "btc-5m-lead-scalper-stop15-tp20-test",
     "btc-15m-lead-scalper-stop15-tp20-test",
     "btc-late-settlement-sniper",
+    "endgame-never-loses",
 }
 _WINDOW_BOT_ASSETS = ("BTC", "ETH", "SOL", "XRP")
 
@@ -5403,7 +8254,7 @@ def api_window_bot_desk(allowed_instances=None):
                    else (_WINDOW_BOT_IDS & set(fleet_rows) & set(scope)))
     bots = []
     for inst in names:
-        path = os.path.join(CONFIG_DIR, f"polypulse-{inst}.toml")
+        path = _instance_config_file(inst)
         try:
             with open(path, "rb") as stream:
                 cfg = tomllib.load(stream)
@@ -5624,9 +8475,11 @@ def api_window_bot_desk(allowed_instances=None):
             horizon_label = "/".join(f"{value // 60}m" for value in strategy_horizons)
             strategy_name = (f"Late Settlement Sniper · {len(bot_assets)} assets · "
                              f"{horizon_label or 'configured windows'}")
-            entry_usd = float(hot.get("late_window_sniper_order_usd") or 0)
             entry_min = float(hot.get("late_window_sniper_min_price") or 0)
             entry_max = float(hot.get("late_window_sniper_max_price") or 0)
+            exact_shares = float(hot.get("late_window_sniper_order_shares") or 0)
+            entry_usd = (exact_shares * entry_max if exact_shares > 0 else
+                         float(hot.get("late_window_sniper_order_usd") or 0))
             entry_window_secs = int(hot.get("late_window_sniper_max_secs") or 0)
             entry_windows = []
             for horizon_s in strategy_horizons:
@@ -5754,7 +8607,7 @@ def api_strategy_history(inst, limit=30):
 
 def _wallet_status_for(inst):
     """Return wallet config status booleans for one instance. Never exposes values."""
-    path = os.path.join(CONFIG_DIR, f"polypulse-{inst}.toml")
+    path = _instance_config_file(inst)
     try:
         with open(path, "rb") as f:
             t = tomllib.load(f)
@@ -5811,7 +8664,7 @@ def api_wallet_status(instance=None):
     all_insts = fleet_instances()
     result = {}
     for inst in all_insts:
-        if os.path.exists(os.path.join(CONFIG_DIR, f"polypulse-{inst}.toml")):
+        if os.path.isfile(_instance_config_file(inst)):
             s = _wallet_status_for(inst)
             if s:
                 result[inst] = s
@@ -5824,7 +8677,7 @@ def _wallet_material_from_config(inst):
     Secret values never leave this process; public addresses and readiness flags
     are the only fields returned by the wallet status API.
     """
-    path = os.path.join(CONFIG_DIR, f"polypulse-{inst}.toml")
+    path = _instance_config_file(inst)
     try:
         with open(path, "rb") as f:
             cfg = tomllib.load(f)
@@ -6533,7 +9386,7 @@ def api_supervisor_model(inst, model):
     """Hot-swap the OpenRouter model for an instance's supervisor."""
     if not re.match(r'^[\w-]+$', inst or ""):
         return (400, {"error": "invalid instance"})
-    if not re.match(r'^[\w./:@-]+$', model or ""):
+    if not re.match(r'^[\w./:@~-]+$', model or ""):
         return (400, {"error": "invalid model"})
     try:
         txt = open(MODELS_ENV).read()
@@ -6561,21 +9414,46 @@ def build_stream_payload():
     if _stream_cache[1] and now - _stream_cache[0] < 0.5:
         return _stream_cache[1]
     try:
-        oracle_rows = q("""SELECT DISTINCT ON (asset) asset, price
+        oracle_rows = q("""SELECT DISTINCT ON (asset) asset, price,
+                                  extract(epoch FROM ts)::double precision AS ts_epoch
                            FROM vp.oracle_ticks WHERE ts > now()-interval '2 minutes'
                            ORDER BY asset, ts DESC""")
-        cb_rows = q("""SELECT DISTINCT ON (asset) asset, price
+        cb_rows = q("""SELECT DISTINCT ON (asset) asset, price,
+                             extract(epoch FROM ts)::double precision AS ts_epoch
                        FROM vp.coinbase_ticks WHERE ts > now()-interval '2 minutes'
                        ORDER BY asset, ts DESC""")
+        bn_rows = q("""SELECT DISTINCT ON (symbol) symbol, price,
+                             extract(epoch FROM ts)::double precision AS ts_epoch
+                       FROM vp.binance_ticks
+                       WHERE symbol=ANY(%s) AND ts > now()-interval '2 minutes'
+                       ORDER BY symbol, ts DESC""", (list(SYMBOL.values()),))
     except Exception:
         return _stream_cache[1] or {"prices": {}, "ts": int(time.time() * 1000)}
-    om = {r["asset"]: float(r["price"]) for r in oracle_rows}
-    cm = {r["asset"]: float(r["price"]) for r in cb_rows}
+    now_s = time.time()
+    om = {r["asset"]: r for r in oracle_rows}
+    cm = {r["asset"]: r for r in cb_rows}
+    bm = {asset: row for row in bn_rows
+          for asset, symbol in SYMBOL.items() if row.get("symbol") == symbol}
     prices = {}
     for a in ASSETS:
-        op, cp = om.get(a), cm.get(a)
-        d = round((cp - op) / op * 100, 4) if (op and cp and op > 0) else None
-        prices[a] = {"oracle": op, "coinbase": cp, "delta_pct": d}
+        oracle, coinbase, binance = om.get(a), cm.get(a), bm.get(a)
+        op = float(oracle["price"]) if oracle else None
+        cp = float(coinbase["price"]) if coinbase else None
+        bp = float(binance["price"]) if binance else None
+        oracle_ts = float(oracle["ts_epoch"]) if oracle and oracle.get("ts_epoch") is not None else None
+        coinbase_ts = float(coinbase["ts_epoch"]) if coinbase and coinbase.get("ts_epoch") is not None else None
+        binance_ts = float(binance["ts_epoch"]) if binance and binance.get("ts_epoch") is not None else None
+        oracle_delta = lambda value: round((value - op) / op * 100, 4) if value is not None and op and op > 0 else None
+        prices[a] = {
+            "oracle": op, "oracle_ts_ms": round(oracle_ts * 1000) if oracle_ts is not None else None,
+            "oracle_age_s": round(max(0.0, now_s - oracle_ts), 3) if oracle_ts is not None else None,
+            "coinbase": cp, "coinbase_ts_ms": round(coinbase_ts * 1000) if coinbase_ts is not None else None,
+            "coinbase_age_s": round(max(0.0, now_s - coinbase_ts), 3) if coinbase_ts is not None else None,
+            "coinbase_delta_pct": oracle_delta(cp), "delta_pct": oracle_delta(cp),
+            "binance": bp, "binance_ts_ms": round(binance_ts * 1000) if binance_ts is not None else None,
+            "binance_age_s": round(max(0.0, now_s - binance_ts), 3) if binance_ts is not None else None,
+            "binance_delta_pct": oracle_delta(bp),
+        }
     mode = current_mode()
     since = paper_since(None)
     fills = []
@@ -6757,6 +9635,17 @@ def _pt_knob_catalog(snapshot: dict) -> str:
 
 
 def _pt_model(instance: str = "") -> str:
+    # The local supervisor model file is ignored by Git and is shared by the
+    # root, legacy, and versioned PolyTron chat surfaces through this handler.
+    # Keep chat-provider selection independent from each bot's strategy TOML.
+    try:
+        with open(MODELS_ENV, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r'^\s*POLYTRON_MODEL\s*=\s*([^\s#]+)', line)
+                if m and re.fullmatch(r'[\w./:@+~-]+', m.group(1)):
+                    return m.group(1)
+    except OSError:
+        pass
     candidates = ([f"polypulse-{instance}.toml"] if instance else []) + ["polypulse-scalp.toml", "polypulse-cb.toml"]
     for fname in candidates:
         try:
@@ -6818,8 +9707,9 @@ def api_polytron_chat(messages: list, username: str = "anon", instance: str = ""
                   "content": _polytron_redact(str(m.get("content", "")))}
                  for m in _pt_sessions[sess_key] if isinstance(m, dict)]
     _pt_sessions[sess_key] = safe_hist
+    model_id = _pt_model(instance)
     payload = json.dumps({
-        "model": _pt_model(instance),
+        "model": model_id,
         "messages": [{"role": "system", "content": _polytron_redact(system)}] + safe_hist,
         "temperature": 0.7,
         "max_tokens": 600,
@@ -6838,7 +9728,19 @@ def api_polytron_chat(messages: list, username: str = "anon", instance: str = ""
         # Return the current tunable values so the UI can render old→new for any
         # polypulse-apply block the model emitted. Applying itself goes through the
         # same guarded /api/config/write path the Strategy tab uses.
-        return 200, {"reply": content, "instance": instance, "knobs": snapshot}
+        return 200, {"reply": content, "instance": instance, "model": model_id, "knobs": snapshot}
+    except _ureq.HTTPError as exc:
+        try:
+            error_body = json.loads(exc.read().decode("utf-8", "replace") or "{}")
+            provider_error = error_body.get("error", {})
+            detail = (provider_error.get("message") if isinstance(provider_error, dict)
+                      else str(provider_error)) or str(exc.reason)
+        except Exception:
+            detail = str(exc.reason)
+        detail = _polytron_redact(str(detail))
+        if key:
+            detail = detail.replace(key, "[REDACTED]")
+        return 502, {"error": f"OpenRouter rejected request ({exc.code}): {detail[:400]}"}
     except Exception as exc:
         return 500, {"error": f"LLM error: {exc}"}
 
@@ -7156,13 +10058,65 @@ def _observed_runtime_status(inst, pid):
                 status.get("mode") not in ("PAPER", "LIVE", "REPLAY") or
                 status.get("execution_mode") not in ("taker", "maker", "hybrid")):
             return None
+        source_digest = status.get("config_source_sha256")
+        loaded_ms = status.get("config_source_loaded_ms")
+        if (source_digest is not None and
+                (not isinstance(source_digest, str) or
+                 (source_digest and not re.fullmatch(r"[0-9a-f]{64}", source_digest)))):
+            return None
+        if loaded_ms is not None and (type(loaded_ms) is not int or loaded_ms < 0):
+            return None
         return status
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         return None
 
 
-def api_v3_fleet():
-    """Observed service state. A configured but stopped profile stays visible."""
+def _runtime_persistence_queue(observed):
+    """Validate bounded queue telemetry from a fresh, PID-matched runtime file."""
+    if not isinstance(observed, dict):
+        return None
+    raw = observed.get("persistence_queue")
+    if not isinstance(raw, dict):
+        return None
+    pending, capacity = raw.get("pending"), raw.get("capacity")
+    rejected = raw.get("rejected_by_source")
+    if (type(pending) is not int or type(capacity) is not int or
+            pending < 0 or capacity <= 0 or pending > capacity or
+            not isinstance(rejected, dict)):
+        return None
+    clean_rejected = {}
+    for source, count in rejected.items():
+        if (isinstance(source, str) and re.fullmatch(r"[a-z_]{1,40}", source) and
+                type(count) is int and count >= 0):
+            clean_rejected[source] = count
+    return {"pending": pending, "capacity": capacity,
+            "rejected_by_source": clean_rejected}
+
+
+def _runtime_risk_limits(observed):
+    """Validate effective risk caps from a fresh, PID-matched bot heartbeat."""
+    if not isinstance(observed, dict):
+        return None
+    raw = observed.get("risk_limits")
+    if not isinstance(raw, dict):
+        return None
+    keys = ("max_order_usd", "max_per_window_usd",
+            "configured_max_deployed_usd", "effective_max_deployed_usd",
+            "equity_max_deployed_pct")
+    limits = {}
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            return None
+        limits[key] = value
+    return limits
+
+
+def _fleet_runtime_snapshot():
+    """Fresh, PID-matched runtime state shared by the root fleet and API views."""
     fleet = []
     for inst in fleet_instances():
         service = _systemd_bot_status(f"polypulse-bot@{inst}.service") or {}
@@ -7193,9 +10147,15 @@ def api_v3_fleet():
                       "mode_source": "runtime_status" if observed else "config_unverified",
                       "configured_mode": configured_mode,
                       "runtime_updated_ms": observed["ts_ms"] if observed else None,
+                      "persistence_queue": _runtime_persistence_queue(observed),
                       "entry_order_mode": observed["execution_mode"] if observed else
                       load_config(inst).get("strategy", {}).get("entry_order_mode", "maker")})
     return {"fleet": fleet, "server_ts": int(time.time() * 1000)}
+
+
+def api_v3_fleet():
+    """Versioned compatibility endpoint for observed service state."""
+    return _fleet_runtime_snapshot()
 
 
 def api_v3_overview(instance=""):
@@ -7370,7 +10330,7 @@ _capture_profiles_cache = [0.0, None]  # (built_monotonic, profile-file flags)
 
 
 def api_v3_capture_profiles():
-    """Return only the two non-secret capture switches from running profiles.
+    """Return non-secret capture controls from the active profile files.
 
     These are values read from the profile files, not a claim about the
     settings already loaded by a running process.
@@ -7385,7 +10345,8 @@ def api_v3_capture_profiles():
                             if re.fullmatch(r"[A-Za-z0-9_-]{1,100}", str(name))}):
         path = _instance_config_file(instance)
         row = {"instance": instance, "config_readable": False,
-               "book_snapshots_enabled": None, "pm_trades_enabled": None}
+               "book_snapshots_enabled": None, "book_snapshot_levels": None,
+               "pm_trades_enabled": None}
         try:
             with open(path, "rb") as source:
                 data_collection = tomllib.load(source).get("data_collection", {})
@@ -7394,6 +10355,9 @@ def api_v3_capture_profiles():
             row["book_snapshots_enabled"] = (
                 data_collection.get("book_snapshots_enabled")
                 if isinstance(data_collection.get("book_snapshots_enabled"), bool) else None)
+            levels = data_collection.get("book_snapshot_levels", 20)
+            row["book_snapshot_levels"] = (
+                levels if type(levels) is int and 0 <= levels <= 20 else None)
             row["pm_trades_enabled"] = (
                 data_collection.get("pm_trades_enabled")
                 if isinstance(data_collection.get("pm_trades_enabled"), bool) else None)
@@ -7403,6 +10367,220 @@ def api_v3_capture_profiles():
         profiles.append(row)
     _capture_profiles_cache[0], _capture_profiles_cache[1] = time.monotonic(), profiles
     return [dict(row) for row in profiles]
+
+
+_market_storage_cache = [0.0, None]  # (built_monotonic, read-only relation stats)
+_market_storage_lock = threading.Lock()
+
+
+def api_v3_market_storage():
+    """Return coarse PostgreSQL footprint stats for the market-data archive.
+
+    pg_stat_user_tables row counts are estimates. Relation sizes include
+    PostgreSQL storage overhead; this endpoint never applies retention.
+    """
+    now = time.monotonic()
+    cached = _market_storage_cache[1]
+    cache_ttl = 60.0 if cached and cached.get("available") else 15.0
+    if cached is not None and now - _market_storage_cache[0] < cache_ttl:
+        return {**cached, "relations": [dict(row) for row in cached["relations"]]}
+    with _market_storage_lock:
+        now = time.monotonic()
+        cached = _market_storage_cache[1]
+        cache_ttl = 60.0 if cached and cached.get("available") else 15.0
+        if cached is not None and now - _market_storage_cache[0] < cache_ttl:
+            return {**cached, "relations": [dict(row) for row in cached["relations"]]}
+        try:
+            relations = q("""SELECT relname,
+                                   COALESCE(n_live_tup,0)::bigint AS approx_rows,
+                                   COALESCE(n_dead_tup,0)::bigint AS approx_dead_rows,
+                                   pg_relation_size(relid)::bigint AS table_bytes,
+                                   pg_indexes_size(relid)::bigint AS index_bytes,
+                                   pg_total_relation_size(relid)::bigint AS total_bytes
+                            FROM pg_stat_user_tables
+                            WHERE schemaname='vp'
+                              AND relname = ANY(%s::text[])
+                            ORDER BY relname""",
+                            (["pm_book_snapshots", "pm_trades", "pm_markets"],)) or []
+            result = {"available": True, "relations": relations,
+                      "sampled_ms": int(time.time() * 1000)}
+        except Exception:
+            # Keep Feed Quality useful when this optional query is unavailable.
+            # Do not expose database error details through the cockpit API.
+            result = {"available": False, "relations": [],
+                      "sampled_ms": int(time.time() * 1000)}
+        _market_storage_cache[0], _market_storage_cache[1] = time.monotonic(), result
+        return {**result, "relations": [dict(row) for row in result["relations"]]}
+
+
+_market_archive_coverage_cache = [0.0, None]
+_market_archive_coverage_lock = threading.Lock()
+
+
+def _copy_market_archive_coverage_groups(groups):
+    copied = []
+    for group in groups:
+        item = dict(group)
+        windows = item.get("windows")
+        copied_windows = []
+        for window in (windows if isinstance(windows, list) else []):
+            if not isinstance(window, dict):
+                continue
+            copied_window = dict(window)
+            buckets = copied_window.get("buckets")
+            copied_window["buckets"] = ([dict(bucket) for bucket in buckets
+                                         if isinstance(bucket, dict)]
+                                        if isinstance(buckets, list) else [])
+            copied_windows.append(copied_window)
+        item["windows"] = copied_windows
+        copied.append(item)
+    return copied
+
+
+def api_v3_market_archive_coverage(force=False):
+    """Summarize recent local book coverage for a bounded sample of windows.
+
+    Snapshot presence and 15-second bucket occupancy are measured only from
+    when each market first entered the local archive. This is temporal
+    coverage, not proof of continuous cadence or full-depth capture.
+    """
+    now = time.monotonic()
+    cached = _market_archive_coverage_cache[1]
+    cache_ttl = 60.0 if cached and cached.get("available") else 15.0
+    if not force and cached is not None and now - _market_archive_coverage_cache[0] < cache_ttl:
+        return {**cached, "groups": _copy_market_archive_coverage_groups(cached["groups"])}
+    with _market_archive_coverage_lock:
+        now = time.monotonic()
+        cached = _market_archive_coverage_cache[1]
+        cache_ttl = 60.0 if cached and cached.get("available") else 15.0
+        if not force and cached is not None and now - _market_archive_coverage_cache[0] < cache_ttl:
+            return {**cached, "groups": _copy_market_archive_coverage_groups(cached["groups"])}
+        sampled_ms = int(time.time() * 1000)
+        try:
+            row = q("""WITH candidates AS MATERIALIZED (
+                         SELECT condition_id, asset, horizon_seconds, window_open,
+                                window_close, first_seen, slug
+                         FROM vp.pm_markets
+                         WHERE horizon_seconds IN (300,900)
+                           AND window_close > now()-interval '24 hours'
+                           AND window_close <= now()
+                         ORDER BY window_close DESC,condition_id
+                         LIMIT 501
+                     ), sample AS MATERIALIZED (
+                         SELECT *,
+                                GREATEST(window_open,first_seen) AS tracked_start,
+                                GREATEST(0,CEIL(EXTRACT(EPOCH FROM
+                                    (window_close-GREATEST(window_open,first_seen)))/15.0)::int)
+                                    AS expected_15s_buckets
+                         FROM candidates ORDER BY window_close DESC,condition_id LIMIT 500
+                     ), window_snapshots AS MATERIALIZED (
+                         SELECT m.asset,m.horizon_seconds,m.condition_id,m.window_open,m.window_close,
+                                m.tracked_start,m.slug,
+                                m.expected_15s_buckets,s.id,s.side_label,
+                                FLOOR(EXTRACT(EPOCH FROM
+                                    (s.ts-m.tracked_start))/15.0)::int AS bucket_index
+                         FROM sample m
+                         LEFT JOIN vp.pm_book_snapshots s
+                           ON s.condition_id=m.condition_id
+                          AND s.ts>=m.tracked_start AND s.ts<m.window_close
+                     ), per_market_observations AS (
+                         SELECT asset,horizon_seconds,condition_id,window_open,window_close,
+                                tracked_start,slug,
+                                expected_15s_buckets,
+                                count(id)::bigint AS snapshot_rows,
+                                count(DISTINCT side_label)::int AS sides
+                         FROM window_snapshots
+                         GROUP BY asset,horizon_seconds,condition_id,window_open,window_close,
+                                  tracked_start,slug,expected_15s_buckets
+                     ), bucket_presence AS (
+                         SELECT asset,horizon_seconds,condition_id,bucket_index,
+                                bool_or(side_label='UP'::vp.share_side) AS up_seen,
+                                bool_or(side_label='DOWN'::vp.share_side) AS down_seen
+                         FROM window_snapshots WHERE id IS NOT NULL
+                         GROUP BY asset,horizon_seconds,condition_id,bucket_index
+                     ), bucket_coverage AS (
+                         SELECT asset,horizon_seconds,condition_id,count(*)::int AS snapshot_buckets_15s,
+                                count(*) FILTER (WHERE up_seen AND down_seen)::int
+                                    AS both_sides_buckets_15s
+                         FROM bucket_presence
+                         GROUP BY asset,horizon_seconds,condition_id
+                     ), per_market AS (
+                         SELECT o.asset,o.horizon_seconds,o.condition_id,o.window_open,o.window_close,
+                                o.tracked_start,o.slug,o.expected_15s_buckets,o.snapshot_rows,o.sides,
+                                COALESCE(b.snapshot_buckets_15s,0)::int AS snapshot_buckets_15s,
+                                COALESCE(b.both_sides_buckets_15s,0)::int AS both_sides_buckets_15s
+                         FROM per_market_observations o
+                         LEFT JOIN bucket_coverage b USING (asset,horizon_seconds,condition_id)
+                     ), grouped AS (
+                         SELECT asset,horizon_seconds,count(*)::int AS markets_sampled,
+                                count(*) FILTER (WHERE snapshot_rows>0)::int AS windows_with_snapshots,
+                                count(*) FILTER (WHERE sides=2)::int AS windows_with_both_sides,
+                                sum(snapshot_rows)::bigint AS snapshot_rows,
+                                sum(snapshot_buckets_15s)::int AS snapshot_buckets_15s,
+                                sum(both_sides_buckets_15s)::int AS both_sides_buckets_15s,
+                                sum(expected_15s_buckets)::int AS expected_buckets_15s,
+                                count(*) FILTER (WHERE expected_15s_buckets>0)::int
+                                    AS windows_with_tracked_time,
+                                count(*) FILTER (WHERE expected_15s_buckets>0 AND
+                                    both_sides_buckets_15s>=expected_15s_buckets)::int
+                                    AS windows_with_full_15s_coverage
+                         FROM per_market GROUP BY asset,horizon_seconds
+                     )
+                     SELECT (SELECT count(*)::int FROM sample) AS sampled_markets,
+                            (SELECT count(*)>500 FROM candidates) AS truncated,
+                            COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                                'asset',g.asset,'horizon_seconds',g.horizon_seconds,
+                                'markets_sampled',g.markets_sampled,
+                                'windows_with_snapshots',g.windows_with_snapshots,
+                                'windows_with_both_sides',g.windows_with_both_sides,
+                                'snapshot_rows',g.snapshot_rows,
+                                'snapshot_buckets_15s',g.snapshot_buckets_15s,
+                                'both_sides_buckets_15s',g.both_sides_buckets_15s,
+                                'expected_buckets_15s',g.expected_buckets_15s,
+                                'windows_with_tracked_time',g.windows_with_tracked_time,
+                                'windows_with_full_15s_coverage',g.windows_with_full_15s_coverage,
+                                'windows',COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                                    'condition_id',w.condition_id,'slug',w.slug,
+                                    'window_open',w.window_open,'window_close',w.window_close,
+                                    'tracked_start',w.tracked_start,
+                                    'snapshot_rows',w.snapshot_rows,'sides',w.sides,
+                                    'snapshot_buckets_15s',w.snapshot_buckets_15s,
+                                    'both_sides_buckets_15s',w.both_sides_buckets_15s,
+                                    'expected_buckets_15s',w.expected_15s_buckets,
+                                    'buckets',COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                                        'index',bp.bucket_index,'up',bp.up_seen,'down',bp.down_seen)
+                                        ORDER BY bp.bucket_index)
+                                        FROM bucket_presence bp
+                                        WHERE bp.asset=w.asset AND bp.horizon_seconds=w.horizon_seconds
+                                          AND bp.condition_id=w.condition_id),'[]'::jsonb))
+                                    ORDER BY w.window_close DESC,w.condition_id)
+                                    FROM (SELECT p.* FROM per_market p
+                                          WHERE p.asset=g.asset AND p.horizon_seconds=g.horizon_seconds
+                                          ORDER BY p.window_close DESC,p.condition_id LIMIT 12) w),'[]'::jsonb))
+                                ORDER BY g.asset,g.horizon_seconds) FROM grouped g),'[]'::jsonb) AS groups""",
+                      one=True)
+            if not row or not isinstance(row.get("groups"), list):
+                raise ValueError("archive coverage query returned an invalid shape")
+            result = {"available": True,
+                      "lookback_hours": 24,
+                      "market_limit": 500,
+                      "sampled_markets": int(row.get("sampled_markets") or 0),
+                      "truncated": bool(row.get("truncated")),
+                      "groups": _copy_market_archive_coverage_groups(row["groups"]),
+                      "sampled_ms": sampled_ms}
+        except Exception:
+            # This optional read-only diagnostic must not take down Feed Quality.
+            result = {"available": False, "lookback_hours": 24,
+                      "market_limit": 500, "sampled_markets": 0,
+                      "truncated": False, "groups": [], "sampled_ms": sampled_ms}
+        _market_archive_coverage_cache[0] = time.monotonic()
+        _market_archive_coverage_cache[1] = result
+        return {**result, "groups": _copy_market_archive_coverage_groups(result["groups"])}
+
+
+def api_market_archive_coverage(force=False):
+    """Root-cockpit alias for the bounded local archive coverage diagnostic."""
+    return api_v3_market_archive_coverage(force=force)
 
 
 def api_v3_feeds():
@@ -7416,8 +10594,325 @@ def api_v3_feeds():
             age = max(0, (time.time() * 1000 - row["last_ts"]) / 1000) if row.get("last_ts") else None
             feeds.append({"source": source, "key": row["key"], "age_s": age,
                           "n1h": row["n1h"], "ok": age is not None and age < 10})
+    queue_fleet = api_v3_fleet()["fleet"]
+    persistence_queue = [
+        {"instance": bot["instance"],
+         "runtime_available": bool(bot.get("mode_verified")),
+         "runtime_updated_ms": bot.get("runtime_updated_ms"),
+         "queue": bot.get("persistence_queue")}
+        for bot in queue_fleet if bot.get("status") != "stopped"]
     return {"feeds": feeds, "capture_profiles": api_v3_capture_profiles(),
+            "persistence_queue": persistence_queue,
+            "market_storage": api_v3_market_storage(),
+            "market_archive_coverage": api_v3_market_archive_coverage(),
             "server_ts": int(time.time() * 1000)}
+
+
+_root_persist_queue_cache = {}
+
+
+def _root_persistence_queue_snapshot(allowed_instances=None):
+    """Return redacted, PID-matched queue health for the caller's bot scope."""
+    allowed = None if allowed_instances is None else {
+        item for item in allowed_instances if isinstance(item, str) and item
+    }
+    key = None if allowed is None else tuple(sorted(allowed))
+    now = time.monotonic()
+    hit = _root_persist_queue_cache.get(key)
+    if hit and now - hit[0] < 1.0:
+        return hit[1]
+
+    try:
+        fleet = _fleet_runtime_snapshot().get("fleet", [])
+    except Exception:
+        # Queue telemetry is an optional diagnostic. Preserve the live feed
+        # even when the runtime snapshot source is temporarily unavailable.
+        result = {"rows": [], "sampled_ms": int(time.time() * 1000),
+                  "available": False}
+        return result
+    rows = []
+    for bot in fleet:
+        if not isinstance(bot, dict):
+            continue
+        instance = bot.get("instance")
+        if not isinstance(instance, str) or not instance or (allowed is not None and instance not in allowed):
+            continue
+        stopped = bot.get("status") == "stopped"
+        verified = bot.get("mode_verified") is True
+        queue = bot.get("persistence_queue")
+        state = "stopped" if stopped else "current" if verified and isinstance(queue, dict) else "unknown"
+        rows.append({
+            "instance": instance,
+            "state": state,
+            "runtime_updated_ms": bot.get("runtime_updated_ms") if verified else None,
+            "queue": queue if state == "current" else None,
+        })
+    result = {"rows": rows, "sampled_ms": int(time.time() * 1000),
+              "available": True}
+    # Bound cache growth if many distinct tenant scopes visit the root cockpit.
+    for cache_key, (cached_at, _cached_value) in list(_root_persist_queue_cache.items()):
+        if now - cached_at > 60.0:
+            _root_persist_queue_cache.pop(cache_key, None)
+    if len(_root_persist_queue_cache) >= 64:
+        oldest = min(_root_persist_queue_cache, key=lambda cache_key: _root_persist_queue_cache[cache_key][0])
+        _root_persist_queue_cache.pop(oldest, None)
+    _root_persist_queue_cache[key] = (now, result)
+    return result
+
+
+_ROOT_FEED_PULSE_SOURCE_CACHE_TTL_S = 1.0
+_root_feed_pulse_source_cache_lock = threading.Lock()
+_root_feed_pulse_source_cache = (None, False, ())
+
+
+def _root_feed_pulse_source_query(sql):
+    """Share a very short source-tick aggregate cache across cockpit pollers."""
+    global _root_feed_pulse_source_cache
+    with _root_feed_pulse_source_cache_lock:
+        now = time.monotonic()
+        checked_at, available, rows = _root_feed_pulse_source_cache
+        if checked_at is not None and 0 <= now - checked_at < _ROOT_FEED_PULSE_SOURCE_CACHE_TTL_S:
+            return available, rows
+        try:
+            result = q(sql)
+            if not isinstance(result, list):
+                raise TypeError("feed pulse query returned an invalid result")
+            rows = tuple(result)
+            available = True
+        except Exception:
+            # Source freshness is optional cockpit telemetry. Preserve the
+            # independently observed bot queue when this query fails.
+            rows = ()
+            available = False
+        _root_feed_pulse_source_cache = (time.monotonic(), available, rows)
+        return available, rows
+
+
+def api_root_feed_pulse(allowed_instances=None):
+    """Read-only freshness and latest prices for the root cockpit feed matrix."""
+    feed_available, rows = _root_feed_pulse_source_query("""SELECT 'Oracle'::text AS source, c.asset_key, c.samples_1h,
+                      latest.ts AS last_ts, latest.price AS last_price,
+                      latest.oracle_source
+               FROM (SELECT asset AS asset_key, COUNT(*)::int AS samples_1h
+                     FROM vp.oracle_ticks
+                     WHERE ts > now() - interval '1 hour'
+                     GROUP BY asset) c
+               JOIN LATERAL (
+                   SELECT ts, price, source AS oracle_source
+                   FROM vp.oracle_ticks t WHERE t.asset = c.asset_key
+                   ORDER BY ts DESC LIMIT 1
+               ) latest ON TRUE
+               UNION ALL
+               SELECT 'Coinbase'::text AS source, c.asset_key, c.samples_1h,
+                      latest.ts AS last_ts, latest.price AS last_price,
+                      NULL::text AS oracle_source
+               FROM (SELECT asset AS asset_key, COUNT(*)::int AS samples_1h
+                     FROM vp.coinbase_ticks
+                     WHERE ts > now() - interval '1 hour'
+                     GROUP BY asset) c
+               JOIN LATERAL (
+                   SELECT ts, price FROM vp.coinbase_ticks t
+                   WHERE t.asset = c.asset_key ORDER BY ts DESC LIMIT 1
+               ) latest ON TRUE
+               UNION ALL
+               SELECT 'Binance'::text AS source, c.asset_key, c.samples_1h,
+                      latest.ts AS last_ts, latest.price AS last_price,
+                      NULL::text AS oracle_source
+               FROM (SELECT symbol AS asset_key, COUNT(*)::int AS samples_1h
+                     FROM vp.binance_ticks
+                     WHERE ts > now() - interval '1 hour'
+                     GROUP BY symbol) c
+               JOIN LATERAL (
+                   SELECT ts, price FROM vp.binance_ticks t
+                   WHERE t.symbol = c.asset_key ORDER BY ts DESC LIMIT 1
+               ) latest ON TRUE""")
+    now_ms = int(time.time() * 1000)
+
+    observed = {}
+    for row in rows:
+        source = row.get("source")
+        asset = row.get("asset_key")
+        if source not in ("Oracle", "Coinbase", "Binance") or not asset:
+            continue
+        stamp = row.get("last_ts")
+        age_s = (now_ms - int(stamp)) / 1000.0 if stamp is not None else None
+        if age_s is None:
+            state = "unknown"
+        elif age_s < -5.0:
+            state = "clock_ahead"
+        elif age_s < 10.0:
+            state = "fresh"
+            age_s = max(0.0, age_s)
+        else:
+            state = "stale"
+        observed[(source, asset)] = {
+            "asset": asset,
+            "last_ts": int(stamp) if stamp is not None else None,
+            "last_price": row.get("last_price"),
+            "samples_1h": max(0, int(row.get("samples_1h") or 0)),
+            "oracle_source": row.get("oracle_source"),
+            "age_s": round(age_s, 3) if age_s is not None else None,
+            "state": state,
+        }
+
+    keys = {
+        "Oracle": ASSETS,
+        "Coinbase": ASSETS,
+        "Binance": [SYMBOL[asset] for asset in ASSETS],
+    }
+    sources = []
+    for source, assets in keys.items():
+        items = []
+        for asset in assets:
+            item = observed.get((source, asset))
+            if item is None:
+                item = {"asset": asset, "last_ts": None, "last_price": None,
+                        "samples_1h": 0, "oracle_source": None, "age_s": None,
+                        "state": "unknown"}
+            items.append(item)
+        sources.append({"source": source, "items": items})
+    persistence = _root_persistence_queue_snapshot(allowed_instances)
+    return {"available": True, "feed_available": feed_available,
+            "fresh_threshold_s": 10,
+            "sample_window_s": 3600, "sources": sources,
+            "persistence_queue": persistence["rows"],
+            "persistence_queue_available": persistence.get("available") is True,
+            "sampled_ms": now_ms}
+
+
+def api_cross_asset_sync():
+    """Read-only monitor for the 5m cross-asset shadow observation ledger."""
+    now_ms = int(time.time() * 1000)
+    try:
+        current = q("""WITH latest AS (
+                         SELECT DISTINCT ON (condition_id) *
+                         FROM vp.cross_asset_sync_samples
+                         WHERE window_open_ms <= %s AND window_close_ms > %s
+                           AND sample_slot_ms >= %s
+                         ORDER BY condition_id, sample_slot_ms DESC
+                     )
+                     SELECT sample_slot_ms,observer_instance,condition_id,asset,
+                            window_open_ms,window_close_ms,eligible_assets,
+                            quote_eligible,candidate,up_probability,peer_median_up,
+                            divergence_pct,side,ask_price,ask_depth_usd,
+                            fee_rate,fee_exponent,estimated_fee_per_share,
+                            estimated_net_proxy_gap_per_share,reason,payload
+                     FROM latest ORDER BY window_close_ms,asset""",
+                    (now_ms, now_ms, now_ms - 20000))
+        chart = q("""WITH active_window AS (
+                         SELECT MAX(window_open_ms) AS window_open_ms
+                         FROM vp.cross_asset_sync_samples
+                         WHERE window_open_ms <= %s AND window_close_ms > %s
+                           AND sample_slot_ms >= %s
+                     ), bucketed AS (
+                         SELECT DISTINCT ON (s.asset, (s.sample_slot_ms / 10000))
+                                s.asset,s.sample_slot_ms,s.up_probability,
+                                s.peer_median_up,s.divergence_pct
+                         FROM vp.cross_asset_sync_samples s, active_window w
+                         WHERE s.window_open_ms=w.window_open_ms
+                           AND s.sample_slot_ms >= %s AND s.sample_slot_ms <= %s
+                           AND s.quote_eligible
+                         ORDER BY s.asset,(s.sample_slot_ms / 10000),s.sample_slot_ms DESC
+                     )
+                     SELECT asset,sample_slot_ms,up_probability,peer_median_up,divergence_pct
+                     FROM bucketed ORDER BY sample_slot_ms,asset""",
+                    (now_ms, now_ms, now_ms - 60000, now_ms - 300000, now_ms))
+        with _CROSS_ASSET_SETTLED_CACHE_LOCK:
+            if (_CROSS_ASSET_SETTLED_CACHE["rows"] is None or
+                    time.monotonic() - _CROSS_ASSET_SETTLED_CACHE["at"] >= 20.0):
+                _CROSS_ASSET_SETTLED_CACHE["rows"] = q("""WITH first_candidate AS (
+                         SELECT DISTINCT ON (s.condition_id,s.window_close_ms)
+                                s.condition_id,s.asset,s.window_close_ms,s.sample_slot_ms,
+                                s.side,s.ask_price,s.estimated_fee_per_share,
+                                s.divergence_pct,s.estimated_net_proxy_gap_per_share,
+                                m.resolved_outcome::text AS resolved_outcome
+                         FROM vp.cross_asset_sync_samples s
+                         JOIN vp.pm_markets m USING (condition_id)
+                         WHERE s.candidate AND s.side IS NOT NULL
+                           AND s.ask_price > 0 AND s.window_close_ms <= %s
+                           AND s.sample_slot_ms >= %s AND m.resolved_outcome IS NOT NULL
+                         ORDER BY s.condition_id,s.window_close_ms,s.sample_slot_ms ASC
+                     )
+                     SELECT * FROM first_candidate
+                     ORDER BY window_close_ms DESC""",
+                    (now_ms, now_ms - 30 * 86400000))
+                _CROSS_ASSET_SETTLED_CACHE["at"] = time.monotonic()
+            settled = list(_CROSS_ASSET_SETTLED_CACHE["rows"])
+    except Exception:
+        return {"available": False,
+                "reason": "Cross-asset shadow schema or observation data is unavailable.",
+                "sampled_ms": now_ms, "current": [], "chart": [], "settled": [],
+                "summary": {"candidates": 0, "eligible_assets": 0,
+                            "settled": 0, "wins": 0, "win_rate_pct": None,
+                            "hypothetical_net_pnl_usd": None}}
+
+    candidates = [row for row in current if row.get("candidate")]
+    settings = next((row.get("payload") for row in current
+                     if isinstance(row.get("payload"), dict)), {})
+    eligible_assets = max((int(row.get("eligible_assets") or 0) for row in current), default=0)
+    fresh_samples = sum(1 for row in current if row.get("quote_eligible"))
+    settled_rows = []
+    total_net = 0.0
+    wins = 0
+    for row in settled:
+        ask = float(row.get("ask_price") or 0.0)
+        fee_per_share = float(row.get("estimated_fee_per_share") or 0.0)
+        shares = 5.0 / ask if ask > 0 else 0.0
+        won = str(row.get("side") or "").upper() == str(row.get("resolved_outcome") or "").upper()
+        fee = fee_per_share * shares
+        net_pnl = (shares if won else 0.0) - 5.0 - fee
+        wins += int(won)
+        total_net += net_pnl
+        settled_rows.append({
+            "asset": row.get("asset"), "side": row.get("side"),
+            "window_close_ms": int(row.get("window_close_ms") or 0),
+            "sample_slot_ms": int(row.get("sample_slot_ms") or 0),
+            "ask_price": ask, "divergence_pct": row.get("divergence_pct"),
+            "resolved_outcome": row.get("resolved_outcome"), "won": won,
+            "shares_at_5_usd": shares, "estimated_fee_usd": fee,
+            "hypothetical_net_pnl_usd": net_pnl,
+            "estimated_net_proxy_gap_per_share": row.get("estimated_net_proxy_gap_per_share"),
+        })
+    count = len(settled_rows)
+    confidence_interval = None
+    if count:
+        # Wilson interval keeps a small shadow sample from looking conclusive.
+        z = 1.96
+        p = wins / count
+        denom = 1.0 + z * z / count
+        center = (p + z * z / (2.0 * count)) / denom
+        radius = z * math.sqrt((p * (1.0 - p) / count) + z * z / (4.0 * count * count)) / denom
+        confidence_interval = [round(100.0 * max(0.0, center - radius), 1),
+                               round(100.0 * min(1.0, center + radius), 1)]
+    return {
+        "available": True,
+        "sampled_ms": now_ms,
+        "scope": "BTC/ETH/SOL/XRP exact-aligned 5m windows",
+        "current": current,
+        "chart": chart,
+        "settled": settled_rows[:40],
+        "settings": settings,
+        "summary": {
+            "candidates": len(candidates),
+            "current_markets": len(current),
+            "eligible_assets": eligible_assets,
+            "fresh_markets": fresh_samples,
+            "settled": count,
+            "wins": wins,
+            "win_rate_pct": round(100.0 * wins / count, 1) if count else None,
+            "win_rate_wilson_95_pct": confidence_interval,
+            "hypothetical_net_pnl_usd": round(total_net, 4) if count else None,
+            "stake_usd": 5.0,
+            "score_window_days": 30,
+        },
+        "method_notes": [
+            "UP probability proxy averages the UP midpoint with one minus the DOWN midpoint.",
+            "Each market is compared with the median of the other eligible assets in the exact same window.",
+            "Settled results use only the first candidate per market window; repeated 5s snapshots are not independent trades.",
+            "$5 outcomes assume a full fill at the displayed top ask and use the configured fee curve; no queue, slippage, or market-impact model is included.",
+            "Cross-asset agreement is a hypothesis to measure, not a proven arbitrage or profitability claim.",
+        ],
+    }
 
 
 def api_v3_latency():
@@ -7584,6 +11079,12 @@ ROUTES = {
     "/api/instances": lambda qs: {"instances": bot_status_detail().get("instances_running", [])},
     "/api/live": lambda qs: api_live(qs.get("instance", [""])[0] or None),
     "/api/live_lite": lambda qs: api_live_lite(qs.get("instance", [""])[0] or None),
+    "/api/feed_pulse": lambda qs: api_root_feed_pulse(),
+    "/api/cross_asset_sync": lambda qs: api_cross_asset_sync(),
+    "/api/root_state_at": lambda qs: api_root_state_at(
+        qs.get("as_of_ms", [None])[0],
+        qs.get("instance", [""])[0] or None,
+        qs.get("mode", [None])[0]),
     "/api/activity": lambda qs: api_activity(qs.get("instance", [""])[0] or None),
     "/api/execution": lambda qs: api_execution(qs.get("instance", [""])[0] or None),
     "/api/tournament": lambda qs: api_tournament(),
@@ -7609,6 +11110,25 @@ ROUTES = {
                                                 qs.get("force", ["0"])[0] == "1",
                                                 qs.get("after_version", [None])[0],
                                                 qs.get("wait", [0])[0]),
+    "/api/prediction_reference": lambda qs: api_prediction_reference(
+                                                qs.get("asset", [""])[0],
+                                                qs.get("horizon_seconds", [""])[0],
+                                                qs.get("window_open_ms", [""])[0],
+                                                qs.get("window_close_ms", [None])[0],
+                                                qs.get("point_limit", [600])[0]),
+    "/api/prediction_history": lambda qs: api_prediction_history(
+                                                qs.get("asset", [""])[0],
+                                                qs.get("horizon_seconds", [""])[0],
+                                                qs.get("limit", [75])[0],
+                                                qs.get("offset", [0])[0],
+                                                qs.get("score_days", [5])[0],
+                                                qs.get("score_model", ["all"])[0],
+                                                qs.get("score_checkpoint", ["elapsed_60pct"])[0],
+                                                qs.get("score_min_confidence_pct", [60])[0],
+                                                qs.get("outcome", ["all"])[0],
+                                                qs.get("date_from", [None])[0],
+                                                qs.get("date_to", [None])[0],
+                                                qs.get("history_model", ["all"])[0]),
     "/api/pnl_history": lambda qs: api_pnl_history(int(qs.get("hours", ["24"])[0])),
     "/api/pnl_today": lambda qs: api_pnl_today(),
     "/api/v3/knobs": lambda qs: api_v3_knobs(qs.get("instance", ["cb"])[0]),
@@ -7635,12 +11155,22 @@ ROUTES = {
                                            int(qs.get("limit", ["240"])[0])),
     "/api/prices": lambda qs: api_prices(),
     "/api/markets": lambda qs: api_markets(int(qs.get("limit", ["40"])[0])),
+    "/api/market_motion": lambda qs: api_market_motion(qs.get("condition_ids", [""])[0]),
+    "/api/market_archive_coverage": lambda qs: api_market_archive_coverage(
+        qs.get("force", ["0"])[0] == "1"),
     "/api/v5/market-motion": lambda qs: api_v5_market_motion(qs.get("condition_ids", [""])[0]),
     "/api/mobile/markets": lambda qs: api_mobile_market_search(
         qs.get("q", [""])[0], qs.get("limit", ["30"])[0], qs.get("offset", ["0"])[0]),
     "/api/mobile/market": lambda qs: api_mobile_market_detail(qs.get("condition_id", [""])[0]),
     "/api/mobile/book": lambda qs: api_mobile_market_book(
         qs.get("condition_id", [""])[0], qs.get("outcome_index", ["0"])[0]),
+    "/api/mobile/books/watchlist": lambda qs: api_mobile_market_books_watchlist(
+        qs.get("condition_ids", [""])[0]),
+    "/api/mobile/books": lambda qs: api_mobile_market_books(
+        qs.get("condition_id", [""])[0]),
+    "/api/mobile/trades": lambda qs: api_mobile_public_trades(
+        qs.get("condition_id", [""])[0], qs.get("limit", ["20"])[0],
+        qs.get("cursor", [""])[0]),
     "/api/strategy": lambda qs: api_strategy(),
     "/api/orderstats": lambda qs: api_orderstats(int(qs.get("hours", ["24"])[0])),
     "/api/source_pnl": lambda qs: api_source_pnl(qs.get("instance", [""])[0] or None),
@@ -7650,6 +11180,7 @@ ROUTES = {
         int(qs.get("minutes", ["30"])[0])),
     "/api/configs": lambda qs: api_configs(),
     "/api/config": lambda qs: api_config_read(qs.get("name", [""])[0]),
+    "/api/config/runtime": lambda qs: api_config_runtime(qs.get("name", [""])[0]),
     "/api/cb_edge": lambda qs: api_cb_edge_live(),
     "/api/signal_history": lambda qs: api_signal_history(int(qs.get("limit", ["30"])[0])),
     "/api/perf_stats": lambda qs: api_perf_stats(),
@@ -8403,7 +11934,35 @@ class Handler(BaseHTTPRequestHandler):
             return result
         own = self._user_instances()
         insts = result.get("instances", {})
-        return {**result, "instances": {k: v for k, v in insts.items() if k in own}}
+        rows = result.get("rows", [])
+        return {**result,
+                "instances": {k: v for k, v in insts.items() if k in own},
+                "rows": [row for row in rows if row.get("instance") in own]}
+
+    def _api_root_feed_pulse_for_user(self):
+        if self._is_admin():
+            allowed = None
+        elif self._is_demo():
+            allowed = set()
+        else:
+            allowed = self._user_instances()
+        return api_root_feed_pulse(allowed)
+
+    def _api_live_lite_for_user(self, instance=None):
+        """Add redacted queue counters without mutating the shared live-lite cache."""
+        base = api_live_lite(instance)
+        if self._is_admin():
+            allowed = {instance} if instance else None
+        elif self._is_demo():
+            allowed = set()
+        else:
+            own = self._user_instances()
+            allowed = {instance} if instance and instance in own else set()
+        queue = _root_persistence_queue_snapshot(allowed)
+        return {**base,
+                "persistence_queue": queue["rows"],
+                "persistence_queue_available": queue.get("available") is True,
+                "persistence_queue_sampled_ms": queue["sampled_ms"]}
 
     def _serve_set_password_form(self, qs):
         token = (qs.get("token", [""])[0] or "").strip()
@@ -8624,6 +12183,7 @@ class Handler(BaseHTTPRequestHandler):
 
     ADMIN_ONLY_ROUTES = {
         "/api/tournament", "/api/supervisor_feed", "/api/supervisor_log", "/api/instances",
+        "/api/polymarket_account",
     }
     INSTANCE_PARAM_ROUTES = {
         "/api/live", "/api/live_lite", "/api/activity",
@@ -8632,6 +12192,7 @@ class Handler(BaseHTTPRequestHandler):
         "/api/settlement_history", "/api/settlement_detail",
         "/api/predictor",
         "/api/execution",
+        "/api/root_state_at",
     }
 
     def do_OPTIONS(self):
@@ -8687,6 +12248,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self._require_auth():
             return
+
+        # Root-cockpit install metadata and artwork are deliberately served only
+        # after the same authentication gate as the cockpit shell. Keep this a
+        # strict filename allowlist; it must never become a generic file server.
+        asset = ROOT_COCKPIT_ASSETS.get(path)
+        if asset:
+            asset_path = os.path.join(os.path.dirname(UI_FILE), asset[0])
+            try:
+                with open(asset_path, "rb") as source:
+                    return self._send(200, source.read(), asset[1])
+            except OSError:
+                return self._send(404, {"error": "cockpit asset not found"})
 
         # V3/V4/V5 currently aggregate the entire trading fleet. Restrict these
         # surfaces until every query is tenant scoped.
@@ -8781,25 +12354,20 @@ class Handler(BaseHTTPRequestHandler):
 
         # Demo: also block supervisor routes and config write access
         DEMO_BLOCKED_ROUTES = {"/api/supervisor_feed", "/api/supervisor_log",
-                               "/api/configs", "/api/config"}
+                               "/api/configs", "/api/config", "/api/config/runtime"}
         if self._is_demo() and path in DEMO_BLOCKED_ROUTES:
             return self._send(403, {"error": "not available in demo"})
 
         if path in self.INSTANCE_PARAM_ROUTES:
             enforced = self._enforce_instance(qs.get("instance", [""])[0] or None)
+            if path == "/api/root_state_at" and not self._is_admin() and not enforced:
+                return self._send(403, {"error": "No bot instance is assigned to this account."})
             qs = dict(qs)
             qs["instance"] = [enforced or ""]
 
         # Per-user config isolation: non-admins see only their own config(s)
         if path == "/api/configs" and not self._is_admin():
-            cfgs = []
-            for own in sorted(self._user_instances()):
-                own_file = f"polypulse-{own}.toml"
-                cfg_path = os.path.join(CONFIG_DIR, own_file)
-                if os.path.exists(cfg_path):
-                    cfgs.append({"name": own, "file": own_file,
-                                 "mtime": int(os.path.getmtime(cfg_path) * 1000)})
-            return self._send(200, {"configs": cfgs})
+            return self._send(200, api_configs(self._user_instances()))
 
         if path == "/api/config" and not self._is_admin():
             requested = qs.get("name", [""])[0]
@@ -8808,6 +12376,24 @@ class Handler(BaseHTTPRequestHandler):
             result = api_config_read(requested, full=False)
             result.pop("raw", None)  # never expose raw TOML to non-admins
             return self._send(200, result)
+
+        if path == "/api/config/runtime" and not self._is_admin():
+            requested = qs.get("name", [""])[0]
+            if requested not in self._user_instances():
+                return self._send(403, {"error": "can only inspect your own bot runtime"})
+
+        if path == "/api/feed_pulse":
+            try:
+                return self._send(200, self._api_root_feed_pulse_for_user())
+            except Exception:
+                return self._send(500, {"error": "root feed and persistence telemetry unavailable"})
+
+        if path == "/api/live_lite":
+            try:
+                instance = (qs.get("instance", [""])[0] or "").strip() or None
+                return self._send(200, self._api_live_lite_for_user(instance))
+            except Exception:
+                return self._send(500, {"error": "root live telemetry unavailable"})
 
         if path in ROUTES:
             try:
@@ -8856,6 +12442,16 @@ class Handler(BaseHTTPRequestHandler):
         # Demo accounts are fully read-only
         if self._is_demo():
             return self._send(403, {"error": "demo account — read-only"})
+
+        if u.path == "/api/polymarket_account":
+            if not self._is_admin():
+                return self._send(403, {"error": "admin required"})
+            if not isinstance(body, dict):
+                return self._send(400, {"error": "account request must be a JSON object"})
+            result = api_polymarket_account(body.get("user"), body.get("cursor"))
+            if isinstance(result, tuple) and len(result) == 2:
+                return self._send(result[0], result[1])
+            return self._send(200, result)
 
         if u.path in ("/api/force_sell", "/api/force_sell_all"):
             token = body.get("token") or qs.get("token", [""])[0]

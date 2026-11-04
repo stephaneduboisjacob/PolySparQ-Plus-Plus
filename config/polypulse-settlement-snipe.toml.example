@@ -95,4 +95,5 @@ coinbase_ticks_enabled = false
 window_events_enabled = false
 features_enabled = false
 book_snapshots_enabled = true
+book_snapshot_levels = 5 # top five levels per side, with lower archive cost than full depth
 pm_trades_enabled = false

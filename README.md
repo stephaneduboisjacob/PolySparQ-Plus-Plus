@@ -23,6 +23,26 @@ This is a source-available project, not a permissively licensed open-source rele
 
 The codebase is intended for developers exploring Polymarket bots, prediction-market data, paper trading, and execution or risk-control systems. The example configuration starts in paper mode; live execution requires deliberate local configuration and credentials.
 
+## Market-book storage controls
+
+Book snapshots are optional, high-volume research data. The `polypulse` engine
+and `polypulse-collector` each record at most one full-book snapshot per token
+per second when
+`data_collection.book_snapshots_enabled = true`. Set
+`data_collection.book_snapshot_levels` from `0` to `20` to choose how much of
+each side's order book is retained: `0` preserves best bid/ask, midpoint, spread,
+and summary fields without depth arrays; `1` to `19` stores a shallow ladder;
+`20` keeps the full top-20 ladder and remains the engine default. Reducing this
+value does not change the live in-memory order book or execution logic, but it
+reduces the depth available to historical liquidity and replay analysis. The
+example profiles that enable book capture use five levels per side; review the
+storage tradeoff before enabling capture on a long-running instance. The
+collector seeds each token from a full `book` event, then applies subsequent
+price-change deltas before saving; it does not treat an individual changed
+level as a complete order-book snapshot. Snapshot timestamps are captured
+alongside the in-memory sample and preserved through the asynchronous database
+queue, so queue delay does not make old market data appear newly observed.
+
 The product branding is PolySparQ++. A few internal executable, database, and configuration identifiers retain their historic names for compatibility with existing installations.
 
 ## Build the Polymarket bot
@@ -57,6 +77,25 @@ The executable and default database identifiers are retained for compatibility. 
 | `tests/` | C++ and Python tests |
 | `mobile/` | Expo / React Native client |
 | `config/polypulse.toml.example` | Minimal paper-mode configuration template |
+
+## Prediction history archive
+
+The root cockpit's Predictions tab records per-window forecasts in PostgreSQL
+(`vp.prediction_history_windows` and `vp.prediction_history_checkpoints`). Each
+market window has checkpoints for 60 seconds before open, open, and 20%, 40%,
+60%, and 80% elapsed, plus the eventual market result. The server captures these
+independently of whether a browser has the Predictions tab open. Resolved
+outcomes come from Polymarket's resolved market data; opening and closing
+reference prices are recovered from the stored Chainlink oracle ticks.
+
+On first start, the cockpit imports existing independent-model snapshots from
+its old minute-bucket journal. It keeps only captures close to the requested
+checkpoint and displays the actual capture time; checkpoints with no genuine
+historical forecast remain marked “not recorded.” The archive has no retention
+cleanup. The page shows 50 windows at a time and supports older pages.
+
+The schema is also applied by `scripts/setup_db.sh` through
+`sql/029_prediction_history.sql`.
 
 ## Scalper impulse research
 

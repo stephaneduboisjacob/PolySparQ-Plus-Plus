@@ -20,6 +20,93 @@ bool lead_horizon_enabled(int configured_horizon_s, int market_horizon_s) {
 }
 }
 
+std::optional<WindowBotSignal> coinbase_confluence_entry(
+    const CoinbaseConfluenceInput& in,
+    const CoinbaseConfluenceConfig& cfg) {
+    if (!supported_lead_horizon(in.horizon_s) ||
+        !std::isfinite(in.coinbase_now) || in.coinbase_now <= 0.0 ||
+        !std::isfinite(in.coinbase_window_open) || in.coinbase_window_open <= 0.0 ||
+        !std::isfinite(cfg.min_move_bps) || cfg.min_move_bps < 10.0 ||
+        !std::isfinite(cfg.min_momentum_10s_bps) ||
+        cfg.min_momentum_10s_bps < 0.25 ||
+        !std::isfinite(cfg.max_price) || cfg.max_price <= 0.0 || cfg.max_price > 0.90)
+        return std::nullopt;
+
+    const double window_move_bps =
+        10'000.0 * (in.coinbase_now / in.coinbase_window_open - 1.0);
+    double strike_move_bps = 0.0;
+    if (cfg.rule != CoinbaseConfluenceRule::WindowMove) {
+        if (!std::isfinite(in.market_strike) || in.market_strike <= 0.0)
+            return std::nullopt;
+        strike_move_bps =
+            10'000.0 * (in.coinbase_now / in.market_strike - 1.0);
+    }
+    if (!std::isfinite(window_move_bps) ||
+        (cfg.rule != CoinbaseConfluenceRule::WindowMove &&
+         !std::isfinite(strike_move_bps)))
+        return std::nullopt;
+
+    double momentum_10s_bps = 0.0;
+    const bool require_momentum =
+        cfg.rule == CoinbaseConfluenceRule::StrikeMomentum ||
+        cfg.rule == CoinbaseConfluenceRule::StrikeWindowMomentum ||
+        (cfg.rule == CoinbaseConfluenceRule::StrikeWindow &&
+         in.horizon_s == 900);
+    if (require_momentum) {
+        if (!std::isfinite(in.coinbase_10s_ago) || in.coinbase_10s_ago <= 0.0)
+            return std::nullopt;
+        momentum_10s_bps =
+            10'000.0 * (in.coinbase_now / in.coinbase_10s_ago - 1.0);
+        if (!std::isfinite(momentum_10s_bps) ||
+            std::abs(momentum_10s_bps) < cfg.min_momentum_10s_bps ||
+            strike_move_bps * momentum_10s_bps <= 0.0)
+            return std::nullopt;
+    }
+
+    if (cfg.rule == CoinbaseConfluenceRule::WindowMove) {
+        if (in.horizon_s != 300 || std::abs(window_move_bps) < cfg.min_move_bps)
+            return std::nullopt;
+    } else if (cfg.rule == CoinbaseConfluenceRule::StrikeMomentum) {
+        if (in.horizon_s != 900 ||
+            std::abs(strike_move_bps) < cfg.min_move_bps)
+            return std::nullopt;
+    } else if (cfg.rule == CoinbaseConfluenceRule::StrikeWindowMomentum) {
+        if (in.horizon_s != 300 ||
+            std::abs(strike_move_bps) < cfg.min_move_bps ||
+            std::abs(window_move_bps) < cfg.min_move_bps ||
+            strike_move_bps * window_move_bps <= 0.0)
+            return std::nullopt;
+    } else {
+        if (std::abs(strike_move_bps) < cfg.min_move_bps ||
+            std::abs(window_move_bps) < cfg.min_move_bps ||
+            strike_move_bps * window_move_bps <= 0.0)
+            return std::nullopt;
+    }
+
+    const double direction_move = cfg.rule == CoinbaseConfluenceRule::WindowMove
+        ? window_move_bps : strike_move_bps;
+    const auto side = direction_move > 0.0 ? ShareSide::UP : ShareSide::DOWN;
+    const double confidence = 0.50; // neutral rank input, not a probability estimate
+    std::string reason;
+    if (cfg.rule == CoinbaseConfluenceRule::WindowMove) {
+        reason = fmt::format("CB_WINDOW_MOVE_5M window={:+.2f}bp", window_move_bps);
+    } else if (cfg.rule == CoinbaseConfluenceRule::StrikeMomentum) {
+        reason = fmt::format("CB_STRIKE_MOMENTUM_15M strike={:+.2f}bp mom10={:+.2f}bp",
+                             strike_move_bps, momentum_10s_bps);
+    } else if (cfg.rule == CoinbaseConfluenceRule::StrikeWindowMomentum) {
+        reason = fmt::format(
+            "CB_CONFLUENCE_MOMENTUM_5M strike={:+.2f}bp window={:+.2f}bp mom10={:+.2f}bp",
+            strike_move_bps, window_move_bps, momentum_10s_bps);
+    } else if (in.horizon_s == 300) {
+        reason = fmt::format("CB_CONFLUENCE_5M strike={:+.2f}bp window={:+.2f}bp",
+                             strike_move_bps, window_move_bps);
+    } else {
+        reason = fmt::format("CB_CONFLUENCE_15M strike={:+.2f}bp window={:+.2f}bp mom10={:+.2f}bp",
+                             strike_move_bps, window_move_bps, momentum_10s_bps);
+    }
+    return WindowBotSignal{side, confidence, 0.0, cfg.max_price, reason};
+}
+
 ConditionalTwapProbability conditional_twap_probability(
     const PmMarket& market,
     const vp::core::OracleBuffer& oracle,
@@ -28,9 +115,15 @@ ConditionalTwapProbability conditional_twap_probability(
     double strike,
     double sigma_per_sec) {
     ConditionalTwapProbability out;
+    auto fail = [&](const char* status) {
+        out.status = status;
+        return out;
+    };
     const double secs_left = (market.window_close_ms - now_ms) / 1000.0;
-    if (secs_left < 0.0 || !(strike > 0.0) || !(sigma_per_sec > 0.0) ||
-        !std::isfinite(sigma_per_sec)) return out;
+    if (secs_left < 0.0) return fail("closed");
+    if (!(strike > 0.0)) return fail("missing_strike");
+    if (!(sigma_per_sec > 0.0) || !std::isfinite(sigma_per_sec))
+        return fail("invalid_volatility");
 
     const std::string spot_key = market.reference_price_key();
     const double spot_ts = oracle.latest_timestamp(spot_key);
@@ -44,15 +137,21 @@ ConditionalTwapProbability conditional_twap_probability(
         oracle.latest_timestamp(market.reference_key());
     const double spot_age = now_s - spot_ts;
     const double cb_age = now_ms / 1000.0 - cb_ts;
-    if (!(spot > 0.0 && cb_now > 0.0 && cb_at_spot > 0.0) ||
-        spot_ts <= 0.0 || official_age < -1.0 || official_age > 10.0 ||
-        spot_age < -1.0 || spot_age > 10.0 ||
-        cb_age < -1.0 || cb_age > 3.0) return out;
+    if (!(spot > 0.0)) return fail("missing_chainlink_spot");
+    if (!(cb_now > 0.0)) return fail("missing_coinbase_spot");
+    if (!(cb_at_spot > 0.0)) return fail("coinbase_unaligned_to_chainlink");
+    if (spot_ts <= 0.0 || official_age < -1.0 || official_age > 10.0)
+        return fail("stale_official_reference");
+    if (spot_age < -1.0 || spot_age > 10.0)
+        return fail("stale_chainlink_spot");
+    if (cb_age < -1.0 || cb_age > 3.0)
+        return fail("stale_coinbase");
 
     // Remove static exchange basis using Coinbase at the Chainlink spot's
     // timestamp, then carry only Coinbase's newer move into the future leg.
     const double forecast_spot = spot * cb_now / cb_at_spot;
-    if (!(forecast_spot > 0.0) || !std::isfinite(forecast_spot)) return out;
+    if (!(forecast_spot > 0.0) || !std::isfinite(forecast_spot))
+        return fail("invalid_forecast_spot");
 
     auto probability_for_scale = [&](double scale) -> double {
         if (market.settlement_window_s <= 0) {
@@ -114,16 +213,18 @@ ConditionalTwapProbability conditional_twap_probability(
     const double high_vol = probability_for_scale(0.75);
     if (point < 0.0 || low_vol < 0.0 || high_vol < 0.0 ||
         !std::isfinite(point) || !std::isfinite(low_vol) ||
-        !std::isfinite(high_vol)) return out;
+        !std::isfinite(high_vol)) return fail("twap_history_unavailable");
     out.probability_up = std::clamp(point, 0.01, 0.99);
     out.low_up = std::clamp(std::min(low_vol, high_vol), 0.01, 0.99);
     out.high_up = std::clamp(std::max(low_vol, high_vol), 0.01, 0.99);
     out.ready = true;
+    out.status = "ready";
     return out;
 }
 
 std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
-    const LeadLagInput& in, const LeadLagConfig& cfg, int entries_this_window,
+    const LeadLagInput& in, const LeadLagConfig& cfg,
+    int filled_entries_this_window,
     std::string* reject_reason) {
     if (reject_reason) reject_reason->clear();
     auto reject = [&](const char* why) -> std::optional<WindowBotSignal> {
@@ -139,7 +240,7 @@ std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
         !horizon_allowed ||
         (max_secs_remaining > 0 && in.secs_left > max_secs_remaining) ||
         in.secs_left <= stop_entry_secs ||
-        entries_this_window >= cfg.max_entries_per_window ||
+        filled_entries_this_window >= cfg.max_entries_per_window ||
         !in.cb_fresh || !in.oracle_fresh ||
         !std::isfinite(in.cb_move_2s_bps) ||
         !std::isfinite(in.cb_move_5s_bps) ||
@@ -153,7 +254,7 @@ std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
             else if (max_secs_remaining > 0 && in.secs_left > max_secs_remaining)
                 *reject_reason = "opening_delay";
             else if (in.secs_left <= stop_entry_secs) *reject_reason = "entry_cutoff";
-            else if (entries_this_window >= cfg.max_entries_per_window) *reject_reason = "entry_limit";
+            else if (filled_entries_this_window >= cfg.max_entries_per_window) *reject_reason = "entry_limit";
             else if (!in.cb_fresh) *reject_reason = "coinbase_stale_or_unaligned";
             else if (!in.oracle_fresh) *reject_reason = "chainlink_stale";
             else *reject_reason = "non_finite_input";
@@ -178,22 +279,23 @@ std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
             state.last_direction != 0 && direction != state.last_direction &&
             std::abs(lead) >= cfg.min_cb_lead_bps;
         // The caller only evaluates entries when there is no open position or
-        // pending entry in this market. A completed accepted order cycle can
+        // pending entry in this market. A completed filled-order cycle can
         // therefore re-arm independently of the Coinbase/Chainlink basis,
         // which often stays near zero while both feeds track each other.
         const int64_t since_signal_ms = in.now_ms - state.last_signal_ms;
-        const bool completed_cycle = entries_this_window > state.entries_at_signal &&
+        const bool completed_cycle =
+            filled_entries_this_window > state.filled_entries_at_signal &&
             since_signal_ms >= 2000;
-        // If a signal was rejected before an order was accepted, allow a fresh
-        // attempt after a short cooldown instead of permanently disarming this
-        // market for the rest of its window.
-        const bool retry_after_rejection = entries_this_window <= state.entries_at_signal &&
+        // If no entry filled after a signal, allow another attempt after a
+        // cooldown. This covers rejected and cancelled/no-fill maker quotes.
+        const bool retry_after_no_fill =
+            filled_entries_this_window <= state.filled_entries_at_signal &&
             since_signal_ms >= 10000;
         const bool confirmed_model_reversal = model_direction != 0 &&
             state.last_direction != 0 && model_direction != state.last_direction &&
             in.ensemble_confidence >= cfg.min_model_confidence;
         if (returned_to_rearm_zone || confirmed_reversal || completed_cycle ||
-            retry_after_rejection || confirmed_model_reversal) {
+            retry_after_no_fill || confirmed_model_reversal) {
             state.armed = true;
             state.left_rearm_zone = false;
         }
@@ -212,9 +314,27 @@ std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
     // requirement that suppresses every market while spot and Coinbase track.
     const int trade_direction = coinbase_impulse ? direction : model_direction;
     if (trade_direction == 0) return reject("no_model_direction_or_coinbase_impulse");
-    if (coinbase_impulse && model_direction != 0 &&
-        model_direction != direction)
-        return reject("model_direction_disagrees");
+    if (cfg.require_window_cb_lead) {
+        if (!in.window_deltas_ready ||
+            !std::isfinite(in.window_cb_delta_pct) ||
+            !std::isfinite(in.window_oracle_delta_pct))
+            return reject("window_delta_reference_unavailable");
+        if (!(cfg.min_window_cb_delta_pct > 0.0) ||
+            !(cfg.max_window_oracle_delta_pct > 0.0))
+            return reject("window_delta_threshold_invalid");
+        if (trade_direction * in.window_cb_delta_pct <
+            cfg.min_window_cb_delta_pct)
+            return reject("window_coinbase_delta_below_threshold");
+        if (std::abs(in.window_oracle_delta_pct) >=
+            cfg.max_window_oracle_delta_pct)
+            return reject("window_oracle_not_lagging");
+        if (trade_direction * in.window_oracle_delta_pct < -1e-9)
+            return reject("window_oracle_direction_disagrees");
+    }
+    // Coinbase gives the early side, but the independent settlement model must
+    // identify that same side before the impulse is allowed to become an entry.
+    if (coinbase_impulse && model_direction != direction)
+        return reject("model_direction_not_confirmed");
     if (!coinbase_impulse && direction != 0 &&
         direction * in.cb_move_2s_bps >= cfg.min_cb_move_bps &&
         direction != model_direction)
@@ -227,25 +347,42 @@ std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
 
     const ShareSide side = trade_direction > 0 ? ShareSide::UP : ShareSide::DOWN;
     const double ask = side == ShareSide::UP ? in.up_ask : in.down_ask;
+    const double bid = side == ShareSide::UP ? in.up_bid : in.down_bid;
     const double spread = side == ShareSide::UP ? in.up_spread_pct : in.down_spread_pct;
     const int book_age_ms = side == ShareSide::UP
         ? in.up_book_age_ms : in.down_book_age_ms;
     const double p_side = side == ShareSide::UP
         ? in.conservative_up_probability
         : in.conservative_down_probability;
-    if (!(ask >= cfg.min_price && ask <= cfg.max_price)) return reject("share_price_outside_band");
+    if (!(ask > 0.0 && ask < 1.0)) return reject("share_price_outside_band");
     if (book_age_ms < 0 || book_age_ms > cfg.max_book_age_ms) return reject("book_stale");
     if (!(spread >= 0.0 && spread <= cfg.max_spread_pct)) return reject("spread_too_wide");
     if (!(p_side >= 0.0 && p_side <= 1.0)) return reject("invalid_conservative_probability");
 
-    // Entry value is measured against the current ask. The configured take-profit
-    // is an execution target, not a binary-settlement fair value; comparing a
-    // settlement probability to that exit quote makes almost every valid scalp
-    // signal impossible to admit.
-    const double target_price = ask * (1.0 + cfg.profit_target_pct / 100.0);
-    if (!(target_price > ask && target_price < 1.0)) return reject("take_profit_price_unattainable");
+    // Lead entries are always submitted post-only. Evaluate value at the
+    // resting maker price, not the offer: an ask above the ceiling can still
+    // support a safe bid at or below it. The order request retains the same
+    // ceiling, so the executor cannot chase above this evaluated price band.
+    const double tick = std::isfinite(in.tick_size) && in.tick_size > 0.0
+        ? in.tick_size : 0.01;
+    const double improved_bid = bid > 0.0
+        ? bid + std::max(0, cfg.maker_improve_ticks) * tick
+        : ask - tick;
+    double maker_quote = std::min({improved_bid, ask - tick, cfg.max_price});
+    maker_quote = std::floor(maker_quote / tick + 1e-9) * tick;
+    if (!std::isfinite(maker_quote) || maker_quote < cfg.min_price - 1e-9 ||
+        maker_quote > cfg.max_price + 1e-9 || maker_quote >= ask - 1e-9 ||
+        (bid > 0.0 && maker_quote < bid - 1e-9))
+        return reject("maker_quote_outside_band");
+
+    // Entry value is measured against the intended maker quote. A zero target
+    // means this profile holds the position to settlement.
+    const double target_price = maker_quote * (1.0 + cfg.profit_target_pct / 100.0);
+    if (cfg.profit_target_pct > 0.0 &&
+        !(target_price > maker_quote && target_price < 1.0))
+        return reject("take_profit_price_unattainable");
     const double edge = checkpoint_net_edge(
-        p_side, ask, 0.0, in.fee_exponent);
+        p_side, maker_quote, 0.0, in.fee_exponent);
     if (!std::isfinite(edge) || edge < cfg.min_net_edge_pct / 100.0)
         return reject("entry_net_edge_too_small");
 
@@ -259,15 +396,15 @@ std::optional<WindowBotSignal> WindowBots::lead_lag_entry(
     state.left_rearm_zone = std::abs(lead) > cfg.rearm_bps;
     state.last_direction = trade_direction;
     state.last_signal_ms = in.now_ms;
-    state.entries_at_signal = entries_this_window;
+    state.filled_entries_at_signal = filled_entries_this_window;
     return WindowBotSignal{
-        side, confidence, edge, ask,
-        fmt::format("{} {} move2={:+.2f}bp move5={:+.2f}bp lead={:+.2f}bp oracle2={:+.2f}bp ens={:.3f}/{:.2f} p={:.3f} ask={:.3f} tp={:.3f} entry_edge={:+.2f}pt",
+        side, confidence, edge, maker_quote,
+        fmt::format("{} {} move2={:+.2f}bp move5={:+.2f}bp lead={:+.2f}bp oracle2={:+.2f}bp ens={:.3f}/{:.2f} p={:.3f} ask={:.3f} maker={:.3f} tp={:.3f} entry_edge={:+.2f}pt",
                     coinbase_impulse ? "CB_LEAD" : "MODEL_VALUE",
                     trade_direction > 0 ? "UP" : "DOWN", in.cb_move_2s_bps,
                     in.cb_move_5s_bps, lead, in.oracle_move_2s_bps,
                     in.ensemble_up_probability, in.ensemble_confidence,
-                    p_side, ask, target_price, edge * 100.0)};
+                    p_side, ask, maker_quote, target_price, edge * 100.0)};
 }
 
 std::optional<WindowBotSignal> WindowBots::late_sniper_entry(
@@ -294,17 +431,25 @@ std::optional<WindowBotSignal> WindowBots::late_sniper_entry(
         if (reject_reason) *reject_reason = "outside_entry_window";
         return std::nullopt;
     }
-    if (!in.forecast_ready || !in.cb_fresh || !in.oracle_fresh) {
+    const bool opening_move_mode = cfg.min_open_delta_pct > 0.0;
+    if (!in.oracle_fresh ||
+        (!opening_move_mode && (!in.forecast_ready || !in.cb_fresh))) {
         if (reject_reason) *reject_reason = "forecast_or_reference_stale";
         return std::nullopt;
     }
-    if (!std::isfinite(in.ensemble_up_probability) ||
+    if (opening_move_mode &&
+        (!std::isfinite(in.oracle_delta_pct) ||
+         std::abs(in.oracle_delta_pct) + 1e-12 < cfg.min_open_delta_pct)) {
+        if (reject_reason) *reject_reason = "oracle_open_move_below_threshold";
+        return std::nullopt;
+    }
+    if (!opening_move_mode && (!std::isfinite(in.ensemble_up_probability) ||
         in.ensemble_up_probability < 0.0 || in.ensemble_up_probability > 1.0 ||
         !std::isfinite(in.conditional_up_low) ||
         !std::isfinite(in.conditional_up_high) ||
         in.conditional_up_low < 0.0 || in.conditional_up_low > 1.0 ||
         in.conditional_up_high < 0.0 || in.conditional_up_high > 1.0 ||
-        in.conditional_up_low > in.conditional_up_high) {
+        in.conditional_up_low > in.conditional_up_high)) {
         if (reject_reason) *reject_reason = "invalid_forecast";
         return std::nullopt;
     }
@@ -325,6 +470,7 @@ std::optional<WindowBotSignal> WindowBots::late_sniper_entry(
     const double tick = std::isfinite(in.tick_size) && in.tick_size > 0.0
         ? in.tick_size : 0.01;
     const int improve_ticks = std::max(0, cfg.maker_improve_ticks);
+    const double min_edge = std::max(0.0, cfg.min_net_edge_pct) / 100.0;
     const auto passive_limit = [&](double bid, double ask) {
         if (!std::isfinite(ask) || ask <= 0.0 || ask >= 1.0)
             return 0.0;
@@ -350,6 +496,23 @@ std::optional<WindowBotSignal> WindowBots::late_sniper_entry(
         return std::nullopt;
     }
 
+    if (opening_move_mode) {
+        const bool choose_up = in.oracle_delta_pct > 0.0;
+        const double limit = choose_up ? up_limit : down_limit;
+        if (!(limit > 0.0)) {
+            if (reject_reason) *reject_reason = "oracle_direction_price_outside_band";
+            return std::nullopt;
+        }
+        state.last_signal_ms = in.now_ms;
+        const ShareSide side = choose_up ? ShareSide::UP : ShareSide::DOWN;
+        return WindowBotSignal{
+            side, 0.55, 0.0, limit,
+            fmt::format("LATE_SETTLEMENT_MAKER_ONLY {} oracle_open_move={:+.4f}% "
+                        "t={}s limit={:.3f} band=[{:.2f},{:.2f}]",
+                        choose_up ? "UP" : "DOWN", in.oracle_delta_pct,
+                        in.secs_left, limit, cfg.min_price, cfg.max_price)};
+    }
+
     // Score both passive quotes against the weaker of the independent
     // settlement forecast and the fast ensemble. A late quote is eligible
     // only when this conservative probability clears its price by the
@@ -358,7 +521,6 @@ std::optional<WindowBotSignal> WindowBots::late_sniper_entry(
         in.conditional_up_low, in.ensemble_up_probability);
     const double conservative_down = std::min(
         1.0 - in.conditional_up_high, 1.0 - in.ensemble_up_probability);
-    const double min_edge = std::max(0.0, cfg.min_net_edge_pct) / 100.0;
     const double up_edge = up_in_band
         ? checkpoint_net_edge(conservative_up, up_limit, 0.0, in.fee_exponent)
         : -std::numeric_limits<double>::infinity();
@@ -384,8 +546,10 @@ std::optional<WindowBotSignal> WindowBots::late_sniper_entry(
     return WindowBotSignal{
         side, 0.55 + edge, edge, limit,
         fmt::format("LATE_SETTLEMENT_MAKER_ONLY {} t={}s limit={:.3f} "
-                    "conservative_edge={:.2f}pt band=[{:.2f},{:.2f}]",
+                    "conservative_probability={:.1f}% edge={:.2f}pt "
+                    "band=[{:.2f},{:.2f}]",
                     choose_up ? "UP" : "DOWN", in.secs_left, limit,
+                    (choose_up ? conservative_up : conservative_down) * 100.0,
                     edge * 100.0,
                     cfg.min_price, cfg.max_price)};
 }

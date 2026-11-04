@@ -41,7 +41,9 @@ struct OrderRequest {
     int         maker_cancel_before_close_ms = 3000;
     bool        maker_fixed_price = false; // strategy-owned target; never chase the touch
     double      maker_min_price = 0.0; // optional floor for a passive BUY quote
+    bool        maker_allow_no_ask = false; // only for bounded late-window post-only quotes
     bool        stop_loss_fak_authorized = false; // fixed-source hard stops only; executors re-check the source
+    bool        manual_override_taker_authorized = false; // explicit cockpit force-sell only
     std::int64_t maker_root_deadline_ms = 0; // internal: preserved across replacements
     // Fee model (Polymarket taker fee)
     double      fee_rate = 0.07;    // from strategy.hot.taker_fee_rate

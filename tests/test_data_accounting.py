@@ -48,6 +48,27 @@ class LedgerTests(unittest.TestCase):
         self.assertFalse(r['exits'][0]['matched'])
         self.assertTrue(r['errors'])
 
+    def test_oversell_proceeds_are_not_counted_as_realized_profit(self):
+        buy = self.fill('buy',.5,10)
+        sell = self.fill('sell',.75,12)
+        r = replay_fills([buy,sell])
+        exit_row = r['exits'][0]
+        self.assertAlmostEqual(exit_row['realized_pnl'],2.5)
+        self.assertAlmostEqual(exit_row['matched_proceeds'],7.5)
+        self.assertAlmostEqual(exit_row['unmatched_proceeds'],1.5)
+        self.assertAlmostEqual(exit_row['unmatched_shares'],2)
+        self.assertFalse(r['accounting_complete'])
+        self.assertEqual(r['error_details'][0]['client_order_id'],sell['client_order_id'])
+
+    def test_exit_aggregate_records_last_fill_timestamp(self):
+        buy = self.fill('buy',.5,10)
+        first = self.fill('sell',.6,3,ts=2000)
+        second = {**self.fill('sell',.7,2,ts=3000),
+                  'client_order_id':first['client_order_id']}
+        r = replay_fills([buy,first,second])
+        self.assertEqual(r['exits'][0]['last_ts'],3000)
+        self.assertAlmostEqual(r['exits'][0]['shares'],5)
+
     def test_live_position_survives_process_session_change(self):
         buy = {**self.fill('buy',.4,10,.1),'mode':'live'}
         sell = {**self.fill('sell',1,10),'mode':'live','session_id':'new-process'}
@@ -107,17 +128,15 @@ class DataTests(unittest.TestCase):
             self.assertIn('prediction_basis',row[2])
             db.close()
 
-    def test_market_midpoint_is_primary_and_quote_range_is_bounded(self):
+    def test_primary_forecast_is_independent_of_clob_quotes(self):
         req={'up_bid':.53,'up_ask':.55,'down_bid':.45,'down_ask':.47}
         market=board._market_probability(req)
         quote=board._market_probability_range(req)
         self.assertAlmostEqual(market,.54)
         self.assertLessEqual(quote[0],market)
         self.assertGreaterEqual(quote[1],market)
-        self.assertEqual(board._primary_probability(.71,.61,.82,market,quote),
-                         (market,quote[0],quote[1],'polymarket_midpoint'))
-        self.assertEqual(board._primary_probability(.71,.61,.82,None,None),
-                         (.71,.61,.82,'experimental_settlement_ensemble'))
+        self.assertEqual(board._primary_probability(.71,.61,.82),
+                         (.71,.61,.82,'independent_model'))
 
     def test_lead_lag_alert_requires_fresh_aligned_edge_and_books(self):
         lead=[{'source':'Coinbase','move_bps':8.0,'score':.7,'age_s':1.0}]
@@ -135,7 +154,8 @@ class DataTests(unittest.TestCase):
     def test_snapshot_invalidation_at_rollover_and_stale_refresh(self):
         card = dict(window_open=100000,window_close=400000,model_status='ready',
                     direction='UP',model_edge=.1,conservative_edge=.08,opportunity={'level':'alert'},
-                    alert_candidate={'id':'c:UP'},reference_age_s=2,book_age_s=1)
+                    alert_candidate={'id':'c:UP'},reference_age_s=2,book_age_s=1,
+                    paired_outcome_economics={'available':True,'net_edge_per_pair':.01})
         card['next_window'] = {**card,'provisional':True,'window_open':400000,'window_close':700000}
         original = dict(generated_at=390000,inputs_at=390000,cards=[card])
         r = board.age_board(original,401000)
@@ -144,6 +164,7 @@ class DataTests(unittest.TestCase):
         self.assertEqual(r['cards'][0]['next_window']['model_status'],'awaiting_open_reference')
         self.assertIsNone(r['cards'][0]['opportunity'])
         self.assertIsNone(r['cards'][0]['alert_candidate'])
+        self.assertIsNone(r['cards'][0]['paired_outcome_economics'])
         self.assertEqual(original['cards'][0]['direction'],'UP')
 
     def test_slow_producer_does_not_block_readers(self):
@@ -165,15 +186,9 @@ class DataTests(unittest.TestCase):
                 for thread in service._threads:
                     thread.join(2)
 
-    def test_prediction_refresh_interval_accepts_only_supported_rates(self):
-        service = board.PredictionService(None, None, '/nonexistent', lambda: {}, interval=5)
-        service.set_interval(2)
-        self.assertEqual(service.interval, 2)
-        self.assertTrue(service._refresh_now.is_set())
-        service._refresh_now.clear()
-        service.set_interval(3)
-        self.assertEqual(service.interval, 2)
-        self.assertFalse(service._refresh_now.is_set())
+    def test_prediction_refresh_interval_is_clamped_to_minimum_gap(self):
+        service = board.PredictionService(None, None, '/nonexistent', lambda: {}, interval=.01)
+        self.assertEqual(service.interval, board.MIN_REFRESH_GAP_SECONDS)
 
 
 if __name__ == '__main__':

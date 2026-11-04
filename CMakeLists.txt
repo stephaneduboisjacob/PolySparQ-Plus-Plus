@@ -65,6 +65,7 @@ add_library(vp_core STATIC
     src/engine/tick_buffer.cpp
     src/engine/scalp_manager.cpp
     src/engine/impulse_scalper.cpp
+    src/engine/cross_asset_sync.cpp
     src/engine/window_bots.cpp
     src/engine/predictor.cpp
     src/risk/risk_manager.cpp
@@ -109,9 +110,24 @@ target_link_libraries(polypulse-feedproxy PRIVATE vp_core)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(test-config-data-collection tests/test_config_data_collection.cpp)
+    target_link_libraries(test-config-data-collection PRIVATE vp_core)
+    add_test(NAME config-data-collection-depth COMMAND test-config-data-collection)
+    add_executable(test-prediction-2m-sizing tests/test_prediction_2m_sizing.cpp)
+    target_link_libraries(test-prediction-2m-sizing PRIVATE vp_core)
+    add_test(NAME prediction-2m-usd-sizing COMMAND test-prediction-2m-sizing)
+    add_executable(test-window-bots tests/test_window_bots.cpp)
+    target_link_libraries(test-window-bots PRIVATE vp_core)
+    add_test(NAME window-bots-late-sniper COMMAND test-window-bots)
+    add_executable(test-coinbase-confluence tests/test_coinbase_confluence.cpp)
+    target_link_libraries(test-coinbase-confluence PRIVATE vp_core)
+    add_test(NAME coinbase-confluence-rules COMMAND test-coinbase-confluence)
     add_executable(test-collector-book-snapshot tests/test_collector_book_snapshot.cpp)
     target_link_libraries(test-collector-book-snapshot PRIVATE vp_core)
     add_test(NAME collector-book-snapshot COMMAND test-collector-book-snapshot)
+    add_executable(test-polymarket-trade-side tests/test_polymarket_trade_side.cpp)
+    target_include_directories(test-polymarket-trade-side PRIVATE src)
+    add_test(NAME polymarket-reported-trade-side COMMAND test-polymarket-trade-side)
     add_executable(test-persistence tests/test_persistence.cpp)
     target_link_libraries(test-persistence PRIVATE vp_core)
     add_test(NAME persistence-atomic COMMAND test-persistence)

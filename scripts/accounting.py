@@ -2,8 +2,11 @@
 from decimal import Decimal
 
 
+DUST_SHARES = Decimal('0.01')
+
+
 def replay_fills(fills):
-    positions, exits, errors = {}, {}, []
+    positions, exits, errors, error_details = {}, {}, [], []
     buy = sell = fees = Decimal(0)
     for f in fills:  # caller orders by fill timestamp, then monotonic fill id
         key = (f.get('mode'),f.get('instance'),
@@ -27,20 +30,44 @@ def replay_fills(fills):
             sell += price*shares
             held = p['shares']
             matched = min(shares,held)
+            unmatched = shares-matched
             cost = p['cost']*matched/held if held else Decimal(0)
             allocated_fee = p['entry_fees']*matched/held if held else Decimal(0)
+            matched_exit_fee = fee*matched/shares if shares else Decimal(0)
             e = exits.setdefault(f['client_order_id'], {**f, 'shares':Decimal(0),
-                'gross_proceeds':Decimal(0),'cost_basis':Decimal(0),'entry_cost':Decimal(0),
-                'fees':Decimal(0),'realized_pnl':Decimal(0),'matched':True})
+                'matched_shares':Decimal(0),'unmatched_shares':Decimal(0),
+                'gross_proceeds':Decimal(0),'matched_proceeds':Decimal(0),
+                'unmatched_proceeds':Decimal(0),'cost_basis':Decimal(0),
+                'entry_cost':Decimal(0),'fees':Decimal(0),
+                'unmatched_fees':Decimal(0),'realized_pnl':Decimal(0),
+                'matched':True})
+            e['last_ts'] = f.get('ts')
             e['shares'] += shares
             e['gross_proceeds'] += price*shares
+            e['matched_shares'] += matched
+            e['matched_proceeds'] += price*matched
+            e['unmatched_shares'] += unmatched
+            e['unmatched_proceeds'] += price*unmatched
             e['entry_cost'] += cost
             e['cost_basis'] += cost+allocated_fee
             e['fees'] += fee+allocated_fee
-            e['realized_pnl'] += price*shares-cost-allocated_fee-fee
-            if shares-matched > Decimal('0.000001'):
+            e['unmatched_fees'] += fee-matched_exit_fee
+            # Only attribute realized profit to shares supported by recorded
+            # inventory. The endpoint still exposes the full cash proceeds,
+            # but an oversold exit makes the account incomplete.
+            e['realized_pnl'] += price*matched-cost-allocated_fee-matched_exit_fee
+            if unmatched > DUST_SHARES:
                 e['matched'] = False
-                errors.append('Sell exceeds recorded holdings: '+str(f['client_order_id']))
+                error = 'Sell exceeds recorded holdings: '+str(f['client_order_id'])
+                errors.append(error)
+                error_details.append({
+                    'client_order_id': str(f['client_order_id']),
+                    'instance': f.get('instance'),
+                    'session_id': f.get('session_id'),
+                    'condition_id': f.get('condition_id'),
+                    'token_id': f.get('token_id'),
+                    'unmatched_shares': float(unmatched),
+                })
             p['shares'] -= matched
             p['cost'] -= cost
             p['entry_fees'] -= allocated_fee
@@ -48,6 +75,7 @@ def replay_fills(fills):
             errors.append('Unknown fill direction: '+str(f.get('id')))
     def clean(row):
         return {k:float(v) if isinstance(v,Decimal) else v for k,v in row.items()}
-    return {'positions':[clean(p) for p in positions.values() if p['shares'] > Decimal('0.000001')],
+    return {'positions':[clean(p) for p in positions.values() if p['shares'] > DUST_SHARES],
             'exits':[clean(e) for e in exits.values()], 'buy_value':float(buy),
-            'sell_value':float(sell), 'fees':float(fees), 'errors':errors}
+            'sell_value':float(sell), 'fees':float(fees), 'errors':errors,
+            'error_details':error_details,'accounting_complete':not errors}

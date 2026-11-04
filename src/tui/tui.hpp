@@ -116,6 +116,9 @@ struct WatchlistRow {
     // per-second realized vol from the oracle tick series + last-move z.
     double      oracle_vol_per_sec = 0;
     double      oracle_jump_z      = 0;
+    int         oracle_vol_samples = 0;
+    double      oracle_candle_age_sec = -1;
+    double      oracle_reference_age_sec = -1;
     // ── Futures liquidation pressure (Phase 4.1) ──
     // Net notional (USD) of last-30s forceOrder events. Negative = SELL
     // liquidations dominating (downward pressure). 0 = no futures feed.

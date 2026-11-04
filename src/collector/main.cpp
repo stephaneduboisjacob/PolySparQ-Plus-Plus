@@ -206,13 +206,16 @@ int main(int argc, char** argv) {
                     last = now_ms;
                     double bb = snapshot->best_bid;
                     double ba = snapshot->best_ask;
+                    const std::int64_t captured_ms =
+                        vp::Clock::wall_ns() / 1'000'000LL;
                     persist_q.push([pg, cid=cit->second, tok=bu.token_id,
                                     side=sit->second, bb, ba,
                                     bids=std::move(snapshot->bids),
                                     asks=std::move(snapshot->asks),
-                                    levels=cfg.data_collection.book_snapshot_levels]() noexcept {
+                                    levels=cfg.data_collection.book_snapshot_levels,
+                                    captured_ms]() noexcept {
                         pg->insert_book_snapshot(cid, tok, side, bids, asks,
-                                                 bb, ba, levels);
+                                                 bb, ba, levels, captured_ms);
                     }, vp::PersistSource::PolymarketBookSnapshot);
                 }
             },
@@ -220,10 +223,27 @@ int main(int argc, char** argv) {
             (const vp::PolymarketMD::TradeUpdate& tu) {
                 if (cstate.disk_full.load() ||
                     !cfg.data_collection.pm_trades_enabled) return;
-                persist_q.push([pg, tu]() noexcept {
-                    pg->insert_pm_trade(tu.condition_id, tu.token_id,
-                                        tu.side_label,
-                                        tu.price, tu.size, tu.exchange_ms);
+                const std::int64_t received_ms =
+                    vp::Clock::wall_ns() / 1'000'000LL;
+                std::string condition_id;
+                vp::ShareSide side = vp::ShareSide::UP;
+                {
+                    std::lock_guard<std::mutex> lock(cstate.mu);
+                    const auto condition = cstate.token_to_cond.find(tu.token_id);
+                    const auto outcome = cstate.token_to_side.find(tu.token_id);
+                    if (condition == cstate.token_to_cond.end() ||
+                        outcome == cstate.token_to_side.end() ||
+                        (!tu.condition_id.empty() &&
+                         tu.condition_id != condition->second)) return;
+                    condition_id = condition->second;
+                    side = outcome->second;
+                }
+                persist_q.push([pg, tu, received_ms,
+                                condition_id=std::move(condition_id), side]() noexcept {
+                    pg->insert_pm_trade(condition_id, tu.token_id, side,
+                                        tu.price, tu.size, tu.exchange_ms, received_ms,
+                                        tu.size_available, std::nullopt,
+                                        tu.reported_side);
                 }, vp::PersistSource::PolymarketPublicTrade);
             });
         pm_md->start();

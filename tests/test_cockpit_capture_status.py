@@ -18,7 +18,8 @@ class CaptureProfileStatusTests(unittest.TestCase):
             profile = Path(temp) / "cb.toml"
             profile.write_text(
                 '[data_collection]\nbook_snapshots_enabled = false\n'
-                'pm_trades_enabled = true\n\n[wallet]\nprivate_key = "never return"\n',
+                'book_snapshot_levels = 3\npm_trades_enabled = true\n\n'
+                '[wallet]\nprivate_key = "never return"\n',
                 encoding="utf-8")
             with patch.object(cockpit, "bot_status_detail", return_value={
                     "instances_running": ["cb", "inactive", "../../invalid"]}), \
@@ -30,11 +31,14 @@ class CaptureProfileStatusTests(unittest.TestCase):
         by_name = {row["instance"]: row for row in profiles}
         self.assertEqual(by_name["cb"]["book_snapshots_enabled"], False)
         self.assertEqual(by_name["cb"]["pm_trades_enabled"], True)
+        self.assertEqual(by_name["cb"]["book_snapshot_levels"], 3)
         self.assertTrue(by_name["cb"]["config_readable"])
         self.assertIsNone(by_name["inactive"]["book_snapshots_enabled"])
+        self.assertIsNone(by_name["inactive"]["book_snapshot_levels"])
         self.assertFalse(by_name["inactive"]["config_readable"])
         self.assertEqual(set(by_name["cb"]), {
-            "instance", "config_readable", "book_snapshots_enabled", "pm_trades_enabled"})
+            "instance", "config_readable", "book_snapshots_enabled",
+            "book_snapshot_levels", "pm_trades_enabled"})
 
     def test_empty_active_fleet_reports_no_profiles(self):
         with patch.object(cockpit, "bot_status_detail", return_value={"instances_running": []}):
@@ -58,6 +62,7 @@ class CaptureProfileStatusTests(unittest.TestCase):
                 refreshed = cockpit.api_v3_capture_profiles()
                 self.assertEqual(status.call_count, 2)
         self.assertEqual(refreshed[0]["book_snapshots_enabled"], True)
+        self.assertEqual(refreshed[0]["book_snapshot_levels"], 20)
 
     def test_malformed_profile_is_unknown_not_a_server_error(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -69,15 +74,19 @@ class CaptureProfileStatusTests(unittest.TestCase):
                 row = cockpit.api_v3_capture_profiles()[0]
         self.assertFalse(row["config_readable"])
         self.assertIsNone(row["book_snapshots_enabled"])
+        self.assertIsNone(row["book_snapshot_levels"])
         self.assertIsNone(row["pm_trades_enabled"])
 
     def test_feed_endpoint_includes_capture_profiles(self):
         capture = [{"instance": "cb", "config_readable": True,
                     "book_snapshots_enabled": False, "pm_trades_enabled": False}]
+        storage = {"available": True, "relations": [], "sampled_ms": 123}
         with patch.object(cockpit, "q", return_value=[]), \
-             patch.object(cockpit, "api_v3_capture_profiles", return_value=capture):
+             patch.object(cockpit, "api_v3_capture_profiles", return_value=capture), \
+             patch.object(cockpit, "api_v3_market_storage", return_value=storage):
             result = cockpit.api_v3_feeds()
         self.assertEqual(result["capture_profiles"], capture)
+        self.assertEqual(result["market_storage"], storage)
         self.assertEqual(result["feeds"], [])
 
 

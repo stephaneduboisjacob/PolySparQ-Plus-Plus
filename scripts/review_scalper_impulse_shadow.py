@@ -20,9 +20,10 @@ EVENT_TYPES = [
     "scalper_impulse_markout",
     "scalper_impulse_outcome",
 ]
+EVENT_ID_BATCH_SIZE = 20_000
 
 
-def recent_event_id_floor(hours: float) -> int:
+def recent_event_id_bounds(hours: float) -> tuple[int, int]:
     """Find a conservative ID boundary for recent events using the PK index.
 
     ``window_events`` is append-only and has no timestamp index. Filtering the
@@ -38,7 +39,7 @@ def recent_event_id_floor(hours: float) -> int:
         "SELECT id, ts FROM vp.window_events ORDER BY id DESC LIMIT 1", one=True
     )
     if not latest or latest["ts"] < cutoff:
-        return 0
+        return 0, 0
 
     low, high = 1, int(latest["id"])
     while low < high:
@@ -56,7 +57,65 @@ def recent_event_id_floor(hours: float) -> int:
         else:
             high = row_id
 
-    return max(0, low - 10_000)
+    return max(0, low - 10_000), int(latest["id"])
+
+
+def latest_session_id(
+    id_floor: int, max_id: int, hours: float, instance: str
+) -> str:
+    """Find the newest matching session without scanning the whole event table."""
+    upper = max_id + 1
+    while upper > id_floor:
+        lower = max(id_floor, upper - EVENT_ID_BATCH_SIZE)
+        row = cockpit.q(
+            """SELECT payload->>'session_id' AS session_id
+               FROM vp.window_events
+               WHERE id >= %s AND id < %s
+                 AND ts >= now() - %s::interval
+                 AND event_type = ANY(%s)
+                 AND payload->>'instance' = %s
+                 AND NULLIF(payload->>'session_id', '') IS NOT NULL
+               ORDER BY id DESC
+               LIMIT 1""",
+            (lower, upper, f"{hours} hours", EVENT_TYPES, instance),
+            one=True,
+        )
+        if row:
+            return str(row["session_id"])
+        upper = lower
+    return ""
+
+
+def fetch_recent_events(
+    id_floor: int, max_id: int, hours: float, instance: str = "",
+    session: str = "",
+) -> list[dict[str, object]]:
+    """Fetch the time window in bounded primary-key ranges.
+
+    ``window_events`` is a large append-only table with only its primary-key
+    index. A single query over a long lookback can exceed the cockpit's
+    statement timeout even when constrained by the event ID floor. Small ID
+    ranges keep each read bounded; event payloads are still filtered by the
+    same timestamp, type, instance, and session conditions.
+    """
+    records: list[dict[str, object]] = []
+    for lower in range(id_floor, max_id + 1, EVENT_ID_BATCH_SIZE):
+        upper = min(max_id + 1, lower + EVENT_ID_BATCH_SIZE)
+        sql = """SELECT id, condition_id, ts, event_type, payload
+                 FROM vp.window_events
+                 WHERE id >= %s AND id < %s
+                   AND ts >= now() - %s::interval
+                   AND event_type = ANY(%s)"""
+        args: list[object] = [lower, upper, f"{hours} hours", EVENT_TYPES]
+        if instance:
+            sql += " AND payload->>'instance' = %s"
+            args.append(instance)
+        if session:
+            sql += " AND payload->>'session_id' = %s"
+            args.append(session)
+        sql += " ORDER BY id"
+        records.extend(cockpit.q(sql, tuple(args)))
+    return records
 
 
 def payload_dict(value: object) -> dict[str, object]:
@@ -192,36 +251,16 @@ def main() -> None:
     if args.latest_session and not args.instance:
         parser.error("--latest-session requires --instance")
 
-    id_floor = recent_event_id_floor(args.hours)
+    id_floor, max_id = recent_event_id_bounds(args.hours)
 
     if args.latest_session:
-        latest = cockpit.q(
-            """SELECT payload->>'session_id' AS session_id
-               FROM vp.window_events
-               WHERE id >= %s AND ts >= now() - %s::interval
-                 AND event_type = ANY(%s)
-                 AND payload->>'instance' = %s
-                 AND NULLIF(payload->>'session_id', '') IS NOT NULL
-               ORDER BY ts DESC, id DESC
-               LIMIT 1""",
-            (id_floor, f"{args.hours} hours", EVENT_TYPES, args.instance),
-            one=True,
+        args.session = latest_session_id(
+            id_floor, max_id, args.hours, args.instance
         )
-        args.session = str(latest["session_id"]) if latest else ""
 
-    event_sql = """SELECT condition_id, ts, event_type, payload
-                   FROM vp.window_events
-                   WHERE id >= %s AND ts >= now() - %s::interval
-                     AND event_type = ANY(%s)"""
-    event_args: list[object] = [id_floor, f"{args.hours} hours", EVENT_TYPES]
-    if args.instance:
-        event_sql += " AND payload->>'instance' = %s"
-        event_args.append(args.instance)
-    if args.session:
-        event_sql += " AND payload->>'session_id' = %s"
-        event_args.append(args.session)
-    event_sql += " ORDER BY ts, id"
-    records = cockpit.q(event_sql, tuple(event_args))
+    records = fetch_recent_events(
+        id_floor, max_id, args.hours, args.instance, args.session
+    )
     sample_counts: dict[tuple[str, str, str, int], int] = defaultdict(int)
     candidates: dict[str, dict[str, object]] = {}
     outcomes: dict[str, dict[str, object]] = {}

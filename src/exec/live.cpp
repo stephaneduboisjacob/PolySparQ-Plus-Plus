@@ -507,6 +507,16 @@ OrderResult LiveExecutor::submit(
 
     OrderResult r;
     r.client_order_id = req.intent_id.empty() ? vp::core::make_uuid() : req.intent_id;
+    if (req.source == "COINBASE_CONFLUENCE_PAPER_ENTRY" ||
+        req.source == "COINBASE_CONFLUENCE_PAPER_MAKER_ENTRY") {
+        r.status = "rejected";
+        r.terminal = true;
+        r.reject_class = OrderResult::RejectClass::RiskCap;
+        r.reject_reason =
+            "Coinbase confluence challenger is PAPER-only; LIVE submission is forbidden";
+        spdlog::error("live: blocked PAPER-only Coinbase confluence entry");
+        return r;
+    }
     if (!journal_.before_submit || !journal_.before_submit(req, r.client_order_id)) {
         r.status = "rejected";
         r.terminal = true;
@@ -527,11 +537,16 @@ OrderResult LiveExecutor::submit(
     const bool authorized_stop_fak =
         req.stop_loss_fak_authorized &&
         (req.source == "CB_LEAD_SCALP_HARD_STOP" ||
-         req.source == "LATE_SETTLEMENT_HARD_STOP") &&
+         req.source == "LATE_SETTLEMENT_HARD_STOP" ||
+         req.source == "CB_PRICE_STOP_HYBRID_FAK") &&
         req.dir == OrderDir::Sell;
-    if (req.execution_mode == ExecutionMode::Taker && !authorized_stop_fak) {
+    const bool authorized_manual_force_sell =
+        req.manual_override_taker_authorized &&
+        req.source == "HUMAN_OVERRIDE" && req.dir == OrderDir::Sell;
+    if (req.execution_mode == ExecutionMode::Taker &&
+        !authorized_stop_fak && !authorized_manual_force_sell) {
         r.reject_class = OrderResult::RejectClass::RiskCap;
-        r.reject_reason = "taker execution disabled except for an authorized tick hard stop";
+        r.reject_reason = "taker execution disabled except for an authorized hard stop or cockpit force sell";
         goto done;
     }
 
@@ -581,6 +596,10 @@ OrderResult LiveExecutor::submit(
         {
             std::lock_guard<std::mutex> lk(open_mu_);
             for (const auto& [_, o] : open_orders_) {
+                // Resting sells reserve inventory, not buying power. Counting
+                // them against the deployment cap can reject safe new entries
+                // even though no additional collateral is committed.
+                if (o.req.dir != OrderDir::Buy) continue;
                 const double n = o.price * std::max(0.0, o.original_shares - o.matched_shares);
                 open_notional += n;
                 if (o.req.condition_id == req.condition_id) open_in_window += n;
@@ -632,7 +651,13 @@ OrderResult LiveExecutor::submit(
 
         if (req.dir == OrderDir::Buy) {
             auto a = book->best_ask();
-            if (a.price <= 0 || a.size <= 0) {
+            const bool has_ask = a.price > 0 && a.size > 0;
+            const auto b = book->best_bid();
+            const bool allow_askless_maker =
+                req.maker_allow_no_ask &&
+                (req.source == "LATE_SETTLEMENT_ENTRY" ||
+                 req.source == "PENNEY_HUSTLER_ENTRY") && maker_order;
+            if (!has_ask && !(allow_askless_maker && b.price > 0 && b.size > 0)) {
                 r.reject_class = OrderResult::RejectClass::NoBook;
                 r.reject_reason = "no asks on book";
                 goto done;
@@ -646,16 +671,16 @@ OrderResult LiveExecutor::submit(
                 goto done;
             }
             if (maker_order) {
-                const auto b = book->best_bid();
                 exec_price = b.price > 0
                     ? b.price + std::max(0, req.maker_improve_ticks) * real_tick
                     : a.price - real_tick;
                 // Guarantee passivity locally; postOnly=true is the venue-side
                 // invariant in case the book moves between this read and POST.
-                exec_price = std::min(exec_price, a.price - real_tick);
+                if (has_ask)
+                    exec_price = std::min(exec_price, a.price - real_tick);
                 if (req.limit_price > 0) exec_price = std::min(exec_price, req.limit_price);
                 exec_price = std::floor(exec_price / real_tick + 1e-9) * real_tick;
-                if (exec_price <= 0 || exec_price >= a.price - 1e-9) {
+                if (exec_price <= 0 || (has_ask && exec_price >= a.price - 1e-9)) {
                     r.reject_class = OrderResult::RejectClass::PostOnlyCross;
                     r.reject_reason = "no passive maker price available";
                     goto done;
@@ -668,6 +693,11 @@ OrderResult LiveExecutor::submit(
                     goto done;
                 }
             } else {
+                if (!has_ask) {
+                    r.reject_class = OrderResult::RejectClass::NoBook;
+                    r.reject_reason = "no asks on book";
+                    goto done;
+                }
             // Marketable FAK: price a couple ticks THROUGH the best ask so the
             // order actually crosses if the book moved a tick since the signal.
             // A FAK priced exactly at best_ask misses the moment the top level
@@ -1525,7 +1555,12 @@ std::size_t LiveExecutor::maintain_open_orders(
                     target = std::ceil(target / tick - 1e-9) * tick;
                     target = std::min(target, 1.0 - tick);
                 }
-                reprice = target > 0 && std::fabs(target - price) >= tick * 0.5;
+                const bool inside_buy_price_floor =
+                    snapshot.req.dir != OrderDir::Buy ||
+                    snapshot.req.maker_min_price <= 0.0 ||
+                    target + 1e-9 >= snapshot.req.maker_min_price;
+                reprice = target > 0 && inside_buy_price_floor &&
+                    std::fabs(target - price) >= tick * 0.5;
             }
         }
         if (!closing && !expired && !reprice) continue;
@@ -1547,8 +1582,13 @@ std::size_t LiveExecutor::maintain_open_orders(
         ++changes;
 
         const double remaining = std::max(0.0, original - matched);
+        const bool authorized_cb_stop =
+            snapshot.req.source == "CB_PRICE_STOP" &&
+            snapshot.req.stop_loss_fak_authorized &&
+            snapshot.req.dir == OrderDir::Sell;
         const bool fallback = expired && !closing &&
-                              snapshot.req.execution_mode == ExecutionMode::Hybrid;
+                              snapshot.req.execution_mode == ExecutionMode::Hybrid &&
+                              (snapshot.req.dir == OrderDir::Buy || authorized_cb_stop);
         const bool allow_replacement = may_replace();
         if ((reprice || fallback) && remaining > 1e-8 && !allow_replacement) {
             spdlog::critical("live: maker replacement/fallback suppressed by order uncertainty halt");

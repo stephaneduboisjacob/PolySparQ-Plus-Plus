@@ -28,6 +28,26 @@ api_secret = ""
 api_passphrase = ""
 starting_balance_usd = 0.0
 
+[strategy.hot]
+entry_order_mode = "maker"
+# PAPER maker quotes stay open until a strategy/operator/market cancellation.
+maker_max_age_ms = 0
+# Coinbase-only confluence replay candidate; strictly PAPER-only when enabled.
+coinbase_confluence_paper_enabled = false
+coinbase_confluence_rule = "strike_window" # strike_window, window_move (5m), strike_momentum (15m), strike_window_momentum (5m)
+coinbase_confluence_horizon_s = 0 # 0 = 5m and 15m; otherwise 300 or 900
+coinbase_confluence_min_elapsed_pct = 20 # first eligible checkpoint: 20, 40, 60, or 80
+coinbase_confluence_order_usd = 4.65 # gross, leaves room for taker fees under $5
+coinbase_confluence_maker_enabled = false # separate PAPER-only fixed-share maker path
+coinbase_confluence_order_shares = 20.0 # exact requested shares when maker mode is enabled
+coinbase_confluence_maker_offset_ticks = 1 # post this many ticks below the observed ask
+coinbase_confluence_maker_max_age_ms = 5500 # cancel if no qualifying public print arrives
+coinbase_confluence_max_price = 0.90
+coinbase_confluence_min_move_bps = 10.0
+coinbase_confluence_min_momentum_10s_bps = 0.25 # required by 15m and strike_window_momentum
+coinbase_confluence_max_spread = 0.08
+coinbase_confluence_max_observation_age_ms = 1500
+
 [data_collection]
 # Enable only the datasets you intend to store; high-frequency data can grow quickly.
 oracle_ticks_enabled = false
@@ -36,4 +56,6 @@ coinbase_ticks_enabled = false
 window_events_enabled = false
 features_enabled = false
 book_snapshots_enabled = false
+# Levels saved per side when snapshots are enabled: 0 keeps BBO/summary only; 20 keeps full depth.
+book_snapshot_levels = 20
 pm_trades_enabled = false

@@ -150,6 +150,24 @@ public:
         return it->second.size();
     }
 
+    // Number of observations in the trailing interval. This lets a caller
+    // gate a rolling estimate on recent source coverage, rather than on the
+    // total number of samples retained in the ring buffer.
+    std::size_t recent_sample_count(const std::string& asset,
+                                    double lookback_secs) const {
+        if (!std::isfinite(lookback_secs) || lookback_secs < 0.0) return 0;
+        std::lock_guard lk(mu_);
+        auto it = data_.find(asset);
+        if (it == data_.end() || it->second.empty()) return 0;
+        const auto& buf = it->second;
+        const double cutoff = buf.back().first - lookback_secs;
+        auto first = std::lower_bound(buf.begin(), buf.end(), cutoff,
+            [](const std::pair<double, double>& sample, double ts) {
+                return sample.first < ts;
+            });
+        return static_cast<std::size_t>(std::distance(first, buf.end()));
+    }
+
     // Rate of change over the last lookback_secs (% per minute).
     // Returns 0.0 if insufficient data (need at least 2 samples spanning
     // at least 1 second).

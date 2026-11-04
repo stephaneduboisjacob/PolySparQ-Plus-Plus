@@ -3,7 +3,9 @@
 #include "engine/candle_store.hpp"
 #include "engine/forecast.hpp"
 #include "tui/tui.hpp"
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
 
 namespace vp::engine {
@@ -14,20 +16,41 @@ namespace vp::engine {
 inline void populate_reference_forecasts(vp::WatchlistRow& row, const vp::PmMarket& market,
                                   const vp::core::OracleBuffer& oracle,
                                   const vp::core::OracleBuffer& coinbase,
-                                  const vp::engine::CandleStore& candles, int64_t now_ms) {
+                                  const vp::engine::CandleStore& candles, int64_t now_ms,
+                                  bool coinbase_only = false) {
     struct CachedVol { int64_t ts = 0; uint64_t revision = 0; vp::engine::VolatilityEstimate vol; };
     thread_local std::unordered_map<std::string,CachedVol> cache;
     thread_local const vp::engine::CandleStore* cache_owner = nullptr;
     if (cache_owner != &candles) { cache.clear(); cache_owner = &candles; }
-    auto bars = candles.copy_recent_bars(market.asset,vp::engine::Timeframe::OneMinute,1);
     auto& item = cache[market.asset];
-    const int64_t ts = bars.empty() ? 0 : bars.back().ts_ms;
-    const auto revision = candles.closed_revision();
-    if (ts != item.ts || revision != item.revision) {
-        item.ts = ts;
-        item.revision = revision;
-        item.vol = vp::engine::estimate_volatility(candles.copy_recent_closes(
-            market.asset,vp::engine::Timeframe::OneMinute,1441));
+    int64_t ts = 0;
+    if (coinbase_only) {
+        // Binance is not a price or volatility input in this mode. Use the
+        // direct Chainlink spot stream, which is the settlement venue's USD
+        // reference, as the realized-volatility source. The forecast spot is
+        // adjusted to live Coinbase below.
+        const double oracle_ts = oracle.latest_timestamp(market.asset);
+        ts = oracle_ts > 0.0 ? static_cast<int64_t>(oracle_ts * 1000.0) : 0;
+        if (ts != item.ts) {
+            const double per_sec = oracle.realized_vol_per_sec(market.asset, 60);
+            const int samples = static_cast<int>(std::min<std::size_t>(
+                oracle.recent_sample_count(market.asset, 60),
+                static_cast<std::size_t>(std::numeric_limits<int>::max())));
+            item.ts = ts;
+            item.revision = 0;
+            item.vol = {per_sec * std::sqrt(60.0), samples};
+        }
+    } else {
+        auto bars = candles.copy_recent_bars(market.asset,
+            vp::engine::Timeframe::OneMinute, 1);
+        ts = bars.empty() ? 0 : bars.back().ts_ms;
+        const auto revision = candles.closed_revision();
+        if (ts != item.ts || revision != item.revision) {
+            item.ts = ts;
+            item.revision = revision;
+            item.vol = vp::engine::estimate_volatility(candles.copy_recent_closes(
+                market.asset,vp::engine::Timeframe::OneMinute,1441));
+        }
     }
     const auto key = market.reference_price_key();
     const double spot_ts = oracle.latest_timestamp(key);
@@ -37,9 +60,14 @@ inline void populate_reference_forecasts(vp::WatchlistRow& row, const vp::PmMark
     row.oracle_vol_per_sec = item.vol.sigma_minute / std::sqrt(60.0);
     row.oracle_jump_z = oracle.last_move_z(key, 60);
     const double age = now_ms/1000.0-spot_ts;
+    row.oracle_vol_samples = item.vol.samples;
+    row.oracle_candle_age_sec = coinbase_only
+        ? (ts ? std::max(0.0, now_ms / 1000.0 - ts / 1000.0) : -1.0)
+        : (ts ? (now_ms-ts-60000)/1000.0 : -1);
+    row.oracle_reference_age_sec = age;
     vp::engine::ForecastInput in{spot,row.coin_open_price,
         (market.window_close_ms-now_ms)/1000.0,item.vol.sigma_minute,age,
-        ts ? (now_ms-ts-60000)/1000.0 : -1,item.vol.samples,market.settlement_window_s};
+        row.oracle_candle_age_sec,item.vol.samples,market.settlement_window_s};
     row.reference_forecast = vp::engine::forecast(in);
     const double cb_age = now_ms/1000.0-coinbase.latest_timestamp(market.asset);
     const double cb_open = coinbase.lookup_at_or_before(market.asset,market.window_open_ms/1000.0);
@@ -52,6 +80,7 @@ inline void populate_reference_forecasts(vp::WatchlistRow& row, const vp::PmMark
     // sample even though current Coinbase and Chainlink are live and aligned;
     // keep the fast lead forecast available in that case.
     row.cb_data_ready = cb_live_aligned && cb_open > 0;
+    row.fast_forecast = {};
     if (!row.cb_data_ready) row.cb_delta_pct = 0;
     // Transport only the Coinbase move SINCE the latest official spot update.
     // Comparing a Coinbase window-open spot with a TWAP strike adds a false basis.

@@ -263,6 +263,33 @@ double Pg::oracle_price_at_or_before(const std::string& asset,
     }
 }
 
+double Pg::coinbase_price_at_or_before(const std::string& asset,
+                                       std::int64_t ts_ms) noexcept {
+    if (asset.empty() || ts_ms <= 0) return 0.0;
+    try {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        pqxx::work tx{*conn_};
+        auto rs = tx.exec_params(
+            "SELECT price FROM vp.coinbase_ticks "
+            "WHERE asset = $1 AND ts <= to_timestamp($2 / 1000.0) "
+            "AND ts >= to_timestamp($2 / 1000.0) - interval '10 seconds' "
+            "ORDER BY ts DESC LIMIT 1",
+            asset, (long long)ts_ms);
+        tx.commit();
+        if (rs.empty()) return 0.0;
+        return rs[0][0].as<double>(0.0);
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("coinbase_price_at_or_before", e.what());
+        spdlog::warn("pg coinbase_price_at_or_before({}, {}): {}",
+                     asset, ts_ms, e.what());
+        return 0.0;
+    } catch (const std::exception& e) {
+        spdlog::warn("pg coinbase_price_at_or_before({}, {}): {}",
+                     asset, ts_ms, e.what());
+        return 0.0;
+    }
+}
+
 std::vector<Pg::CandleRow> Pg::load_recent_candles(const std::string& symbol,
                                                     int limit) noexcept {
     std::vector<CandleRow> out;
@@ -445,10 +472,11 @@ void Pg::insert_book_snapshot(const std::string& cid, const std::string& token_i
                               ShareSide side,
                               const std::vector<PriceLevel>& bids,
                               const std::vector<PriceLevel>& asks,
-                              double best_bid, double best_ask) noexcept {
+                              double best_bid, double best_ask,
+                              int max_levels, std::int64_t captured_ms) noexcept {
     try {
         std::lock_guard<std::mutex> lock(conn_mu_);
-        // Build JSONB arrays for top-20 levels
+        // Build JSONB arrays for the configured depth (clamped to top 20).
         auto levels_json = [](const std::vector<PriceLevel>& v, int lim) {
             std::string s = "[";
             int n = std::min<int>(lim, (int)v.size());
@@ -458,8 +486,9 @@ void Pg::insert_book_snapshot(const std::string& cid, const std::string& token_i
             }
             return s + "]";
         };
-        std::string bids_j = levels_json(bids, 20);
-        std::string asks_j = levels_json(asks, 20);
+        const int level_limit = std::clamp(max_levels, 0, 20);
+        std::string bids_j = levels_json(bids, level_limit);
+        std::string asks_j = levels_json(asks, level_limit);
         double mid = (best_bid > 0 && best_ask > 0) ? 0.5*(best_bid+best_ask) : 0;
         double spread = (best_bid > 0 && best_ask > 0) ? (best_ask - best_bid) : 0;
         double bsz = bids.empty() ? 0 : bids[0].size;
@@ -470,15 +499,17 @@ void Pg::insert_book_snapshot(const std::string& cid, const std::string& token_i
             "INSERT INTO vp.pm_book_snapshots "
             "(ts, condition_id, token_id, side_label, bids, asks, "
             " best_bid, best_ask, midprice, spread, imbalance_top1) "
-            "VALUES (now(), $1, $2, $3::vp.share_side, $4::jsonb, $5::jsonb, "
-            " $6, $7, $8, $9, $10)",
+            "VALUES (CASE WHEN $11::bigint > 0 "
+            "THEN to_timestamp($11::double precision / 1000.0) ELSE now() END, "
+            "$1, $2, $3::vp.share_side, $4::jsonb, $5::jsonb, "
+            "$6, $7, $8, $9, $10)",
             cid, token_id, side_to_pg(side),
             bids_j, asks_j,
             best_bid > 0 ? std::optional<double>(best_bid) : std::optional<double>{},
             best_ask > 0 ? std::optional<double>(best_ask) : std::optional<double>{},
             mid > 0 ? std::optional<double>(mid) : std::optional<double>{},
             spread > 0 ? std::optional<double>(spread) : std::optional<double>{},
-            std::optional<double>(imb1));
+            std::optional<double>(imb1), captured_ms);
         tx.commit();
     } catch (const pqxx::broken_connection& e) {
         recover_disconnected("insert_book_snapshot", e.what());
@@ -490,17 +521,31 @@ void Pg::insert_book_snapshot(const std::string& cid, const std::string& token_i
 void Pg::insert_pm_trade(const std::string& cid, const std::string& token_id,
                          ShareSide side, double price, double size,
                          std::int64_t exchange_ms,
-                         std::optional<OrderDir> aggressor) noexcept {
+                         std::int64_t received_ms,
+                         bool size_available,
+                         std::optional<OrderDir> aggressor,
+                         std::optional<OrderDir> reported_side) noexcept {
     try {
         std::lock_guard<std::mutex> lock(conn_mu_);
         pqxx::work tx{*conn_};
         tx.exec_params(
             "INSERT INTO vp.pm_trades "
-            "(ts, condition_id, token_id, side_label, price, size, aggressor) "
-            "VALUES (to_timestamp($1/1000.0), $2, $3, $4::vp.share_side, $5, $6, "
-            "NULLIF($7, '')::vp.order_side)",
-            (long long)exchange_ms, cid, token_id, side_to_pg(side), price, size,
-            aggressor ? dir_to_pg(*aggressor) : std::string{});
+            "(ts, condition_id, token_id, side_label, price, size, aggressor, raw) "
+            "VALUES (to_timestamp(COALESCE(NULLIF($1::bigint,0), "
+            "NULLIF($2::bigint,0), "
+            "(EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint)/1000.0), "
+            "$3, $4, $5::vp.share_side, $6, $7, NULLIF($8, '')::vp.order_side, "
+            "jsonb_build_object('reported_side', NULLIF($9, ''), "
+            "'size_available', $10::boolean, "
+            "'exchange_ts_ms', NULLIF($1::bigint,0), "
+            "'received_ts_ms', NULLIF($2::bigint,0), "
+            "'timestamp_source', CASE WHEN $1::bigint > 0 THEN 'exchange' "
+            "WHEN $2::bigint > 0 THEN 'receive' ELSE 'database' END))",
+            (long long)exchange_ms, (long long)received_ms,
+            cid, token_id, side_to_pg(side), price, size,
+            aggressor ? dir_to_pg(*aggressor) : std::string{},
+            reported_side ? dir_to_pg(*reported_side) : std::string{},
+            size_available);
         tx.commit();
     } catch (const pqxx::broken_connection& e) {
         recover_disconnected("insert_pm_trade", e.what());
@@ -687,6 +732,43 @@ void Pg::insert_window_event(const std::string& condition_id,
     }
 }
 
+void Pg::insert_cross_asset_sync_sample(
+        const std::string& observer_instance,
+        const CrossAssetSyncSample& sample,
+        const std::string& payload_json) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        pqxx::work tx{*conn_};
+        tx.exec_params(
+            "INSERT INTO vp.cross_asset_sync_samples "
+            "(sample_slot_ms,observer_instance,condition_id,asset,horizon_seconds,"
+            "window_open_ms,window_close_ms,eligible_assets,quote_eligible,candidate,"
+            "up_probability,peer_median_up,divergence_pct,side,ask_price,ask_depth_usd,"
+            "fee_rate,fee_exponent,estimated_fee_per_share,estimated_net_proxy_gap_per_share,"
+            "reason,payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,"
+            "NULLIF($14,''),$15,$16,$17,$18,$19,$20,$21,$22::jsonb) "
+            "ON CONFLICT (condition_id,sample_slot_ms) DO NOTHING",
+            static_cast<long long>(sample.sample_slot_ms),
+            observer_instance.empty() ? "default" : observer_instance,
+            sample.condition_id, sample.asset, sample.horizon_seconds,
+            static_cast<long long>(sample.window_open_ms),
+            static_cast<long long>(sample.window_close_ms), sample.eligible_assets,
+            sample.quote_eligible, sample.candidate,
+            sample.has_probability ? std::optional<double>(sample.up_probability) : std::nullopt,
+            sample.has_peer_comparison ? std::optional<double>(sample.peer_median_up) : std::nullopt,
+            sample.has_peer_comparison ? std::optional<double>(sample.divergence_pct) : std::nullopt,
+            sample.side, sample.ask_price, sample.ask_depth_usd, sample.fee_rate,
+            sample.fee_exponent, sample.estimated_taker_fee_per_share,
+            sample.estimated_net_proxy_gap_per_share, sample.reason, payload_json);
+        tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("insert_cross_asset_sync_sample", e.what());
+        spdlog::warn("pg insert_cross_asset_sync_sample failed: {}", e.what());
+    } catch (const std::exception& e) {
+        spdlog::warn("pg insert_cross_asset_sync_sample failed: {}", e.what());
+    }
+}
+
 void Pg::insert_feature(const std::string& condition_id,
                         const std::string& payload_json,
                         int schema_ver) noexcept {
@@ -751,6 +833,67 @@ std::vector<Pg::RawFillRow> Pg::load_fills_for_session(const std::string& mode) 
     return out;
 }
 
+std::vector<Pg::RawFillRow> Pg::load_previous_session_fills(
+    const std::string& mode, const std::string& current_session_id) noexcept {
+    std::vector<RawFillRow> out;
+    try {
+        std::lock_guard<std::mutex> lock(conn_mu_);
+        pqxx::work tx{*conn_};
+        // A hold-to-settlement PAPER restart must carry every still-open position
+        // into the new process, including positions carried through more than one
+        // restart. Net inventory identifies which condition/token/side groups are
+        // still open; replay their fills in order to reconstruct cost and fees.
+        auto res = tx.exec_params(
+            "WITH open_positions AS ("
+            "  SELECT o.condition_id, o.token_id, o.side_label"
+            "    FROM vp.fills f"
+            "    JOIN vp.orders o ON o.client_order_id = f.client_order_id"
+            "   WHERE o.mode = $1::vp.trade_mode"
+            "     AND COALESCE(o.instance,'') = $2"
+            "     AND o.session_id IS DISTINCT FROM $3"
+            "   GROUP BY o.condition_id, o.token_id, o.side_label"
+            "  HAVING SUM(CASE WHEN o.direction::text='buy'"
+            "                  THEN f.size_shares ELSE -f.size_shares END) > 0.000001"
+            ")"
+            " SELECT o.condition_id, o.token_id, o.side_label::text, o.direction::text,"
+            "        f.price, f.size_shares, f.fee_usd,"
+            "        COALESCE(m.asset,'') AS asset,"
+            "        COALESCE(m.horizon_seconds,0) AS horizon_s,"
+            "        COALESCE(EXTRACT(EPOCH FROM m.window_close)::bigint*1000,0) AS wc_ms"
+            "   FROM vp.fills f"
+            "   JOIN vp.orders o ON o.client_order_id = f.client_order_id"
+            "   JOIN open_positions p ON p.condition_id=o.condition_id"
+            "     AND p.token_id=o.token_id AND p.side_label=o.side_label"
+            "   LEFT JOIN pm_markets m ON m.condition_id = o.condition_id"
+            "  WHERE o.mode = $1::vp.trade_mode"
+            "    AND COALESCE(o.instance,'') = $2"
+            "    AND o.session_id IS DISTINCT FROM $3"
+            "  ORDER BY f.ts ASC",
+            mode_to_pg(mode), instance_label_, current_session_id);
+        for (const auto& row : res) {
+            RawFillRow r;
+            r.condition_id    = row[0].c_str();
+            r.token_id        = row[1].c_str();
+            r.side_label      = row[2].c_str();
+            r.direction       = row[3].c_str();
+            r.price           = row[4].as<double>(0.0);
+            r.shares          = row[5].as<double>(0.0);
+            r.fee_usd         = row[6].as<double>(0.0);
+            r.asset           = row[7].c_str();
+            r.horizon_s       = row[8].as<int>(0);
+            r.window_close_ms = row[9].as<int64_t>(0);
+            out.push_back(std::move(r));
+        }
+        tx.commit();
+    } catch (const pqxx::broken_connection& e) {
+        recover_disconnected("load_previous_session_fills", e.what());
+        spdlog::warn("pg load_previous_session_fills failed: {}", e.what());
+    } catch (const std::exception& e) {
+        spdlog::warn("pg load_previous_session_fills failed: {}", e.what());
+    }
+    return out;
+}
+
 std::vector<Pg::RawOpenOrderRow> Pg::load_open_orders_for_instance() noexcept {
     std::vector<RawOpenOrderRow> out;
     try {
@@ -799,6 +942,7 @@ std::vector<Pg::RawOpenOrderRow> Pg::load_open_orders_for_instance() noexcept {
     }
     return out;
 }
+
 std::optional<Pg::PredictionGateSnapshot> Pg::load_prediction_gate_snapshot(
         const std::string& condition_id) noexcept {
     try {
@@ -836,7 +980,6 @@ std::optional<Pg::PredictionGateSnapshot> Pg::load_prediction_gate_snapshot(
         return std::nullopt;
     }
 }
-
 } // namespace vp
 
 std::string vp::Pg::market_reference_key(const std::string& cid) noexcept {

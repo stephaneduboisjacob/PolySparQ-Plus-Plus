@@ -42,6 +42,9 @@ struct PolymarketConfig {
     bool block_15m = false;
 };
 struct BinanceConfig {
+    // Keep the historical default for existing profiles, while allowing
+    // Coinbase-only PAPER experiments to avoid opening a Binance connection.
+    bool                     enabled = true;
     std::string              ws_url;
     std::vector<std::string> streams;
     // Binance USDT-M futures WS (forceOrder liquidation stream, Phase 4.1).
@@ -244,6 +247,9 @@ struct StrategyHot {
     int    smart_stop_max_votes     = 0;     // stop-loss only fires when votes <= this
     double hard_stop_pct            = 60.0;  // catastrophe floor: stop regardless of votes
     int    ride_to_settle_secs      = 150;   // skip profit-take this close to settle when votes >= 2
+    // When enabled, block automated sells and keep positions for settlement.
+    // Operator initiated sells and an explicitly enabled portfolio kill remain available.
+    bool   hold_to_settlement       = false;
     double oracle_max_token_price   = 0.80;   // max token price to enter in oracle-lag mode
     // Assets to skip entirely for new entries (e.g. ["SOL"]). Settlement backtest
     // showed SOL is a consistent net loser (too volatile for the oracle-lag edge).
@@ -382,13 +388,77 @@ struct StrategyHot {
     // net-edge guards before they can place a maker quote.
     bool   lead_lag_scalp_model_value_enabled = true;
     int    lead_lag_scalp_horizon_s = 0;       // 0 = both supported windows
-    // Require a fresh, exact-window snapshot from the Predictions page before automated buys.
+    // Coinbase-only historical confluence challenger. This path is hard-gated
+    // to PAPER and selects one validated Coinbase rule: strike/window,
+    // 5m window move, or 15m strike plus aligned 10s momentum.
+    bool   coinbase_confluence_paper_enabled = false;
+    std::string coinbase_confluence_rule = "strike_window";
+    int    coinbase_confluence_horizon_s = 0;   // 0 = 5m and 15m
+    int    coinbase_confluence_min_elapsed_pct = 20; // 20, 40, 60, or 80
+    double coinbase_confluence_order_usd = 4.65;
+    // Isolated PAPER maker challenger. When enabled, use an exact share count
+    // and quote passively below the observed ask; taker profiles keep the
+    // legacy USD clip above.
+    bool   coinbase_confluence_maker_enabled = false;
+    double coinbase_confluence_order_shares = 0.0;
+    int    coinbase_confluence_maker_offset_ticks = 1;
+    int    coinbase_confluence_maker_max_age_ms = 5500; // PAPER quote lifetime: 0.5s to 120s
+    double coinbase_confluence_max_price = 0.90;
+    double coinbase_confluence_min_move_bps = 10.0;
+    double coinbase_confluence_min_momentum_10s_bps = 0.25;
+    double coinbase_confluence_max_spread = 0.08;
+    int    coinbase_confluence_max_observation_age_ms = 1500;
+    // Gate automatic BUY orders against the live Predictions-tab forecast for
+    // the exact current asset/window. A missing, stale, or conflicting page
+    // snapshot blocks the order when this is enabled.
     bool   prediction_page_gate_enabled = false;
     double prediction_page_min_chance_pct = 60.0;
-    // PAPER-only fixed-share maker entry at T-120s on supported 5m crypto markets.
+    // Isolated PAPER-only entry at the Predictions-tab side on supported
+    // 5m/15m windows. A positive USD amount takes precedence and is converted
+    // to a share quantity rounded down to 0.01; zero preserves the legacy
+    // fixed-share setting below. Taker routing is separately opt-in and scoped
+    // to this prediction entry path.
     bool   prediction_2m_enabled = false;
+    bool   prediction_2m_taker_enabled = false;
+    double prediction_2m_order_usd = 0.0;
     double prediction_2m_order_shares = 15.0;
+    int    prediction_2m_trigger_secs_5m = 120;
+    int    prediction_2m_trigger_secs_15m = 120;
     int    prediction_2m_trigger_grace_ms = 750;
+    double prediction_2m_min_price = 0.55;
+    // Hard ceiling for this path. max_entry_share_price is a generic entry
+    // filter and was not applied here; without a dedicated cap the bot could
+    // quote at 0.97 for a three-cent payout. Keep this well below the generic
+    // hard_share_price_ceil unless an operator has measured edge there.
+    double prediction_2m_max_price = 0.85;
+    double prediction_2m_take_profit_price = 0.0; // fixed PAPER post-only sell target; 0 disables
+    // Passive quote placement and optional value gate. The entry limit sits
+    // this many ticks below the executable ask. A positive minimum edge enables
+    // the model edge check; zero disables that check entirely.
+    int    prediction_2m_maker_offset_ticks = 1;
+    double prediction_2m_min_edge_pct = 3.0;
+    // Optional PAPER-only contrarian experiment. A filled PREDICTION_2M_ENTRY
+    // maker buy is used as the trigger; the bot then takes the opposite side at
+    // its executable ask. The entry clip is deliberately small because the
+    // signal is expected to lose; the fade order is the value bet. Keep this
+    // off unless the opposite-side quotes are being measured.
+    bool   prediction_2m_fade_enabled = false;
+    double prediction_2m_fade_order_usd = 0.0;
+    double prediction_2m_fade_max_price = 0.40;
+    // Isolated PAPER-only fixed-price window-maker experiment. The side is
+    // selected from current official spot versus the window opening strike.
+    bool   penney_hustler_enabled = false;
+    double penney_hustler_order_shares = 100.0;
+    double penney_hustler_entry_price = 0.60;
+    double penney_hustler_take_profit_price = 0.80;
+    int    penney_hustler_min_secs_left_5m = 1;
+    int    penney_hustler_max_secs_left_5m = 60;
+    int    penney_hustler_min_secs_left_15m = 1;
+    int    penney_hustler_max_secs_left_15m = 60;
+    // Legacy common maximum, retained as the fallback when a horizon-specific
+    // maximum is omitted from an older profile.
+    int    penney_hustler_max_secs_left = 60;
+    int    penney_hustler_cancel_before_close_ms = 1000;
     double lead_lag_scalp_min_signal_confidence = 0.55;
     double lead_lag_scalp_min_model_confidence = 0.20;
     double lead_lag_scalp_min_cb_move_bps = 0.5;
@@ -407,9 +477,15 @@ struct StrategyHot {
     int    lead_lag_scalp_flatten_secs = 30;
     int    lead_lag_scalp_flatten_5m_secs = 90;
     int    lead_lag_scalp_flatten_15m_secs = 270;
-    int    lead_lag_scalp_max_entries_per_window = 24;
+    int    lead_lag_scalp_max_entries_per_window = 24; // distinct filled entry orders
     double lead_lag_scalp_order_usd = 5.0;
+    // Optional exact share quantity for lead-lag maker entries; 0 keeps
+    // dollar-based sizing (same convention as late_window_sniper_order_shares).
+    double lead_lag_scalp_order_shares = 0.0;
     double lead_lag_scalp_profit_target_pct = 15.0;
+    // Fixed post-only sell target for acquired lead-lag inventory; 0 keeps the
+    // percentage target derived from profit_target_pct.
+    double lead_lag_scalp_take_profit_price = 0.0;
     double lead_lag_scalp_hard_stop_pct = 12.0;
     int    lead_lag_scalp_hard_stop_ticks = 0; // 0 disables the entry-relative tick stop
     bool   lead_lag_scalp_reversal_exit_enabled = true;
@@ -428,10 +504,17 @@ struct StrategyHot {
     int    late_window_sniper_max_secs_15m = 45;
     double late_window_sniper_min_price = 0.82;
     double late_window_sniper_max_price = 0.97;
+    // When positive, require this absolute Chainlink move from window open and
+    // select UP/DOWN by its sign instead of the forecast-value signal.
+    double late_window_sniper_min_open_delta_pct = 0.0;
     double late_window_sniper_min_net_edge_pct = 3.0;
     double late_window_sniper_order_usd = 5.0;
+    // Optional exact share quantity; 0 keeps dollar-based sizing.
+    double late_window_sniper_order_shares = 0.0;
     int    late_window_sniper_max_entries_per_window = 5;
     int    late_window_sniper_hard_stop_ticks = 0; // 0 disables the entry-relative emergency stop
+    double late_window_sniper_stop_price = 0.0; // absolute bid stop; uses authorized taker FAK
+    double late_window_sniper_take_profit_price = 0.0; // fixed post-only sell target; 0 disables
 
     // Isolated, paper-only implementation of the reference engine's simple
     // 5m simulation strategy: fixed 5-share UP maker entry, maker target,
@@ -595,6 +678,14 @@ struct StrategyHot {
     bool   adaptive_require_predictor_agree = true;     // predictor must agree with oracle direction
     double adaptive_oracle_agree_margin = 0.015;       // predictor_up margin for oracle agreement
     bool   adaptive_use_wpred_payload = true;           // store full predictor payload in order jsonb
+
+    // Shadow-only cross-asset divergence research. This observer emits
+    // auditable snapshots and has no connection to order generation.
+    bool   cross_asset_sync_shadow_enabled = false;
+    double cross_asset_sync_min_divergence_pct = 4.0;  // probability percentage points
+    int    cross_asset_sync_max_book_age_ms = 1500;
+    double cross_asset_sync_max_spread = 0.08;          // absolute share price
+    double cross_asset_sync_min_touch_depth_usd = 5.0;
 };
 struct RiskConfig {
     double max_order_usd             = 5.00;   // $5 per order cap
@@ -636,8 +727,9 @@ struct DataCollectionConfig {
     bool  window_events_enabled      = true;
     bool  features_enabled           = true;
     int   features_write_interval_ms = 1000;  // ms between predictor feature snapshots
-    bool  book_snapshots_enabled     = true;  // vp.pm_book_snapshots — 26 GB/6wk, disable to save disk
-    bool  pm_trades_enabled          = true;  // vp.pm_trades — 9 GB, disable to save disk
+    bool  book_snapshots_enabled     = true;  // vp.pm_book_snapshots — high-volume; disable to save disk
+    int   book_snapshot_levels       = 20;    // levels stored per side; 0 keeps BBO/summary fields only
+    bool  pm_trades_enabled          = true;  // vp.pm_trades — high-volume, disable to save disk
     // Log rotation - prevents disk fill crashes
     int   log_max_bytes              = 100'000'000;  // 100 MB per file
     int   log_keep_files             = 5;            // rotate 5 files

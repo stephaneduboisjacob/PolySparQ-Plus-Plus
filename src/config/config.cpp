@@ -140,6 +140,7 @@ Config Config::load(const std::string& path) {
     if (c.polymarket.block_15m)
         c.polymarket.blocked_horizons_seconds.push_back(900);
     auto* bn = tbl["binance"].as_table();
+    c.binance.enabled = get_or<bool>(bn, "enabled", true);
     c.binance.ws_url = get_or<std::string>(bn, "ws_url", "");
     c.binance.futures_ws_url = get_or<std::string>(bn, "futures_ws_url", "");
     if (bn) {
@@ -157,6 +158,10 @@ Config Config::load(const std::string& path) {
     c.llm.parallel_max    = get_or<int>        (lm, "parallel_max",    10);
     c.llm.api_key_file    = get_or<std::string>(lm, "api_key_file",    std::string{});
     c.llm.enabled         = get_or<bool>       (lm, "enabled",         true);
+    // PAPER maker quotes have no age timeout. LIVE keeps its previous bounded
+    // default unless the operator configures a different value explicitly.
+    if (c.runtime.mode == TradeMode::Paper)
+        c.strategy.maker_max_age_ms = 0;
     auto* st = tbl["strategy"]["hot"].as_table();
     auto& s = c.strategy;
     s.max_entry_share_price   = get_or<double>(st, "max_entry_share_price",   s.max_entry_share_price);
@@ -414,6 +419,7 @@ Config Config::load(const std::string& path) {
     s.smart_stop_max_votes      = get_or<int>   (st, "smart_stop_max_votes",      s.smart_stop_max_votes);
     s.hard_stop_pct             = get_or<double>(st, "hard_stop_pct",             s.hard_stop_pct);
     s.ride_to_settle_secs       = get_or<int>   (st, "ride_to_settle_secs",       s.ride_to_settle_secs);
+    s.hold_to_settlement        = get_or<bool>  (st, "hold_to_settlement",        s.hold_to_settlement);
     s.oracle_max_token_price  = get_or<double>(st, "oracle_max_token_price",  s.oracle_max_token_price);
     s.blocked_assets.clear();
     if (st) {
@@ -512,16 +518,102 @@ Config Config::load(const std::string& path) {
     s.lead_lag_scalp_model_value_enabled = get_or<bool>(
         st, "lead_lag_scalp_model_value_enabled", s.lead_lag_scalp_model_value_enabled);
     s.lead_lag_scalp_horizon_s = get_or<int>(st, "lead_lag_scalp_horizon_s", s.lead_lag_scalp_horizon_s);
+    s.coinbase_confluence_paper_enabled = get_or<bool>(
+        st, "coinbase_confluence_paper_enabled", s.coinbase_confluence_paper_enabled);
+    s.coinbase_confluence_rule = get_or<std::string>(
+        st, "coinbase_confluence_rule", s.coinbase_confluence_rule);
+    s.coinbase_confluence_horizon_s = get_or<int>(
+        st, "coinbase_confluence_horizon_s", s.coinbase_confluence_horizon_s);
+    s.coinbase_confluence_min_elapsed_pct = get_or<int>(
+        st, "coinbase_confluence_min_elapsed_pct",
+        s.coinbase_confluence_min_elapsed_pct);
+    s.coinbase_confluence_order_usd = get_or<double>(
+        st, "coinbase_confluence_order_usd", s.coinbase_confluence_order_usd);
+    s.coinbase_confluence_maker_enabled = get_or<bool>(
+        st, "coinbase_confluence_maker_enabled",
+        s.coinbase_confluence_maker_enabled);
+    s.coinbase_confluence_order_shares = get_or<double>(
+        st, "coinbase_confluence_order_shares",
+        s.coinbase_confluence_order_shares);
+    s.coinbase_confluence_maker_offset_ticks = get_or<int>(
+        st, "coinbase_confluence_maker_offset_ticks",
+        s.coinbase_confluence_maker_offset_ticks);
+    s.coinbase_confluence_maker_max_age_ms = get_or<int>(
+        st, "coinbase_confluence_maker_max_age_ms",
+        s.coinbase_confluence_maker_max_age_ms);
+    s.coinbase_confluence_max_price = get_or<double>(
+        st, "coinbase_confluence_max_price", s.coinbase_confluence_max_price);
+    s.coinbase_confluence_min_move_bps = get_or<double>(
+        st, "coinbase_confluence_min_move_bps", s.coinbase_confluence_min_move_bps);
+    s.coinbase_confluence_min_momentum_10s_bps = get_or<double>(
+        st, "coinbase_confluence_min_momentum_10s_bps",
+        s.coinbase_confluence_min_momentum_10s_bps);
+    s.coinbase_confluence_max_spread = get_or<double>(
+        st, "coinbase_confluence_max_spread", s.coinbase_confluence_max_spread);
+    s.coinbase_confluence_max_observation_age_ms = get_or<int>(
+        st, "coinbase_confluence_max_observation_age_ms",
+        s.coinbase_confluence_max_observation_age_ms);
     s.prediction_page_gate_enabled = get_or<bool>(
         st, "prediction_page_gate_enabled", s.prediction_page_gate_enabled);
     s.prediction_page_min_chance_pct = get_or<double>(
         st, "prediction_page_min_chance_pct", s.prediction_page_min_chance_pct);
     s.prediction_2m_enabled = get_or<bool>(
         st, "prediction_2m_enabled", s.prediction_2m_enabled);
+    s.prediction_2m_taker_enabled = get_or<bool>(
+        st, "prediction_2m_taker_enabled", s.prediction_2m_taker_enabled);
+    s.prediction_2m_order_usd = get_or<double>(
+        st, "prediction_2m_order_usd", s.prediction_2m_order_usd);
     s.prediction_2m_order_shares = get_or<double>(
         st, "prediction_2m_order_shares", s.prediction_2m_order_shares);
+    s.prediction_2m_trigger_secs_5m = get_or<int>(
+        st, "prediction_2m_trigger_secs_5m", s.prediction_2m_trigger_secs_5m);
+    s.prediction_2m_trigger_secs_15m = get_or<int>(
+        st, "prediction_2m_trigger_secs_15m", s.prediction_2m_trigger_secs_15m);
     s.prediction_2m_trigger_grace_ms = get_or<int>(
         st, "prediction_2m_trigger_grace_ms", s.prediction_2m_trigger_grace_ms);
+    s.prediction_2m_min_price = get_or<double>(
+        st, "prediction_2m_min_price", s.prediction_2m_min_price);
+    s.prediction_2m_max_price = get_or<double>(
+        st, "prediction_2m_max_price", s.prediction_2m_max_price);
+    s.prediction_2m_take_profit_price = get_or<double>(
+        st, "prediction_2m_take_profit_price",
+        s.prediction_2m_take_profit_price);
+    s.prediction_2m_maker_offset_ticks = get_or<int>(
+        st, "prediction_2m_maker_offset_ticks", s.prediction_2m_maker_offset_ticks);
+    s.prediction_2m_min_edge_pct = get_or<double>(
+        st, "prediction_2m_min_edge_pct", s.prediction_2m_min_edge_pct);
+    s.prediction_2m_fade_enabled = get_or<bool>(
+        st, "prediction_2m_fade_enabled", s.prediction_2m_fade_enabled);
+    s.prediction_2m_fade_order_usd = get_or<double>(
+        st, "prediction_2m_fade_order_usd", s.prediction_2m_fade_order_usd);
+    s.prediction_2m_fade_max_price = get_or<double>(
+        st, "prediction_2m_fade_max_price", s.prediction_2m_fade_max_price);
+    s.penney_hustler_enabled = get_or<bool>(
+        st, "penney_hustler_enabled", s.penney_hustler_enabled);
+    s.penney_hustler_order_shares = get_or<double>(
+        st, "penney_hustler_order_shares", s.penney_hustler_order_shares);
+    s.penney_hustler_entry_price = get_or<double>(
+        st, "penney_hustler_entry_price", s.penney_hustler_entry_price);
+    s.penney_hustler_take_profit_price = get_or<double>(
+        st, "penney_hustler_take_profit_price",
+        s.penney_hustler_take_profit_price);
+    s.penney_hustler_max_secs_left = get_or<int>(
+        st, "penney_hustler_max_secs_left", s.penney_hustler_max_secs_left);
+    s.penney_hustler_min_secs_left_5m = get_or<int>(
+        st, "penney_hustler_min_secs_left_5m",
+        s.penney_hustler_min_secs_left_5m);
+    s.penney_hustler_max_secs_left_5m = get_or<int>(
+        st, "penney_hustler_max_secs_left_5m",
+        s.penney_hustler_max_secs_left);
+    s.penney_hustler_min_secs_left_15m = get_or<int>(
+        st, "penney_hustler_min_secs_left_15m",
+        s.penney_hustler_min_secs_left_15m);
+    s.penney_hustler_max_secs_left_15m = get_or<int>(
+        st, "penney_hustler_max_secs_left_15m",
+        s.penney_hustler_max_secs_left);
+    s.penney_hustler_cancel_before_close_ms = get_or<int>(
+        st, "penney_hustler_cancel_before_close_ms",
+        s.penney_hustler_cancel_before_close_ms);
     s.lead_lag_scalp_min_signal_confidence = get_or<double>(
         st, "lead_lag_scalp_min_signal_confidence", s.lead_lag_scalp_min_signal_confidence);
     s.lead_lag_scalp_min_model_confidence = get_or<double>(
@@ -561,7 +653,11 @@ Config Config::load(const std::string& path) {
         st, "lead_lag_scalp_flatten_15m_secs", default_flatten_15m);
     s.lead_lag_scalp_max_entries_per_window = get_or<int>(st, "lead_lag_scalp_max_entries_per_window", s.lead_lag_scalp_max_entries_per_window);
     s.lead_lag_scalp_order_usd = get_or<double>(st, "lead_lag_scalp_order_usd", s.lead_lag_scalp_order_usd);
+    s.lead_lag_scalp_order_shares = get_or<double>(
+        st, "lead_lag_scalp_order_shares", s.lead_lag_scalp_order_shares);
     s.lead_lag_scalp_profit_target_pct = get_or<double>(st, "lead_lag_scalp_profit_target_pct", s.lead_lag_scalp_profit_target_pct);
+    s.lead_lag_scalp_take_profit_price = get_or<double>(
+        st, "lead_lag_scalp_take_profit_price", s.lead_lag_scalp_take_profit_price);
     s.lead_lag_scalp_hard_stop_pct = get_or<double>(st, "lead_lag_scalp_hard_stop_pct", s.lead_lag_scalp_hard_stop_pct);
     s.lead_lag_scalp_hard_stop_ticks = get_or<int>(st, "lead_lag_scalp_hard_stop_ticks", s.lead_lag_scalp_hard_stop_ticks);
     s.lead_lag_scalp_reversal_exit_enabled = get_or<bool>(st, "lead_lag_scalp_reversal_exit_enabled", s.lead_lag_scalp_reversal_exit_enabled);
@@ -580,11 +676,20 @@ Config Config::load(const std::string& path) {
         st, "late_window_sniper_max_secs_15m", s.late_window_sniper_max_secs);
     s.late_window_sniper_min_price = get_or<double>(st, "late_window_sniper_min_price", s.late_window_sniper_min_price);
     s.late_window_sniper_max_price = get_or<double>(st, "late_window_sniper_max_price", s.late_window_sniper_max_price);
+    s.late_window_sniper_min_open_delta_pct = get_or<double>(
+        st, "late_window_sniper_min_open_delta_pct", s.late_window_sniper_min_open_delta_pct);
     s.late_window_sniper_min_net_edge_pct = get_or<double>(st, "late_window_sniper_min_net_edge_pct", s.late_window_sniper_min_net_edge_pct);
     s.late_window_sniper_order_usd = get_or<double>(st, "late_window_sniper_order_usd", s.late_window_sniper_order_usd);
+    s.late_window_sniper_order_shares = get_or<double>(
+        st, "late_window_sniper_order_shares", s.late_window_sniper_order_shares);
     s.late_window_sniper_max_entries_per_window = get_or<int>(st, "late_window_sniper_max_entries_per_window", s.late_window_sniper_max_entries_per_window);
     s.late_window_sniper_hard_stop_ticks = get_or<int>(
         st, "late_window_sniper_hard_stop_ticks", s.late_window_sniper_hard_stop_ticks);
+    s.late_window_sniper_stop_price = get_or<double>(
+        st, "late_window_sniper_stop_price", s.late_window_sniper_stop_price);
+    s.late_window_sniper_take_profit_price = get_or<double>(
+        st, "late_window_sniper_take_profit_price",
+        s.late_window_sniper_take_profit_price);
     s.simulation_strategy_enabled = get_or<bool>(
         st, "simulation_strategy_enabled", s.simulation_strategy_enabled);
     s.momentum_scalp_enabled        = get_or<bool>  (st, "momentum_scalp_enabled",         s.momentum_scalp_enabled);
@@ -695,7 +800,30 @@ Config Config::load(const std::string& path) {
     s.adaptive_require_predictor_agree = get_or<bool>(st, "adaptive_require_predictor_agree", s.adaptive_require_predictor_agree);
     s.adaptive_oracle_agree_margin  = get_or<double>(st, "adaptive_oracle_agree_margin",  s.adaptive_oracle_agree_margin);
     s.adaptive_use_wpred_payload    = get_or<bool>  (st, "adaptive_use_wpred_payload",     s.adaptive_use_wpred_payload);
+    s.cross_asset_sync_shadow_enabled = get_or<bool>(
+        st, "cross_asset_sync_shadow_enabled", s.cross_asset_sync_shadow_enabled);
+    s.cross_asset_sync_min_divergence_pct = get_or<double>(
+        st, "cross_asset_sync_min_divergence_pct", s.cross_asset_sync_min_divergence_pct);
+    s.cross_asset_sync_max_book_age_ms = get_or<int>(
+        st, "cross_asset_sync_max_book_age_ms", s.cross_asset_sync_max_book_age_ms);
+    s.cross_asset_sync_max_spread = get_or<double>(
+        st, "cross_asset_sync_max_spread", s.cross_asset_sync_max_spread);
+    s.cross_asset_sync_min_touch_depth_usd = get_or<double>(
+        st, "cross_asset_sync_min_touch_depth_usd", s.cross_asset_sync_min_touch_depth_usd);
+    if (!std::isfinite(s.cross_asset_sync_min_divergence_pct) ||
+        s.cross_asset_sync_min_divergence_pct < 0.0 ||
+        s.cross_asset_sync_min_divergence_pct > 50.0 ||
+        s.cross_asset_sync_max_book_age_ms < 100 ||
+        s.cross_asset_sync_max_book_age_ms > 30000 ||
+        !std::isfinite(s.cross_asset_sync_max_spread) ||
+        s.cross_asset_sync_max_spread <= 0.0 || s.cross_asset_sync_max_spread > 1.0 ||
+        !std::isfinite(s.cross_asset_sync_min_touch_depth_usd) ||
+        s.cross_asset_sync_min_touch_depth_usd < 0.0 ||
+        s.cross_asset_sync_min_touch_depth_usd > 100000.0)
+        throw std::runtime_error("invalid cross-asset sync shadow thresholds");
 
+    // Predictor-mode entries are gated in rules; lead/lag model-value checks
+    // continue to use per-market forecasts independently of that entry mode.
     if (s.lead_lag_scalp_enabled) {
         if (s.lead_lag_scalp_horizon_s != 0 &&
             s.lead_lag_scalp_horizon_s != 300 &&
@@ -722,60 +850,158 @@ Config Config::load(const std::string& path) {
             !(s.lead_lag_scalp_min_price >= 0.03 && s.lead_lag_scalp_min_price < s.lead_lag_scalp_max_price && s.lead_lag_scalp_max_price <= 0.97) ||
             !(s.lead_lag_scalp_max_spread_pct > 0.0 && s.lead_lag_scalp_max_spread_pct <= 100.0) ||
             s.lead_lag_scalp_max_book_age_ms < 100 || s.lead_lag_scalp_max_book_age_ms > 10000 ||
-            s.lead_lag_scalp_stop_entry_secs < 15 || s.lead_lag_scalp_stop_entry_secs >= 900 ||
-            s.lead_lag_scalp_stop_entry_5m_secs < 15 || s.lead_lag_scalp_stop_entry_5m_secs >= 300 ||
-            s.lead_lag_scalp_stop_entry_15m_secs < 15 || s.lead_lag_scalp_stop_entry_15m_secs >= 900 ||
+            s.lead_lag_scalp_stop_entry_secs < 1 || s.lead_lag_scalp_stop_entry_secs >= 900 ||
+            s.lead_lag_scalp_stop_entry_5m_secs < 1 || s.lead_lag_scalp_stop_entry_5m_secs >= 300 ||
+            s.lead_lag_scalp_stop_entry_15m_secs < 1 || s.lead_lag_scalp_stop_entry_15m_secs >= 900 ||
             (s.lead_lag_scalp_max_secs_remaining_5m != 0 &&
              (s.lead_lag_scalp_max_secs_remaining_5m <= s.lead_lag_scalp_stop_entry_5m_secs ||
               s.lead_lag_scalp_max_secs_remaining_5m >= 300)) ||
             (s.lead_lag_scalp_max_secs_remaining_15m != 0 &&
              (s.lead_lag_scalp_max_secs_remaining_15m <= s.lead_lag_scalp_stop_entry_15m_secs ||
               s.lead_lag_scalp_max_secs_remaining_15m >= 900)) ||
-            s.lead_lag_scalp_flatten_secs <= 0 ||
-            s.lead_lag_scalp_flatten_5m_secs < 15 ||
-            s.lead_lag_scalp_flatten_5m_secs > s.lead_lag_scalp_stop_entry_5m_secs ||
-            s.lead_lag_scalp_flatten_15m_secs < 15 ||
-            s.lead_lag_scalp_flatten_15m_secs > s.lead_lag_scalp_stop_entry_15m_secs ||
+            s.lead_lag_scalp_flatten_secs < 0 ||
+            (s.lead_lag_scalp_flatten_5m_secs != 0 &&
+             (s.lead_lag_scalp_flatten_5m_secs < 1 ||
+              s.lead_lag_scalp_flatten_5m_secs > s.lead_lag_scalp_stop_entry_5m_secs)) ||
+            (s.lead_lag_scalp_flatten_15m_secs != 0 &&
+             (s.lead_lag_scalp_flatten_15m_secs < 1 ||
+              s.lead_lag_scalp_flatten_15m_secs > s.lead_lag_scalp_stop_entry_15m_secs)) ||
             s.lead_lag_scalp_max_entries_per_window < 1 || s.lead_lag_scalp_max_entries_per_window > 100 ||
             !(s.lead_lag_scalp_order_usd > 0.0) ||
-            !(s.lead_lag_scalp_profit_target_pct >= 1.0 && s.lead_lag_scalp_profit_target_pct <= 100.0) ||
+            !std::isfinite(s.lead_lag_scalp_order_shares) ||
+            s.lead_lag_scalp_order_shares < 0.0 ||
+            !(s.lead_lag_scalp_profit_target_pct >= 0.0 && s.lead_lag_scalp_profit_target_pct <= 100.0) ||
+            !(s.lead_lag_scalp_take_profit_price == 0.0 ||
+              (std::isfinite(s.lead_lag_scalp_take_profit_price) &&
+               s.lead_lag_scalp_take_profit_price > s.lead_lag_scalp_max_price &&
+               s.lead_lag_scalp_take_profit_price < 1.0)) ||
             !(s.lead_lag_scalp_hard_stop_pct >= 0.0 && s.lead_lag_scalp_hard_stop_pct <= 90.0) ||
             s.lead_lag_scalp_hard_stop_ticks < 0 || s.lead_lag_scalp_hard_stop_ticks > 1000 ||
             !(s.lead_lag_scalp_rearm_bps >= 0.0 && s.lead_lag_scalp_rearm_bps < s.lead_lag_scalp_min_cb_lead_bps))
             throw std::runtime_error("invalid Coinbase lead/lag scalp timing, edge, sizing, price, or risk settings");
-        if (!s.predictor_mode)
-            throw std::runtime_error("Coinbase lead/lag scalp requires predictor_mode=true for independent model confirmation");
     }
     if (!(s.prediction_page_min_chance_pct >= 0.0 &&
           s.prediction_page_min_chance_pct <= 100.0))
         throw std::runtime_error("prediction_page_min_chance_pct must be 0..100");
-    if (!std::isfinite(s.prediction_2m_order_shares) ||
+    if (!std::isfinite(s.prediction_2m_order_usd) ||
+        s.prediction_2m_order_usd < 0.0 ||
+        !std::isfinite(s.prediction_2m_order_shares) ||
         s.prediction_2m_order_shares <= 0.0 ||
+        !std::isfinite(s.prediction_2m_min_price) ||
+        s.prediction_2m_min_price <= 0.0 || s.prediction_2m_min_price >= 1.0 ||
+        !std::isfinite(s.prediction_2m_max_price) ||
+        s.prediction_2m_max_price <= s.prediction_2m_min_price ||
+        s.prediction_2m_max_price >= 1.0 ||
+        !std::isfinite(s.prediction_2m_take_profit_price) ||
+        s.prediction_2m_take_profit_price < 0.0 ||
+        s.prediction_2m_take_profit_price >= 1.0 ||
+        s.prediction_2m_trigger_secs_5m < 1 ||
+        s.prediction_2m_trigger_secs_5m >= 300 ||
+        s.prediction_2m_trigger_secs_15m < 1 ||
+        s.prediction_2m_trigger_secs_15m >= 900 ||
         s.prediction_2m_trigger_grace_ms < 0 ||
-        s.prediction_2m_trigger_grace_ms > 2000)
-        throw std::runtime_error("invalid prediction_2m sizing or trigger grace");
+        s.prediction_2m_trigger_grace_ms > 2000 ||
+        s.prediction_2m_maker_offset_ticks < 0 ||
+        s.prediction_2m_maker_offset_ticks > 50 ||
+        !std::isfinite(s.prediction_2m_min_edge_pct) ||
+        s.prediction_2m_min_edge_pct < 0.0 ||
+        s.prediction_2m_min_edge_pct > 50.0 ||
+        !std::isfinite(s.prediction_2m_fade_order_usd) ||
+        s.prediction_2m_fade_order_usd < 0.0 ||
+        !std::isfinite(s.prediction_2m_fade_max_price) ||
+        s.prediction_2m_fade_max_price <= 0.0 ||
+        s.prediction_2m_fade_max_price >= 1.0 ||
+        (s.prediction_2m_fade_enabled &&
+         (!s.prediction_2m_enabled ||
+          s.prediction_2m_fade_order_usd <= 0.0)))
+        throw std::runtime_error("invalid prediction_2m sizing, trigger grace, edge gate, or fade experiment");
     if (s.prediction_2m_enabled && c.runtime.mode != TradeMode::Paper)
         throw std::runtime_error("prediction_2m_enabled is PAPER-only");
+    if (s.prediction_2m_taker_enabled &&
+        (!s.prediction_2m_enabled || c.runtime.mode != TradeMode::Paper))
+        throw std::runtime_error(
+            "prediction_2m_taker_enabled requires the PAPER-only prediction_2m path");
+    if (s.prediction_2m_take_profit_price > 0.0 &&
+        (!s.prediction_2m_enabled || c.runtime.mode != TradeMode::Paper))
+        throw std::runtime_error(
+            "prediction_2m_take_profit_price requires the PAPER-only prediction_2m path");
+    if (s.prediction_2m_fade_enabled && c.runtime.mode != TradeMode::Paper)
+        throw std::runtime_error("prediction_2m_fade_enabled is PAPER-only");
+    if (s.penney_hustler_enabled) {
+        const auto has_horizon = [&](int horizon) {
+            return std::find(c.polymarket.universe_horizons_seconds.begin(),
+                             c.polymarket.universe_horizons_seconds.end(),
+                             horizon) !=
+                   c.polymarket.universe_horizons_seconds.end();
+        };
+        if (c.runtime.mode != TradeMode::Paper)
+            throw std::runtime_error("penney_hustler_enabled is PAPER-only");
+        if (!std::isfinite(s.penney_hustler_order_shares) ||
+            s.penney_hustler_order_shares <= 0.0 ||
+            !std::isfinite(s.penney_hustler_entry_price) ||
+            s.penney_hustler_entry_price <= 0.0 ||
+            s.penney_hustler_entry_price >= 1.0 ||
+            !std::isfinite(s.penney_hustler_take_profit_price) ||
+            s.penney_hustler_take_profit_price <= s.penney_hustler_entry_price ||
+            s.penney_hustler_take_profit_price >= 1.0 ||
+            s.penney_hustler_max_secs_left < 1 ||
+            s.penney_hustler_max_secs_left > 900 ||
+            s.penney_hustler_min_secs_left_5m < 1 ||
+            s.penney_hustler_min_secs_left_5m >=
+                s.penney_hustler_max_secs_left_5m ||
+            s.penney_hustler_max_secs_left_5m > 300 ||
+            s.penney_hustler_min_secs_left_15m < 1 ||
+            s.penney_hustler_min_secs_left_15m >=
+                s.penney_hustler_max_secs_left_15m ||
+            s.penney_hustler_max_secs_left_15m > 900 ||
+            s.penney_hustler_cancel_before_close_ms < 1 ||
+            s.penney_hustler_cancel_before_close_ms >=
+                s.penney_hustler_min_secs_left_5m * 1000 ||
+            s.penney_hustler_cancel_before_close_ms >=
+                s.penney_hustler_min_secs_left_15m * 1000 ||
+            s.max_entries_per_window != 1)
+            throw std::runtime_error(
+                "Penney Hustler requires valid prices, exact one-entry-per-window, and valid per-horizon time windows");
+        if (!has_horizon(300) || !has_horizon(900))
+            throw std::runtime_error(
+                "Penney Hustler requires both 300s and 900s markets in the universe");
+        const double order_usd =
+            s.penney_hustler_order_shares * s.penney_hustler_entry_price;
+        if (!std::isfinite(order_usd) || order_usd <= 0.0)
+            throw std::runtime_error("Penney Hustler order notional must be finite and positive");
+    }
     if (s.late_window_sniper_enabled) {
         if (!(s.late_window_sniper_min_secs >= 1 &&
-              s.late_window_sniper_min_secs < s.late_window_sniper_max_secs &&
-              s.late_window_sniper_max_secs <= 45) ||
+              s.late_window_sniper_min_secs <= s.late_window_sniper_max_secs &&
+              s.late_window_sniper_max_secs <= 120) ||
             !(s.late_window_sniper_min_secs_5m >= 1 &&
-              s.late_window_sniper_min_secs_5m < s.late_window_sniper_max_secs_5m &&
-              s.late_window_sniper_max_secs_5m <= 45) ||
+              s.late_window_sniper_min_secs_5m <= s.late_window_sniper_max_secs_5m &&
+              s.late_window_sniper_max_secs_5m <= 120) ||
             !(s.late_window_sniper_min_secs_15m >= 1 &&
-              s.late_window_sniper_min_secs_15m < s.late_window_sniper_max_secs_15m &&
-              s.late_window_sniper_max_secs_15m <= 45) ||
-            !(s.late_window_sniper_min_price >= 0.82 &&
+              s.late_window_sniper_min_secs_15m <= s.late_window_sniper_max_secs_15m &&
+              s.late_window_sniper_max_secs_15m <= 200) ||
+            !(s.late_window_sniper_min_price >= 0.50 &&
               s.late_window_sniper_min_price < s.late_window_sniper_max_price &&
               s.late_window_sniper_max_price <= 0.97) ||
+            !(s.late_window_sniper_min_open_delta_pct >= 0.0 &&
+              s.late_window_sniper_min_open_delta_pct <= 5.0) ||
             !(s.late_window_sniper_min_net_edge_pct >= 0.0 &&
               s.late_window_sniper_min_net_edge_pct <= 25.0) ||
             !(s.late_window_sniper_order_usd > 0.0) ||
+            !std::isfinite(s.late_window_sniper_order_shares) ||
+            s.late_window_sniper_order_shares < 0.0 ||
             s.late_window_sniper_max_entries_per_window < 1 ||
             s.late_window_sniper_max_entries_per_window > 10 ||
             s.late_window_sniper_hard_stop_ticks < 0 ||
-            s.late_window_sniper_hard_stop_ticks > 1000)
+            s.late_window_sniper_hard_stop_ticks > 1000 ||
+            !(s.late_window_sniper_stop_price == 0.0 ||
+              (std::isfinite(s.late_window_sniper_stop_price) &&
+               s.late_window_sniper_stop_price > 0.0 &&
+               s.late_window_sniper_stop_price < s.late_window_sniper_min_price)) ||
+            !(s.late_window_sniper_take_profit_price == 0.0 ||
+              (std::isfinite(s.late_window_sniper_take_profit_price) &&
+               s.late_window_sniper_take_profit_price > s.late_window_sniper_max_price &&
+               s.late_window_sniper_take_profit_price < 1.0)))
             throw std::runtime_error("invalid late-window settlement sniper settings (entry cap must be 1..10 per asset/window)");
         const bool has_supported_horizon = std::any_of(
             c.polymarket.universe_horizons_seconds.begin(),
@@ -798,7 +1024,141 @@ Config Config::load(const std::string& path) {
     r.max_deployed_usd          = get_or<double>(rs, "max_deployed_usd",          r.max_deployed_usd);
     r.max_per_window_usd        = get_or<double>(rs, "max_per_window_usd",        r.max_per_window_usd);
     r.min_order_usd             = get_or<double>(rs, "min_order_usd",             r.min_order_usd);
+    if (!std::isfinite(r.min_order_usd) || !std::isfinite(r.max_order_usd) ||
+        r.min_order_usd < 0.0 || r.max_order_usd < 0.0 ||
+        (r.max_order_usd > 0.0 && r.min_order_usd > r.max_order_usd)) {
+        throw std::runtime_error(fmt::format(
+            "risk.min_order_usd (${:.2f}) must be nonnegative and no greater than "
+            "risk.max_order_usd (${:.2f})",
+            r.min_order_usd, r.max_order_usd));
+    }
     r.clob_min_shares_fallback  = get_or<double>(rs, "clob_min_shares_fallback",  r.clob_min_shares_fallback);
+    if (s.prediction_2m_fade_enabled) {
+        const double signal_usd = s.prediction_2m_order_usd > 0.0
+            ? s.prediction_2m_order_usd : 0.0;
+        if (!std::isfinite(r.max_order_usd) ||
+            r.max_order_usd + 1e-9 < s.prediction_2m_fade_order_usd ||
+            !std::isfinite(r.max_per_window_usd) ||
+            r.max_per_window_usd + 1e-9 <
+                s.prediction_2m_fade_order_usd + signal_usd)
+            throw std::runtime_error(
+                "prediction_2m fade caps must permit the signal + fade clips");
+    }
+    if (s.penney_hustler_enabled) {
+        const double order_usd =
+            s.penney_hustler_order_shares * s.penney_hustler_entry_price;
+        if (!std::isfinite(r.max_order_usd) ||
+            r.max_order_usd + 1e-9 < order_usd ||
+            !std::isfinite(r.max_per_window_usd) ||
+            r.max_per_window_usd + 1e-9 < order_usd ||
+            !std::isfinite(r.max_deployed_usd) ||
+            r.max_deployed_usd + 1e-9 < order_usd ||
+            !std::isfinite(r.min_order_usd) ||
+            r.min_order_usd > order_usd ||
+            r.clob_min_shares_fallback > s.penney_hustler_order_shares)
+            throw std::runtime_error(
+                fmt::format("Penney Hustler risk caps must permit its exact {:.0f}-share, ${:.2f} maker order",
+                            s.penney_hustler_order_shares, order_usd));
+    }
+    if (s.late_window_sniper_enabled &&
+        s.late_window_sniper_order_shares > 0.0) {
+        const double order_usd =
+            s.late_window_sniper_order_shares * s.late_window_sniper_max_price;
+        if (!std::isfinite(order_usd) || order_usd <= 0.0 ||
+            !std::isfinite(r.max_order_usd) ||
+            r.max_order_usd + 1e-9 < order_usd ||
+            !std::isfinite(r.max_per_window_usd) ||
+            r.max_per_window_usd + 1e-9 < order_usd ||
+            !std::isfinite(r.max_deployed_usd) ||
+            r.max_deployed_usd + 1e-9 < order_usd ||
+            !std::isfinite(r.min_order_usd) ||
+            r.min_order_usd > order_usd ||
+            r.clob_min_shares_fallback > s.late_window_sniper_order_shares)
+            throw std::runtime_error(fmt::format(
+                "late-window sniper risk caps must permit its exact {:.2f}-share, ${:.2f} maker order",
+                s.late_window_sniper_order_shares, order_usd));
+    }
+    if (s.coinbase_confluence_paper_enabled) {
+        const bool maker_mode = s.coinbase_confluence_maker_enabled;
+        const double order_usd = maker_mode
+            ? s.coinbase_confluence_order_shares *
+                s.coinbase_confluence_max_price
+            : s.coinbase_confluence_order_usd;
+        const bool known_coinbase_rule =
+            s.coinbase_confluence_rule == "strike_window" ||
+            s.coinbase_confluence_rule == "window_move" ||
+            s.coinbase_confluence_rule == "strike_momentum" ||
+            s.coinbase_confluence_rule == "strike_window_momentum";
+        const bool rule_horizon_matches =
+            (s.coinbase_confluence_rule == "strike_window" &&
+             (s.coinbase_confluence_horizon_s == 0 ||
+              s.coinbase_confluence_horizon_s == 300 ||
+              s.coinbase_confluence_horizon_s == 900)) ||
+            (s.coinbase_confluence_rule == "window_move" &&
+             s.coinbase_confluence_horizon_s == 300) ||
+            (s.coinbase_confluence_rule == "strike_momentum" &&
+             s.coinbase_confluence_horizon_s == 900) ||
+            (s.coinbase_confluence_rule == "strike_window_momentum" &&
+             s.coinbase_confluence_horizon_s == 300);
+        const auto has_confluence_horizon = [&](int horizon_s) {
+            const auto& horizons = c.polymarket.universe_horizons_seconds;
+            return std::find(horizons.begin(), horizons.end(), horizon_s) !=
+                   horizons.end();
+        };
+        if (c.runtime.mode != TradeMode::Paper)
+            throw std::runtime_error(
+                "coinbase_confluence_paper_enabled is PAPER-only");
+        if (!known_coinbase_rule || !rule_horizon_matches ||
+            (s.coinbase_confluence_horizon_s != 0 &&
+             s.coinbase_confluence_horizon_s != 300 &&
+             s.coinbase_confluence_horizon_s != 900) ||
+            (s.coinbase_confluence_min_elapsed_pct < 20 ||
+             s.coinbase_confluence_min_elapsed_pct > 80 ||
+             s.coinbase_confluence_min_elapsed_pct % 20 != 0) ||
+            (s.coinbase_confluence_horizon_s == 0 &&
+             (!has_confluence_horizon(300) || !has_confluence_horizon(900))) ||
+            (s.coinbase_confluence_horizon_s == 300 &&
+             !has_confluence_horizon(300)) ||
+            (s.coinbase_confluence_horizon_s == 900 &&
+             !has_confluence_horizon(900)) ||
+            !std::isfinite(order_usd) || order_usd <= 0.0 ||
+            (!maker_mode && order_usd > 4.67) ||
+            (maker_mode &&
+             (!std::isfinite(s.coinbase_confluence_order_shares) ||
+              s.coinbase_confluence_order_shares <= 0.0 ||
+              s.coinbase_confluence_order_shares > 1000.0 ||
+              s.coinbase_confluence_horizon_s != 900 ||
+              s.coinbase_confluence_maker_offset_ticks < 1 ||
+              s.coinbase_confluence_maker_offset_ticks > 5 ||
+              s.coinbase_confluence_maker_max_age_ms < 500 ||
+              s.coinbase_confluence_maker_max_age_ms > 120000 ||
+              !std::isfinite(s.max_per_window_usd) ||
+              s.max_per_window_usd + 1e-9 < order_usd)) ||
+            !std::isfinite(s.coinbase_confluence_max_price) ||
+            s.coinbase_confluence_max_price <= 0.0 ||
+            s.coinbase_confluence_max_price > 0.90 ||
+            !std::isfinite(s.coinbase_confluence_min_move_bps) ||
+            s.coinbase_confluence_min_move_bps < 10.0 ||
+            !std::isfinite(s.coinbase_confluence_min_momentum_10s_bps) ||
+            s.coinbase_confluence_min_momentum_10s_bps < 0.25 ||
+            !std::isfinite(s.coinbase_confluence_max_spread) ||
+            s.coinbase_confluence_max_spread <= 0.0 ||
+            s.coinbase_confluence_max_spread > 0.08 ||
+            s.coinbase_confluence_max_observation_age_ms < 1 ||
+            s.coinbase_confluence_max_observation_age_ms > 1500 ||
+            (!maker_mode && s.taker_fee_rate + 1e-9 < 0.07) ||
+            s.fee_exponent != 1 ||
+            !std::isfinite(r.max_order_usd) || r.max_order_usd + 1e-9 < order_usd ||
+            !std::isfinite(r.max_per_window_usd) ||
+                r.max_per_window_usd + 1e-9 < order_usd ||
+            !std::isfinite(r.max_deployed_usd) ||
+                r.max_deployed_usd + 1e-9 < order_usd ||
+            !std::isfinite(r.min_order_usd) || r.min_order_usd > order_usd ||
+            r.clob_min_shares_fallback * s.coinbase_confluence_max_price >
+                order_usd + 1e-9)
+            throw std::runtime_error(
+                "Coinbase confluence PAPER config violates the replay bounds, fee model, horizon, checkpoint, or risk caps");
+    }
     r.wallet_balance_warn_above = get_or<double>(rs, "wallet_balance_warn_above", r.wallet_balance_warn_above);
     r.daily_loss_kill_pct       = get_or<double>(rs, "daily_loss_kill_pct",       r.daily_loss_kill_pct);
     if (r.daily_loss_kill_pct != 0.0) {
@@ -837,7 +1197,12 @@ Config Config::load(const std::string& path) {
     c.data_collection.features_enabled           = get_or<bool>(dc, "features_enabled",           true);
     c.data_collection.features_write_interval_ms = get_or<int>(dc,  "features_write_interval_ms", 1000);
     c.data_collection.book_snapshots_enabled     = get_or<bool>(dc, "book_snapshots_enabled",     true);
+    c.data_collection.book_snapshot_levels       = get_or<int>(dc, "book_snapshot_levels",       20);
     c.data_collection.pm_trades_enabled          = get_or<bool>(dc, "pm_trades_enabled",          true);
+    if (c.data_collection.book_snapshot_levels < 0 ||
+        c.data_collection.book_snapshot_levels > 20) {
+        throw std::runtime_error("data_collection.book_snapshot_levels must be 0..20");
+    }
     c.data_collection.log_max_bytes              = get_or<int>(dc, "log_max_bytes",              c.data_collection.log_max_bytes);
     c.data_collection.log_keep_files             = get_or<int>(dc, "log_keep_files",             c.data_collection.log_keep_files);
     c.data_collection.disk_space_warn_mb         = get_or<int>(dc, "disk_space_warn_mb",         c.data_collection.disk_space_warn_mb);
@@ -850,6 +1215,11 @@ Config Config::load(const std::string& path) {
     c.data_collection.trade_flow_max_records_per_symbol =
         get_or<int>(dc, "trade_flow_max_records_per_symbol",
                     c.data_collection.trade_flow_max_records_per_symbol);
+    if (c.strategy.coinbase_confluence_paper_enabled &&
+        (!c.data_collection.coinbase_ticks_enabled ||
+         c.data_collection.binance_ticks_enabled || c.binance.enabled))
+        throw std::runtime_error(
+            "Coinbase confluence requires Coinbase ticks and disables Binance feeds/tick collection");
 
     // Override-from-secrets: if the configured credential bundle exists,
     // it WINS over the TOML wallet block. This lets users keep secrets
@@ -905,7 +1275,8 @@ void Config::dump_summary() const {
     spdlog::info("  mode         : {}",  to_string(runtime.mode));
     spdlog::info("  postgres     : configured");
     spdlog::info("  pm clob ws   : configured={}", !polymarket.clob_ws_url.empty());
-    spdlog::info("  binance ws   : configured={} ({} streams)", !binance.ws_url.empty(), binance.streams.size());
+    spdlog::info("  binance ws   : enabled={} configured={} ({} streams)",
+                 binance.enabled, !binance.ws_url.empty(), binance.streams.size());
     spdlog::info("  llm          : endpoint_configured={} (model={}, enabled={})", !llm.url.empty(), llm.model, llm.enabled);
     spdlog::info("  limits       : ${:.2f}/order  ${:.2f}/window  ${:.2f} deployed  share<={:.2f}",
                  risk.max_order_usd, risk.max_per_window_usd, risk.max_deployed_usd, strategy.hard_share_price_ceil);
@@ -998,12 +1369,15 @@ void Config::dump_summary() const {
                  live_armed ? "PRESENT" : "absent",
                  to_string(runtime.mode),
                  polymarket.proxy_address.empty() ? "<none>" : polymarket.proxy_address);
-    spdlog::info("  data_collect : oracle={} binance={} coinbase={} events={} features={} ({}ms)",
+    spdlog::info("  data_collect : oracle={} binance={} coinbase={} events={} features={} ({}ms) book_snapshots={} levels={} pm_trades={}",
                  data_collection.oracle_ticks_enabled ? "ON" : "OFF",
                  data_collection.binance_ticks_enabled ? "ON" : "OFF",
                  data_collection.coinbase_ticks_enabled ? "ON" : "OFF",
                  data_collection.window_events_enabled ? "ON" : "OFF",
                  data_collection.features_enabled ? "ON" : "OFF",
-                 data_collection.features_write_interval_ms);
+                 data_collection.features_write_interval_ms,
+                 data_collection.book_snapshots_enabled ? "ON" : "OFF",
+                 data_collection.book_snapshot_levels,
+                 data_collection.pm_trades_enabled ? "ON" : "OFF");
 }
 } // namespace vp

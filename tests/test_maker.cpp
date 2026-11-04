@@ -56,13 +56,78 @@ int main() {
     assert(positions.snapshot().empty());
     assert(exec.open_order_count() == 1);
 
-    // Only executable liquidity reaching the quote creates a simulated fill.
+    // A BBO touch alone is not a simulated fill; public prints must consume
+    // the visible queue ahead of the resting order first.
     book.apply_snapshot({{0.49, 100}}, {{0.50, 100}});
-    exec.maintain_open_orders(lookup, Clock::wall_ns() / 1'000'000LL + 100);
+    const auto after_touch_ms = Clock::wall_ns() / 1'000'000LL + 100;
+    exec.maintain_open_orders(lookup, after_touch_ms);
+    assert(exec.open_order_count() == 1);
+    assert(positions.snapshot().empty());
+
+    const auto trade_ms = Clock::wall_ns() / 1'000'000LL + 200;
+    const auto maker_fills = exec.on_public_trade(
+        "maker-test", "1", ShareSide::UP, OrderDir::Sell,
+        0.50, 110.0, trade_ms, trade_ms);
+    assert(maker_fills == 1);
     assert(exec.open_order_count() == 0);
     auto pos = positions.snapshot();
     assert(pos.size() == 1 && std::fabs(pos[0].shares - 10.0) < 1e-9);
     assert(events.back().status == "filled");
+
+    // The isolated Coinbase confluence maker path must accept the exact
+    // 20-share clip under its $18 order budget and remain fee-free.
+    Positions cb_positions;
+    std::vector<OrderResult> cb_events;
+    PaperExecutor cb_exec(cb_positions,
+        Journal{[&](const OrderRequest&, const OrderResult& r) {
+            cb_events.push_back(r);
+        }, {}, {}}, 18.0, 200.0, 50.0, 1.0, 5.0);
+    OrderBook cb_book;
+    cb_book.apply_snapshot({{0.88, 150}}, {{0.90, 150}});
+    auto cb_lookup = [&](const std::string&, ShareSide) -> const OrderBook* {
+        return &cb_book;
+    };
+    OrderRequest cb_maker;
+    cb_maker.source = "COINBASE_CONFLUENCE_PAPER_MAKER_ENTRY";
+    cb_maker.condition_id = "cb-maker-20";
+    cb_maker.asset = "BTC";
+    cb_maker.horizon_s = 900;
+    cb_maker.window_close_ms = Clock::wall_ns() / 1'000'000LL + 900'000;
+    cb_maker.token_id = "cb-token";
+    cb_maker.side = ShareSide::UP;
+    cb_maker.dir = OrderDir::Buy;
+    cb_maker.execution_mode = ExecutionMode::Maker;
+    cb_maker.size_usd = 18.0;
+    cb_maker.size_shares = 20.0;
+    cb_maker.limit_price = 0.89;
+    cb_maker.tick_size = 0.01;
+    cb_maker.fee_rate = 0.0;
+    cb_maker.fee_exponent = 1;
+    cb_maker.maker_fixed_price = true;
+    cb_maker.maker_reprice_ms = 0;
+    cb_maker.maker_max_age_ms = 5500;
+    const auto cb_quote = cb_exec.submit(cb_maker, cb_lookup);
+    assert(cb_quote.accepted && cb_quote.resting && cb_quote.order_shares == 20.0);
+    assert(std::fabs(cb_quote.order_price - 0.89) < 1e-9);
+    const auto cb_trade_ms = Clock::wall_ns() / 1'000'000LL + 5;
+    assert(cb_exec.on_public_trade(cb_maker.condition_id, cb_maker.token_id,
+        ShareSide::UP, OrderDir::Sell, 0.89, 20.0,
+        cb_trade_ms, cb_trade_ms) == 1);
+    const auto cb_pos = cb_positions.snapshot();
+    assert(cb_pos.size() == 1 && std::fabs(cb_pos.front().shares - 20.0) < 1e-9);
+    assert(std::fabs(cb_positions.total_deployed_usd() - 17.8) < 1e-9);
+    assert(std::fabs(cb_events.back().fee_usd) < 1e-9);
+
+    Positions cb_ttl_positions;
+    PaperExecutor cb_ttl_exec(cb_ttl_positions, {}, 18.0, 200.0, 50.0, 1.0, 5.0);
+    cb_maker.condition_id = "cb-maker-ttl";
+    cb_maker.window_close_ms = Clock::wall_ns() / 1'000'000LL + 900'000;
+    const auto cb_ttl_quote = cb_ttl_exec.submit(cb_maker, cb_lookup);
+    assert(cb_ttl_quote.accepted && cb_ttl_quote.resting);
+    cb_ttl_exec.maintain_open_orders(cb_lookup,
+        Clock::wall_ns() / 1'000'000LL + 6000);
+    assert(cb_ttl_exec.open_order_count() == 0);
+    assert(cb_ttl_positions.snapshot().empty());
 
     // Hybrid rests first, then submits only its remainder as a taker after TTL.
     OrderBook book2;
@@ -96,30 +161,47 @@ int main() {
     book2.apply_snapshot({{.53,100}},{{.54,100}});
     capped.maintain_open_orders(lookup2,Clock::wall_ns()/1'000'000LL+20);
     assert(capped_positions.total_deployed_usd()<=5.000001);
+    assert(capped.cancel_order(quote.client_order_id));
 
-    // A taker can consume only the visible shares, and must honor a sell limit.
-    maker.condition_id="depth"; maker.execution_mode=ExecutionMode::Taker;
-    book2.apply_snapshot({{.49,2}},{{.50,3}});
-    const auto partial=capped.submit(maker,lookup2);
-    assert(partial.accepted && partial.fill_shares==3);
-    auto sell=maker; sell.dir=OrderDir::Sell; sell.size_shares=3; sell.limit_price=.5;
-    assert(!capped.submit(sell,lookup2).accepted);
+    // An explicitly authorized cockpit force-sell uses only visible bid depth
+    // and still honors its minimum limit price.
+    auto sell=maker;
+    sell.source="HUMAN_OVERRIDE";
+    sell.manual_override_taker_authorized=true;
+    sell.condition_id="maker-test";
+    sell.token_id="1";
+    sell.dir=OrderDir::Sell;
+    sell.execution_mode=ExecutionMode::Taker;
+    sell.size_shares=5;
+    sell.limit_price=.50;
+    book.apply_snapshot({{.49,2}},{{.50,3}});
+    assert(!exec.submit(sell,lookup).accepted);
     sell.limit_price=.49;
-    const auto sold=capped.submit(sell,lookup2);
+    const auto sold=exec.submit(sell,lookup);
     assert(sold.accepted && sold.fill_shares==2);
 
-    // Checkpoint entries approve edge at one executable ask. If that quote
-    // moves before submit, reject rather than spending the approved margin.
+    // A fixed-price maker entry stays at or below its configured cap even if
+    // the ask moves down to it; a BBO touch alone still does not fill it.
     maker.condition_id="checkpoint-price";
+    maker.source.clear();
+    maker.dir=OrderDir::Buy;
+    maker.execution_mode=ExecutionMode::Maker;
+    maker.size_shares=0;
+    maker.manual_override_taker_authorized=false;
+    maker.maker_fixed_price=true;
     maker.limit_price=.60;
-    maker.fee_rate=.07;
-    maker.fee_exponent=1;
     book2.apply_snapshot({{.60,100}},{{.61,100}});
-    assert(!capped.submit(maker,lookup2).accepted);
-    book2.apply_snapshot({{.59,100}},{{.60,100}});
     const auto checkpoint=capped.submit(maker,lookup2);
-    assert(checkpoint.accepted && checkpoint.fill_price==.60);
-    assert(std::abs(checkpoint.fee_usd/checkpoint.fill_shares-.0168)<1e-9);
+    assert(checkpoint.accepted && checkpoint.resting && checkpoint.order_price==.60);
+    book2.apply_snapshot({{.59,100}},{{.60,100}});
+    capped.maintain_open_orders(lookup2,Clock::wall_ns()/1'000'000LL+20);
+    const auto checkpoint_orders=capped.open_orders();
+    assert(checkpoint_orders.size()==1);
+    assert(checkpoint_orders.front().req.condition_id=="checkpoint-price");
+    assert(checkpoint_orders.front().price<=maker.limit_price);
+    assert(capped_positions.snapshot().empty());
+    assert(capped.cancel_order(checkpoint.client_order_id));
+    maker.maker_fixed_price=false;
 
     // A duplicated immutable intent must never create a second paper fill.
     Positions idempotent_positions;
@@ -134,10 +216,12 @@ int main() {
     repeated.condition_id = "idempotent";
     repeated.intent_id = "11111111-1111-1111-1111-111111111111";
     const auto first_intent = idempotent.submit(repeated,lookup2);
-    assert(first_intent.accepted && callbacks == 1);
+    assert(first_intent.accepted && first_intent.resting && callbacks == 1);
     const auto duplicate_intent = idempotent.submit(repeated,lookup2);
     assert(!duplicate_intent.accepted && callbacks == 1);
-    assert(std::abs(idempotent_positions.snapshot()[0].shares-first_intent.fill_shares)<1e-9);
+    const auto reserved_orders=idempotent.open_orders();
+    assert(reserved_orders.size()==1 &&
+           reserved_orders.front().client_order_id==first_intent.client_order_id);
     Positions unavailable_positions;
     PaperExecutor unavailable(unavailable_positions,Journal{{},[](const OrderRequest&,const std::string&){return false;}},100,100,100,1,5);
     assert(!unavailable.submit(repeated,lookup2).accepted && unavailable_positions.snapshot().empty());
@@ -152,8 +236,8 @@ int main() {
     assert(fee_loss.trade_stats().wins==0 && fee_loss.trade_stats().losses==1);
     assert(std::abs(fee_loss.net_pnl_usd()+.1)<1e-9);
 
-    // Passive exits reserve inventory, preserve target, fill partially, and
-    // cannot consume unchanged depth twice or oversell after cancellation.
+    // Passive exits reserve inventory, preserve target, fill partially from
+    // public prints, and cannot oversell after cancellation.
     {
         Positions inv;std::vector<OrderResult> updates;
         PaperExecutor e(inv,Journal{[&](const auto&,const auto& r){updates.push_back(r);},{}},100,100,100,1,5);
@@ -179,7 +263,8 @@ int main() {
         inv.apply_fill("hybrid-sell","BTC",900,"cy2",ShareSide::UP,OrderDir::Sell,.5,10,0,0);
         ob.apply_snapshot({{.55,4}},{{.56,100}});
         const auto tm=Clock::wall_ns()/1'000'000LL;
-        e.maintain_open_orders(lk,tm+100);
+        assert(e.on_public_trade("cycle","cy",ShareSide::UP,OrderDir::Buy,
+                                 .55,104,tm+100,tm+100)==1);
         assert(updates.back().status=="partial" && updates.back().fill_shares==4);
         assert(std::abs(inv.snapshot()[0].shares-8.5)<1e-9);
         e.maintain_open_orders(lk,tm+200);
@@ -188,12 +273,14 @@ int main() {
         ob.apply_snapshot({{.55,100}},{{.56,100}});
         e.maintain_open_orders(lk,tm+300);assert(std::abs(inv.snapshot()[0].shares-8.5)<1e-9);
         target.execution_mode=ExecutionMode::Taker;
+        target.source="HUMAN_OVERRIDE";
+        target.manual_override_taker_authorized=true;
         assert(e.submit(target,lk).fill_shares==8.5 && inv.snapshot().empty());
     }
     // The strategy cycles only after a real simulated exit; partial buys first
     // cancel their remainder, fixed targets are preserved, and stale data never trades.
     {
-        Recycler engine; StrategyHot cfg;cfg.recycler_mode="sniper";cfg.recycler_allow_taker_exit=true;
+        Recycler engine; StrategyHot cfg;cfg.recycler_mode="sniper";
         cfg.max_book_age_ms=1000;cfg.recycler_max_cycles=1;
         cfg.recycler_momentum_lookback_secs=1;cfg.recycler_min_momentum_ticks=5;
         cfg.recycler_target_profit_pct=37.5;
@@ -238,7 +325,7 @@ int main() {
     }
     // Repeat after a completed target; entry pause still manages exits.
     {
-        Recycler e;StrategyHot c;c.recycler_mode="sniper";c.recycler_allow_taker_exit=true;
+        Recycler e;StrategyHot c;c.recycler_mode="sniper";
         c.recycler_momentum_lookback_secs=1;c.recycler_min_momentum_ticks=5;
         c.maker_improve_ticks=1;c.recycler_min_settlement_edge_pct=0;c.recycler_target_profit_pct=37.5;
         int64_t now=Clock::wall_ns()/1'000'000LL;
@@ -266,7 +353,8 @@ int main() {
         assert(a.size()==1 && a[0].order.dir==OrderDir::Buy && e.completed_cycles==1);
         p.window_close_ms=now+65000;b.market.window_close_ms=p.window_close_ms;b.updated_ms=now+24500;b.generation=7;
         a=e.step(c,now+24500,{b},{p},{},1.875,false);
-        assert(a.size()==1 && a[0].order.source=="RECYCLER_LATE_TAKER_EXIT");
+        assert(a.size()==1 && a[0].order.source=="RECYCLER_LATE_MAKER_EXIT" &&
+               a[0].order.execution_mode==ExecutionMode::Maker);
         Recycler range;c.recycler_mode="range";c.recycler_lookback_secs=30;
         b.market.window_close_ms=now+800000;
         bool entered=false;

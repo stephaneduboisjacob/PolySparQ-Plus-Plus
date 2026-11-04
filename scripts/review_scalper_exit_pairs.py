@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from collections import defaultdict
+from statistics import median
 import subprocess
 
 import cockpit
@@ -23,6 +24,9 @@ PAIRS = (
     ("5m · Coinbase lead only vs mixed entry paths",
      "btc-5m-lead-scalper",
      "btc-5m-lead-scalper-cb-only-isolated-test"),
+    ("5m · OFI impulse plus value gate vs mixed entry paths",
+     "btc-5m-lead-scalper",
+     "btc-5m-lead-scalper-ofi-value-isolated-test"),
     ("5m · maker reprice 1s vs 250ms",
      "btc-5m-lead-scalper",
      "btc-5m-lead-scalper-reprice1s-isolated-test"),
@@ -37,6 +41,9 @@ PAIRS = (
      "btc-5m-lead-scalper-stop10-tp20-impulse-isolated-test"),
     ("5m · isolated stop25/tp50", "btc-5m-lead-scalper",
      "btc-5m-lead-scalper-tp50-isolated-test"),
+    ("5m · maker lifetime 15s vs 5s",
+     "btc-5m-lead-scalper",
+     "btc-5m-lead-scalper-ttl15-isolated-test"),
     ("5m · isolated stop25/tp30", "btc-5m-lead-scalper",
      "btc-5m-lead-scalper-tp30-isolated-test"),
     ("5m · model confidence default vs 0.50", "btc-5m-lead-scalper",
@@ -55,6 +62,17 @@ PAIRS = (
      "btc-15m-lead-scalper-conf50-isolated-test"),
     ("15m · delayed-open only (first 5m skipped)", "btc-15m-lead-scalper",
      "btc-15m-lead-scalper-delay5m-isolated-test"),
+    ("15m · baseline vs matched stop15/tp50 exit challenger",
+     "btc-15m-lead-scalper", "btc-15m-lead-scalper-stop15-test"),
+    ("15m · isolated stop15 vs baseline stop25 (tp20 matched)",
+     "btc-15m-lead-scalper",
+     "btc-15m-lead-scalper-stop15-tp20-isolated-test"),
+    ("15m · isolated stop15/tp20 vs combined stop15/tp50",
+     "btc-15m-lead-scalper-stop15-tp20-isolated-test",
+     "btc-15m-lead-scalper-stop15-test"),
+    ("15m · maker lifetime 15s vs 5s",
+     "btc-15m-lead-scalper",
+     "btc-15m-lead-scalper-ttl15-isolated-test"),
 )
 
 
@@ -85,6 +103,75 @@ def fmt_roi(rows: list[dict[str, object]]) -> str:
     return f"{100.0 * net / capital:+.2f}%" if capital > 0 else "—"
 
 
+def current_session_order_activity(
+    instances: list[str], session_starts: dict[str, int], lookback_days: int,
+) -> dict[str, dict[str, object]]:
+    rows = cockpit.q(
+        """SELECT o.instance, o.client_order_id::text AS client_order_id,
+                  o.ts_created, o.ts_terminal, o.source, o.status::text AS status,
+                  o.direction::text AS direction, o.post_only,
+                  o.execution_mode, count(f.id) AS fills,
+                  coalesce(sum(f.size_shares), 0) AS shares,
+                  coalesce(sum(f.fee_usd), 0) AS fees
+           FROM vp.orders o
+           LEFT JOIN vp.fills f USING (client_order_id)
+           WHERE o.mode = 'paper' AND o.instance = ANY(%s)
+             AND o.ts_created >= now() - %s::interval
+           GROUP BY o.instance, o.client_order_id, o.ts_created, o.status,
+                    o.direction, o.post_only, o.execution_mode
+           ORDER BY o.ts_created""",
+        (instances, f"{lookback_days} days"),
+    )
+    activity: dict[str, dict[str, object]] = defaultdict(
+        lambda: {"orders": 0, "working": 0, "filled_orders": 0,
+                 "maker_filled_orders": 0, "fills": 0, "shares": 0.0,
+                 "maker_accepted_no_fill_orders": 0,
+                 "maker_rejected_orders": 0,
+                 "cancelled_orders": 0,
+                 "cancelled_no_fill_orders": 0, "fees": 0.0,
+                 "entry_orders": 0, "entry_orders_with_fill": 0,
+                 "entry_shares_filled": 0.0, "entry_lifetimes_ms": []}
+    )
+    working_statuses = {"pending_sign", "submitted", "acked", "partial", "uncertain"}
+    accepted_statuses = working_statuses | {"filled", "cancelled"}
+    for row in rows:
+        instance = row["instance"]
+        started = session_starts.get(instance)
+        if started is None or timestamp_ms(row["ts_created"]) < started:
+            continue
+        item = activity[instance]
+        fill_count = int(row["fills"] or 0)
+        item["orders"] += 1
+        item["working"] += int(row["status"] in working_statuses)
+        item["filled_orders"] += int(row["status"] == "filled")
+        item["maker_filled_orders"] += int(bool(row["post_only"]) and fill_count > 0)
+        item["maker_accepted_no_fill_orders"] += int(
+            bool(row["post_only"])
+            and row["status"] in accepted_statuses
+            and fill_count == 0
+        )
+        item["maker_rejected_orders"] += int(
+            bool(row["post_only"]) and row["status"] == "rejected"
+        )
+        item["cancelled_orders"] += int(row["status"] == "cancelled")
+        item["cancelled_no_fill_orders"] += int(
+            row["status"] == "cancelled" and fill_count == 0
+        )
+        item["fills"] += fill_count
+        item["shares"] += float(row["shares"] or 0.0)
+        item["fees"] += float(row["fees"] or 0.0)
+        if row["source"] == "CB_LEAD_SCALP_ENTRY":
+            item["entry_orders"] += 1
+            item["entry_orders_with_fill"] += int(fill_count > 0)
+            item["entry_shares_filled"] += float(row["shares"] or 0.0)
+            if row["ts_terminal"] is not None:
+                lifetime_ms = (timestamp_ms(row["ts_terminal"])
+                               - timestamp_ms(row["ts_created"]))
+                if lifetime_ms >= 0:
+                    item["entry_lifetimes_ms"].append(lifetime_ms)
+    return activity
+
+
 def summarize(hours: float, lookback_days: int, detail_limit: int) -> None:
     clock = cockpit.q("SELECT now() AS server_now", one=True)
     now_ms = timestamp_ms(clock["server_now"])
@@ -110,6 +197,10 @@ def summarize(hours: float, lookback_days: int, detail_limit: int) -> None:
             # Bot logs and this cockpit host use UTC for naive timestamps.
             parsed = parsed.replace(tzinfo=timezone.utc)
         session_starts[instance] = int(parsed.timestamp() * 1000)
+
+    order_activity = current_session_order_activity(
+        instances, session_starts, lookback_days,
+    )
 
     fill_rows = cockpit.q(
         """SELECT f.id, f.ts, f.price, f.size_shares, f.fee_usd,
@@ -166,6 +257,33 @@ def summarize(hours: float, lookback_days: int, detail_limit: int) -> None:
             f"\n{label}: {baseline} vs {challenger} · same-market/token={len(pairs)} "
             f"near-synchronous={len(close_entries)}"
         )
+        for instance in (baseline, challenger):
+            activity = order_activity.get(instance, {})
+            print(
+                f"  {instance} current session: "
+                f"orders={activity.get('orders', 0)} "
+                f"filled={activity.get('filled_orders', 0)} "
+                f"maker-filled={activity.get('maker_filled_orders', 0)} "
+                f"maker-accepted-no-fill={activity.get('maker_accepted_no_fill_orders', 0)} "
+                f"maker-rejected={activity.get('maker_rejected_orders', 0)} "
+                f"cancelled/no-fill={activity.get('cancelled_no_fill_orders', 0)} "
+                f"fills={activity.get('fills', 0)} "
+                f"working={activity.get('working', 0)} "
+                f"shares={float(activity.get('shares', 0.0)):.2f} "
+                f"fees=${float(activity.get('fees', 0.0)):.3f}"
+            )
+            lifetimes = activity.get("entry_lifetimes_ms", [])
+            entry_orders = int(activity.get("entry_orders", 0))
+            entry_fills = int(activity.get("entry_orders_with_fill", 0))
+            fill_rate = 100.0 * entry_fills / entry_orders if entry_orders else 0.0
+            median_lifetime = median(lifetimes) if lifetimes else None
+            print(
+                f"    maker entries: {entry_fills}/{entry_orders} with fills "
+                f"({fill_rate:.1f}%) · filled shares="
+                f"{float(activity.get('entry_shares_filled', 0.0)):.2f} · "
+                f"median quote lifetime="
+                f"{f'{median_lifetime:.0f}ms' if median_lifetime is not None else '—'}"
+            )
         print(
             f"  all shared markets (descriptive only): baseline={fmt_money(base_net)} "
             f"({fmt_roi([pair[0] for pair in pairs])} ROI) "

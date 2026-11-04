@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent/'scripts'))
 import cockpit
-from cockpit_fleet import action, EXECUTION_DEFAULTS
+from cockpit_fleet import action, EXECUTION_DEFAULTS, validate_recycler
 
 class FleetControlsTests(unittest.TestCase):
     def setUp(self):
@@ -15,7 +15,7 @@ class FleetControlsTests(unittest.TestCase):
         self.root=Path(self.tmp.name);self.config=self.root/'config';self.config.mkdir()
         (self.root/'PolySparQ++_CAPABILITIES.json').write_bytes((Path(__file__).resolve().parent.parent/'PolySparQ++_CAPABILITIES.json').read_bytes())
         self.path=self.config/'polypulse-base.toml'
-        self.path.write_text('[runtime]\nmode="paper"\n[strategy.hot]\nautopilot_on_start=true\nper_click_size_usd=5.0\n[risk]\nmax_order_usd=5.0\n[wallet]\nstarting_balance_usd=100.0\nprivate_key="DO_NOT_EXPOSE"\n[data_collection]\nfeatures_enabled=true\n')
+        self.path.write_text('[runtime]\nmode="paper"\n[polymarket]\nuniverse_horizons_seconds=[300,900]\n[strategy.hot]\nautopilot_on_start=true\nper_click_size_usd=5.0\n[risk]\nmax_order_usd=5.0\n[wallet]\nstarting_balance_usd=100.0\nprivate_key="DO_NOT_EXPOSE"\n[data_collection]\nfeatures_enabled=true\n')
         for name,value in [('ROOT',str(self.root)),('CONFIG_DIR',str(self.config)),('_platform',None)]:
             p=patch.object(cockpit,name,value);p.start();self.addCleanup(p.stop)
         for name,value in [('fleet_instances',lambda:['base']),('instance_running',lambda n:False),('_supervisor_running',lambda n:False),('current_mode',lambda n:'paper'),('accounting_since',lambda *a:None),('reconstructed_positions',lambda *a:{'positions':[]}),('q',lambda *a,**k:{'n':0})]:
@@ -55,20 +55,74 @@ class FleetControlsTests(unittest.TestCase):
         code,r=cockpit.api_v3_config_write({'instance':'base','changes':[{'key':'strategy.hot.maker_poll_ms','value':250}]})
         self.assertEqual(code,200,r);self.assertEqual(tomllib.loads(self.path.read_text())['strategy']['hot']['maker_poll_ms'],250)
 
-    def test_recycler_requires_paper_and_explicit_exit_policy(self):
+    def test_missing_recycler_controls_show_actual_engine_defaults(self):
+        knobs=cockpit.api_v3_knobs('base')
+        rows={r['bare']:r for group in knobs['groups'] for r in group['rows']}
+        for key,value in (
+            ('recycler_target_profit_pct',20.0),
+            ('recycler_lookback_secs',120),
+            ('recycler_max_window_loss',0.0),
+            ('recycler_max_session_loss',0.0),
+        ):
+            self.assertEqual(rows[key]['value'],value,key)
+            self.assertEqual(rows[key]['source'],'engine default',key)
+
+        code,result=cockpit.api_v3_config_write({'instance':'base','changes':[
+            {'key':'strategy.hot.recycler_max_window_loss','value':0}]})
+        self.assertEqual(code,200,result)
+        self.assertEqual(tomllib.loads(self.path.read_text())['strategy']['hot']['recycler_max_window_loss'],0)
+
+    def test_recycler_requires_one_valid_window_and_paper(self):
         code,r=cockpit.api_v3_config_write({'instance':'base','changes':[{'key':'strategy.hot.recycler_mode','value':'sniper'}]})
         self.assertEqual(code,422,r)
+        profile=self.path.read_text()
+        profile=profile.replace('universe_horizons_seconds=[300,900]',
+                                'universe_horizons_seconds=[900]')
+        profile=profile.replace('per_click_size_usd=5.0',
+                                'per_click_size_usd=5.0\nrecycler_entry_cutoff_secs=360')
+        self.path.write_text(profile)
         code,r=cockpit.api_v3_config_write({'instance':'base','changes':[
-            {'key':'strategy.hot.recycler_mode','value':'sniper'},
-            {'key':'strategy.hot.recycler_allow_taker_exit','value':True}]})
+            {'key':'strategy.hot.recycler_mode','value':'sniper'}]})
         self.assertEqual(code,200,r)
         import hashlib
         with self.assertRaisesRegex(ValueError,'PAPER'):
             self.call(operation='properties',instance='base',changes={'mode':'live'},confirmed=True,
                 confirm_live=True,expected_hash=hashlib.sha256(self.path.read_bytes()).hexdigest()[:12])
         before=self.path.read_bytes()
-        code,r=cockpit.api_v3_config_write({'instance':'base','changes':[{'key':'strategy.hot.recycler_target_price','value':.3}]})
+        code,r=cockpit.api_v3_config_write({'instance':'base','changes':[{'key':'strategy.hot.recycler_entry_max_price','value':.2}]})
         self.assertEqual(code,422,r);self.assertEqual(before,self.path.read_bytes())
+
+    def test_recycler_cutoff_rules_match_5m_and_15m_engine_limits(self):
+        validate_recycler({'recycler_mode':'sniper','recycler_entry_cutoff_secs':250},
+                          'paper',{'universe_horizons_seconds':[300]})
+        validate_recycler({'recycler_mode':'sniper','recycler_entry_cutoff_secs':360},
+                          'paper',{'universe_horizons_seconds':[900]})
+        with self.assertRaisesRegex(ValueError,'late maker exit'):
+            validate_recycler({'recycler_mode':'sniper','recycler_entry_cutoff_secs':120},
+                              'paper',{'universe_horizons_seconds':[300]})
+        with self.assertRaisesRegex(ValueError,'exactly one'):
+            validate_recycler({'recycler_mode':'sniper','recycler_entry_cutoff_secs':250},
+                              'paper',{'universe_horizons_seconds':[300], 'block_5m':True})
+
+    def test_recycler_editor_exposes_engine_ranges_and_maniac_caps_stay_profile_gated(self):
+        for key,value in (
+            ('recycler_max_window_loss',0),
+            ('recycler_max_session_loss',0),
+            ('recycler_lookback_secs',10),
+            ('recycler_max_cycles',100),
+            ('recycler_entry_open_grace_secs',3600),
+        ):
+            ok,coerced,error=cockpit.validate_tunable(key,value)
+            self.assertTrue(ok,(key,error))
+            self.assertEqual(coerced,value)
+
+        maniac={'recycler_mode':'sniper','recycler_maniac_mode':True,
+                'recycler_max_cycles':100,'recycler_entry_cutoff_secs':1800,
+                'recycler_entry_open_grace_secs':3600}
+        validate_recycler(maniac,'paper',{'universe_horizons_seconds':[3600]})
+        with self.assertRaisesRegex(ValueError,'cycle timing or sizing'):
+            validate_recycler({**maniac,'recycler_maniac_mode':False},
+                              'paper',{'universe_horizons_seconds':[300]})
 
     def test_stopped_service_is_not_running_due_to_recent_log(self):
         from types import SimpleNamespace

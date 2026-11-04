@@ -14,9 +14,38 @@ struct WindowBotSignal {
     ShareSide side = ShareSide::UP;
     double confidence = 0.0;
     double edge = 0.0;
-    double ask = 0.0;
+    double limit_price = 0.0;
     std::string reason;
 };
+
+struct CoinbaseConfluenceInput {
+    int horizon_s = 0;
+    double coinbase_now = 0.0;
+    double market_strike = 0.0;
+    double coinbase_window_open = 0.0;
+    double coinbase_10s_ago = 0.0;
+};
+
+enum class CoinbaseConfluenceRule {
+    StrikeWindow,
+    WindowMove,
+    StrikeMomentum,
+    StrikeWindowMomentum
+};
+
+struct CoinbaseConfluenceConfig {
+    CoinbaseConfluenceRule rule = CoinbaseConfluenceRule::StrikeWindow;
+    double min_move_bps = 10.0;
+    double min_momentum_10s_bps = 0.25;
+    double max_price = 0.90;
+};
+
+// Historical Coinbase-only PAPER candidates: strike/window confluence,
+// 5m window move, 15m strike plus aligned 10s momentum, or 5m confluence
+// with aligned 10s momentum.
+std::optional<WindowBotSignal> coinbase_confluence_entry(
+    const CoinbaseConfluenceInput& in,
+    const CoinbaseConfluenceConfig& cfg);
 
 struct LeadLagInput {
     std::string condition_id;
@@ -28,6 +57,9 @@ struct LeadLagInput {
     double cb_move_2s_bps = 0.0;
     double cb_move_5s_bps = 0.0;
     double cb_chainlink_lead_bps = 0.0;
+    double window_cb_delta_pct = 0.0;
+    double window_oracle_delta_pct = 0.0;
+    bool window_deltas_ready = false;
     double oracle_move_2s_bps = 0.0;
     double binance_move_2s_bps = 0.0;
     double ensemble_up_probability = 0.5;
@@ -39,6 +71,9 @@ struct LeadLagInput {
     int down_book_age_ms = 0;
     double up_ask = 0.0;
     double down_ask = 0.0;
+    double up_bid = 0.0;
+    double down_bid = 0.0;
+    double tick_size = 0.01;
     double up_spread_pct = 999.0;
     double down_spread_pct = 999.0;
     double conservative_up_probability = 0.5;
@@ -55,6 +90,9 @@ struct LeadLagConfig {
     double min_cb_move_bps = 0.5;
     double min_cb_move_5s_bps = 1.0;
     double min_cb_lead_bps = 0.5;
+    bool require_window_cb_lead = false;
+    double min_window_cb_delta_pct = 0.0;
+    double max_window_oracle_delta_pct = 0.0;
     double min_model_confidence = 0.20;
     double profit_target_pct = 15.0;
     double max_oracle_counter_bps = 1.5;
@@ -63,12 +101,13 @@ struct LeadLagConfig {
     double max_price = 0.95;
     double max_spread_pct = 8.0;
     int max_book_age_ms = 1000;
+    int maker_improve_ticks = 0;
     int stop_entry_secs = 45;
     int stop_entry_5m_secs = 90;
     int stop_entry_15m_secs = 270;
     int max_secs_remaining_5m = 0;  // 0 disables the opening delay
     int max_secs_remaining_15m = 0; // 0 disables the opening delay
-    int max_entries_per_window = 24;
+    int max_entries_per_window = 24; // distinct filled lead-scalp orders
     double rearm_bps = 0.25;
 };
 
@@ -84,6 +123,9 @@ struct LateSniperInput {
     double down_bid = 0.0;
     double down_ask = 0.0;
     double tick_size = 0.01;
+    // Settlement forecast. A late quote is only eligible when a conservative
+    // probability derived from these fields clears its own price; the live
+    // book favorite alone is not evidence of value.
     double conditional_up_probability = 0.5;
     double conditional_up_low = 0.5;
     double conditional_up_high = 0.5;
@@ -92,6 +134,7 @@ struct LateSniperInput {
     bool forecast_ready = false;
     bool cb_fresh = false;
     bool oracle_fresh = false;
+    double oracle_delta_pct = 0.0;
     double fee_rate = 0.07;
     int fee_exponent = 1;
 };
@@ -107,6 +150,7 @@ struct LateSniperConfig {
     double min_price = 0.82;
     double max_price = 0.97;
     double min_net_edge_pct = 3.0;
+    double min_open_delta_pct = 0.0;
 };
 
 struct ConditionalTwapProbability {
@@ -114,6 +158,7 @@ struct ConditionalTwapProbability {
     double probability_up = 0.5;
     double low_up = 0.5;
     double high_up = 0.5;
+    const char* status = "not_evaluated";
 };
 
 // Estimate the final settlement TWAP probability conditioned on the TWAP
@@ -131,7 +176,7 @@ class WindowBots {
 public:
     std::optional<WindowBotSignal> lead_lag_entry(
         const LeadLagInput& in, const LeadLagConfig& cfg,
-        int entries_this_window, std::string* reject_reason = nullptr);
+        int filled_entries_this_window, std::string* reject_reason = nullptr);
 
     std::optional<WindowBotSignal> late_sniper_entry(
         const LateSniperInput& in, const LateSniperConfig& cfg,
@@ -141,7 +186,7 @@ private:
     struct LeadState {
         int64_t window_close_ms = 0;
         int64_t last_signal_ms = 0;
-        int entries_at_signal = 0;
+        int filled_entries_at_signal = 0;
         bool armed = true;
         bool left_rearm_zone = false;
         int last_direction = 0;

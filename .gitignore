@@ -89,6 +89,9 @@ mobile/android/app/debug.keystore
 
 # Only the selected cockpit components are part of the public source release.
 /scripts/*
+!/scripts/cockpit.webmanifest
+!/scripts/cockpit_assets/
+!/scripts/cockpit_assets/*.png
 !/scripts/accounting.py
 !/scripts/cockpit.py
 !/scripts/cockpit_analytics.py

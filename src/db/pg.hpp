@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 #include "core/types.hpp"
+#include "engine/cross_asset_sync.hpp"
 
 // libpqxx 7.10 explicitly instantiates these variable templates in its shared
 // library.  Instantiating them again in an executable lets ELF interposition
@@ -43,6 +44,8 @@ public:
     std::pair<std::string, std::string> candles_range(const std::string& symbol);
     double oracle_price_at_or_before(const std::string& asset,
                                      std::int64_t ts_ms) noexcept;
+    double coinbase_price_at_or_before(const std::string& asset,
+                                       std::int64_t ts_ms) noexcept;
 
     std::string market_reference_key(const std::string& condition_id) noexcept;
 
@@ -103,13 +106,18 @@ public:
                               ShareSide side,
                               const std::vector<PriceLevel>& bids,
                               const std::vector<PriceLevel>& asks,
-                              double best_bid, double best_ask) noexcept;
+                              double best_bid, double best_ask,
+                              int max_levels = 20,
+                              std::int64_t captured_ms = 0) noexcept;
     void insert_pm_trade(const std::string& condition_id,
                          const std::string& token_id,
                          ShareSide side,
                          double price, double size,
                          std::int64_t exchange_ms,
-                         std::optional<OrderDir> aggressor = std::nullopt) noexcept;
+                         std::int64_t received_ms,
+                         bool size_available,
+                         std::optional<OrderDir> aggressor = std::nullopt,
+                         std::optional<OrderDir> reported_side = std::nullopt) noexcept;
     void upsert_market(const std::string& condition_id,
                        const std::string& asset, int horizon_s,
                        double target_price,
@@ -147,6 +155,10 @@ public:
     void insert_window_event(const std::string& condition_id,
                              const std::string& event_type,
                              const std::string& payload_json) noexcept;
+    void insert_cross_asset_sync_sample(
+        const std::string& observer_instance,
+        const CrossAssetSyncSample& sample,
+        const std::string& payload_json) noexcept;
     void insert_feature(const std::string& condition_id,
                         const std::string& payload_json,
                         int schema_ver = 1) noexcept;
@@ -167,6 +179,10 @@ public:
         int64_t window_close_ms = 0;  // epoch ms; 0 if market not found in DB
     };
     std::vector<RawFillRow> load_fills_for_session(const std::string& mode) noexcept;
+    // Hold-mode PAPER restart recovery: replay only the immediately previous
+    // session for this instance, avoiding unrelated historical paper positions.
+    std::vector<RawFillRow> load_previous_session_fills(
+        const std::string& mode, const std::string& current_session_id) noexcept;
 
     struct RawOpenOrderRow {
         std::string client_order_id;
@@ -185,6 +201,8 @@ public:
     };
     std::vector<RawOpenOrderRow> load_open_orders_for_instance() noexcept;
 
+    // Current independent forecast published by the Prediction page. The bot
+    // uses this snapshot as a fail-closed pre-order gate when configured.
     struct PredictionGateSnapshot {
         std::string condition_id;
         std::string asset;
