@@ -6928,7 +6928,7 @@ def api_activity_fill_events(order_rows, instance=None, limit=200):
     """, tuple(args))
 
 
-def api_activity(instance=None, tape_only=False):
+def api_activity(instance=None, tape_only=False, force=False):
     """Slower activity payload with durable cross-mode trade history."""
     if tape_only:
         # Keep the always-visible fill ticker lightweight. The complete
@@ -6961,7 +6961,7 @@ def api_activity(instance=None, tape_only=False):
     key = instance or ""
     now = time.monotonic()
     hit = _activity_cache.get(key)
-    if hit and now - hit[0] < 1.5:
+    if not force and hit and now - hit[0] < 3.0:
         return hit[1]
     try:
         exit_performance = api_exit_performance(instance)
@@ -11210,7 +11210,8 @@ ROUTES = {
         qs.get("mode", [None])[0]),
     "/api/activity": lambda qs: api_activity(
         qs.get("instance", [""])[0] or None,
-        tape_only=qs.get("tape", [""])[0] == "1"),
+        tape_only=qs.get("tape", [""])[0] == "1",
+        force=qs.get("force", [""])[0] == "1"),
     "/api/execution": lambda qs: api_execution(qs.get("instance", [""])[0] or None),
     "/api/tournament": lambda qs: api_tournament(),
     "/api/supervisor_feed": lambda qs: api_supervisor_feed(int(qs.get("limit", ["15"])[0])),

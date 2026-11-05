@@ -3399,8 +3399,11 @@ async function loadActivity(force=false){
   if(!force&&S.activity.ts&&now-S.activity.ts<1800)return;
   S.activityRefreshing=true;
   try{
-    const qs=S.curInstance?`?instance=${S.curInstance}`:'';
-    const r=await apiFetch(`/api/activity${qs}`);
+    const params=new URLSearchParams();
+    if(S.curInstance)params.set('instance',S.curInstance);
+    if(force)params.set('force','1');
+    const qs=params.toString();
+    const r=await apiFetch(`/api/activity${qs?`?${qs}`:''}`);
     if(!r)return;
     S.activity={...r,ts:Date.now()};
     if(S.curTab==='logs')renderActivityStream(S.activity);
