@@ -6928,8 +6928,36 @@ def api_activity_fill_events(order_rows, instance=None, limit=200):
     """, tuple(args))
 
 
-def api_activity(instance=None):
+def api_activity(instance=None, tape_only=False):
     """Slower activity payload with durable cross-mode trade history."""
+    if tape_only:
+        # Keep the always-visible fill ticker lightweight. The complete
+        # activity payload also reconstructs settlement accounting and is
+        # only needed while its Overview, Positions, or Logs workspace is open.
+        instance_clause = "AND o.instance=%s" if instance else ""
+        args = (instance,) if instance else ()
+        orders = q(f"""WITH recent_orders AS (
+              SELECT o.client_order_id,o.ts_created,o.source,
+                     o.direction::text AS direction,
+                     o.status::text AS status,
+                     COALESCE(NULLIF(to_jsonb(o)->>'outcome_label',''),
+                              o.side_label::text) AS side_label,
+                     o.price,o.notional_usd,o.instance,o.condition_id
+                FROM vp.orders o
+               WHERE o.status='filled' {instance_clause}
+               ORDER BY o.ts_created DESC,o.client_order_id DESC LIMIT 30
+            )
+            SELECT r.client_order_id::text AS client_order_id,r.ts_created,
+                   r.source,r.direction,r.status,r.side_label,r.price,
+                   COALESCE(SUM(f.price*f.size_shares),r.notional_usd) AS notional_usd,
+                   r.instance,COALESCE(m.asset,'') AS asset
+              FROM recent_orders r
+              LEFT JOIN vp.fills f ON f.client_order_id=r.client_order_id
+              LEFT JOIN vp.pm_markets m ON m.condition_id=r.condition_id
+             GROUP BY r.client_order_id,r.ts_created,r.source,r.direction,r.status,
+                      r.side_label,r.price,r.notional_usd,r.instance,m.asset
+             ORDER BY r.ts_created DESC,r.client_order_id DESC""", args)
+        return {"orders": orders, "server_ts": int(time.time() * 1000)}
     key = instance or ""
     now = time.monotonic()
     hit = _activity_cache.get(key)
@@ -11180,7 +11208,9 @@ ROUTES = {
         qs.get("as_of_ms", [None])[0],
         qs.get("instance", [""])[0] or None,
         qs.get("mode", [None])[0]),
-    "/api/activity": lambda qs: api_activity(qs.get("instance", [""])[0] or None),
+    "/api/activity": lambda qs: api_activity(
+        qs.get("instance", [""])[0] or None,
+        tape_only=qs.get("tape", [""])[0] == "1"),
     "/api/execution": lambda qs: api_execution(qs.get("instance", [""])[0] or None),
     "/api/tournament": lambda qs: api_tournament(),
     "/api/supervisor_feed": lambda qs: api_supervisor_feed(int(qs.get("limit", ["15"])[0])),

@@ -3393,6 +3393,7 @@ async function refresh(force=false){
 }
 
 async function loadActivity(force=false){
+  if(!activitySnapshotWorkspace())return loadFillTape();
   if(S.activityRefreshing)return;
   const now=Date.now();
   if(!force&&S.activity.ts&&now-S.activity.ts<1800)return;
@@ -3680,12 +3681,11 @@ async function cancelOpenOrders(){
 // ── Live fill ticker tape ─────────────────────────────────────────────────
 let _tapeSig='';
 function renderFillTape(d){
-  const orders=((d.orders||{}).orders||[]).filter(o=>o.status==='filled').slice(0,30);
-  const settles=((d.settles||{}).settles||[]).slice(0,12);
-  const sig=orders.length?orders[0].ts_created+'|'+orders[0].price+'|'+orders[0].instance:'';
-  if(sig===_tapeSig&&$('tapeTrack').childElementCount)return;
+  const source=Array.isArray(d)?d:((d.orders||{}).orders||[]);
+  const orders=source.filter(o=>o.status==='filled').slice(0,30);
+  const sig=orders.map(o=>[o.client_order_id,o.ts_created,o.source,o.direction,o.side_label,o.price,o.notional_usd,o.instance,o.asset].join(':')).join('|');
+  if(sig===_tapeSig)return;
   _tapeSig=sig;
-  const settleByCid={};settles.forEach(s=>{settleByCid[s.condition_id+(s.side_label||'')]=s;});
   const items=orders.map(o=>{
     const up=(o.side_label||'').toUpperCase()==='UP';
     const buy=o.direction==='buy';
@@ -3705,6 +3705,19 @@ function renderFillTape(d){
   }).join('');
   // duplicate content so the -50% translate loops seamlessly
   $('tapeTrack').innerHTML=items+items;
+}
+
+function activitySnapshotWorkspace(){return ['overview','positions','logs'].includes(S.curTab);}
+let _fillTapeRefreshing=false;
+async function loadFillTape(){
+  if(_fillTapeRefreshing||document.hidden)return;
+  _fillTapeRefreshing=true;
+  try{
+    const params=new URLSearchParams({tape:'1'});
+    if(S.curInstance)params.set('instance',S.curInstance);
+    const r=await apiFetch(`/api/activity?${params}`,{timeoutMs:4000});
+    if(r&&Array.isArray(r.orders))renderFillTape(r.orders);
+  }finally{_fillTapeRefreshing=false;}
 }
 
 // ── Stats bar ─────────────────────────────────────────────────────────────
