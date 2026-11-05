@@ -2250,6 +2250,7 @@ const PREDICTION_REFERENCE_SOURCES=[
   {key:'okx',label:'OKX',color:'#f28876',maxAge:5},
 ];
 const PREDICTION_REFERENCE_SERIES=[...PREDICTION_REFERENCE_SOURCES.map(source=>({key:source.key,label:source.key==='oracle'?'CHAINLINK':source.label})),{key:'poly_up',label:'POLY UP'},{key:'poly_down',label:'POLY DOWN'}];
+const PREDICTION_REFERENCE_POLY_LIMIT=12000,PREDICTION_REFERENCE_DIRECT_LIMIT=6000,PREDICTION_REFERENCE_TRIM_BATCH=512;
 function renderPredictionReferenceSeriesControls(){
   const target=$('predictionReferenceSeriesToggles');if(!target)return;
   const current=target.dataset.ready==='true';
@@ -2302,7 +2303,7 @@ function recordPredictionReferencePolyTick(side,value,sourceTimestamp){
   const point={t:ts,value:price,source_ts_ms:sourceTs,received_at_ms:now,live:true};
   if(last&&ts<=last.t){if(ts===last.t){last.value=price;last.source_ts_ms=sourceTs;last.received_at_ms=now;}else points.push({...point,t:Math.max(Number(last.t)+1,now)});}
   else points.push(point);
-  while(points.length>12000)points.shift();
+  if(points.length>PREDICTION_REFERENCE_POLY_LIMIT+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-PREDICTION_REFERENCE_POLY_LIMIT);
   const state=S.predictionReferencePolySocket;if(state){state.lastQuoteAt=now;state.lastSourceTimestamp=sourceTs;state.status='live';}
   predictionReferencePolyStatus();
   if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset&&!S.predictionReferencePaintTimer){
@@ -2563,7 +2564,7 @@ function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
   const series=S.predictionReferenceSamples[asset]||(S.predictionReferenceSamples[asset]={}),points=series[source]||(series[source]=[]),last=points.at(-1);
   if(last&&last.t===ts)last.value=value;
   else if(!last||ts>last.t)points.push({t:ts,value,age_s:Math.max(0,(now-ts)/1000),direct:true});
-  while(points.length>6000)points.shift();
+  if(points.length>PREDICTION_REFERENCE_DIRECT_LIMIT+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-PREDICTION_REFERENCE_DIRECT_LIMIT);
   if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset){
     if(now-S.predictionReferenceDirectUiAt>100){S.predictionReferenceDirectUiAt=now;patchPredictionReferenceDirectQuotes(asset);}
     if(!S.predictionReferencePaintTimer)S.predictionReferencePaintTimer=setTimeout(()=>{S.predictionReferencePaintTimer=null;if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();},70);
@@ -2743,6 +2744,20 @@ function predictionReferenceDecimate(points,limit=1400){
   }
   return reduced;
 }
+function predictionReferenceRangeBounds(points,start,end){
+  const lowerBound=(target,upper)=>{
+    let lo=0,hi=points.length;
+    while(lo<hi){const mid=(lo+hi)>>1;if(points[mid].t<target||(upper&&points[mid].t===target))lo=mid+1;else hi=mid;}
+    return lo;
+  };
+  return[lowerBound(start,false),lowerBound(end,true)];
+}
+function predictionReferenceTimeRange(points,start,end){
+  const [from,to]=predictionReferenceRangeBounds(points,start,end);return points.slice(from,to);
+}
+function predictionReferenceFirstInRange(points,start,end){
+  const [from,to]=predictionReferenceRangeBounds(points,start,end);return from<to?points[from]:null;
+}
 function renderPredictionReferenceForecast(){
   const target=$('predictionReferenceForecast');if(!target)return;
   const card=predictionReferenceSelectedWindow();
@@ -2772,17 +2787,22 @@ function renderPredictionReferenceChart(){
   if(windowEnd<start){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">This window has not opened yet. Live venue prices are shown above.</div>';return;}
   const sourceSeries=S.predictionReferenceSamples[asset]||{},openRef=S.predictionReferenceTimeline?.open_reference,closeRef=S.predictionReferenceTimeline?.close_reference;
   const visible=S.predictionReferenceSeriesVisibility;
-  const rawBySource=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,visible[source.key]!==false?(sourceSeries[source.key]||[]).filter(point=>point.t>=viewportStart&&point.t<=viewEnd).sort((a,b)=>a.t-b.t):[]]));
+  // Feed producers keep each series time-ordered; use binary range bounds so
+  // zoomed views do not scan and re-sort every retained tick on every redraw.
+  const rawBySource=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,visible[source.key]!==false?predictionReferenceTimeRange(sourceSeries[source.key]||[],viewportStart,viewEnd):[]]));
+  const explicitOpen=Number(openRef?.price),hasExplicitOpen=Number.isFinite(explicitOpen)&&explicitOpen>0;
   let firstSpot=null;
-  for(const source of PREDICTION_REFERENCE_SOURCES)for(const point of sourceSeries[source.key]||[]){
-    if(point.t<start||point.t>windowEnd)continue;
-    if(!firstSpot||point.t<firstSpot.t)firstSpot=point;
+  if(!hasExplicitOpen){
+    for(const source of PREDICTION_REFERENCE_SOURCES){
+      const point=predictionReferenceFirstInRange(sourceSeries[source.key]||[],start,windowEnd);
+      if(point&&(!firstSpot||point.t<firstSpot.t))firstSpot=point;
+    }
   }
-  const explicitOpen=Number(openRef?.price),anchorPrice=Number.isFinite(explicitOpen)&&explicitOpen>0?explicitOpen:(firstSpot?.value||null);
-  const anchorSource=Number.isFinite(explicitOpen)&&explicitOpen>0?(openRef?.source||'window opening reference'):(firstSpot?'first available in-window feed':'opening reference unavailable');
+  const anchorPrice=hasExplicitOpen?explicitOpen:(firstSpot?.value||null);
+  const anchorSource=hasExplicitOpen?(openRef?.source||'window opening reference'):(firstSpot?'first available in-window feed':'opening reference unavailable');
   const samplesBySource=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,rawBySource[source.key].map(point=>({...point,move_pct:anchorPrice?(point.value/anchorPrice-1)*100:null}))]));
-  const visibleShares=Object.fromEntries(['up','down'].map(side=>[side,visible[`poly_${side}`]!==false?(sourceSeries[`poly_${side}`]||[]).filter(point=>point.t>=viewportStart&&point.t<=viewEnd).sort((a,b)=>a.t-b.t):[]]));
-  const openingShares=Object.fromEntries(['up','down'].map(side=>[side,(sourceSeries[`poly_${side}`]||[]).filter(point=>point.t>=start&&point.t<=windowEnd).sort((a,b)=>a.t-b.t)[0]||null]));
+  const visibleShares=Object.fromEntries(['up','down'].map(side=>[side,visible[`poly_${side}`]!==false?predictionReferenceTimeRange(sourceSeries[`poly_${side}`]||[],viewportStart,viewEnd):[]]));
+  const openingShares=Object.fromEntries(['up','down'].map(side=>[side,predictionReferenceFirstInRange(sourceSeries[`poly_${side}`]||[],start,windowEnd)]));
   const allMoves=PREDICTION_REFERENCE_SOURCES.flatMap(source=>samplesBySource[source.key].map(point=>point.move_pct).filter(Number.isFinite));
   if(visible.oracle!==false&&closeRef?.price!=null&&anchorPrice)allMoves.push((Number(closeRef.price)/anchorPrice-1)*100);
   const shareMode=S.predictionReferenceShareMode||'delta';
