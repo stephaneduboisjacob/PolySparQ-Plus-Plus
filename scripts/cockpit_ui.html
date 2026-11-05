@@ -2715,6 +2715,7 @@ async function refreshPredictionReferenceWindow(force=false,board=S.predictionBo
   if(S.predictionReferenceApiUnavailable&&!force){renderPredictionReferenceChart();updatePredictionReferenceWindowStatus();return;}
   if(!force&&!changed&&Date.now()-S.predictionReferenceFetchAt<10000)return;
   const controller=new AbortController();S.predictionReferenceRequest={key,controller};S.predictionReferenceFetchAt=Date.now();
+  const requestTimeout=setTimeout(()=>controller.abort(),6000);
   const qs=new URLSearchParams({asset,horizon_seconds:String(horizon),window_open_ms:String(open),window_close_ms:String(close),point_limit:'600'});
   try{
     const response=await fetch(`/api/prediction_reference?${qs}`,{headers:_demoHeaders(),cache:'no-store',signal:controller.signal});
@@ -2726,8 +2727,12 @@ async function refreshPredictionReferenceWindow(force=false,board=S.predictionBo
     mergePredictionReferenceWindowSeries(data,S.predictionReferenceWindow);
     connectPredictionReferencePolySocket(data);
   }catch(error){
-    if(error.name!=='AbortError'&&S.predictionReferenceWindow?.key===key){S.predictionReferenceError=error.message||'request failed';}
+    if(S.predictionReferenceWindow?.key===key){
+      if(controller.signal.aborted){S.predictionReferenceError='Selected-window data request timed out; retrying shortly.';S.predictionReferenceFetchAt=Date.now()-7000;}
+      else if(error.name!=='AbortError')S.predictionReferenceError=error.message||'request failed';
+    }
   }finally{
+    clearTimeout(requestTimeout);
     if(S.predictionReferenceRequest?.controller===controller)S.predictionReferenceRequest=null;
     if(S.predictionReferenceWindow?.key===key){updatePredictionReferenceWindowStatus();renderPredictionReferenceChart();}
   }
