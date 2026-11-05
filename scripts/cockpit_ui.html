@@ -1635,7 +1635,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
           <div class="str-side-label">BOT CONFIGURATION</div>
           <select id="configSelect" class="configSelect"></select>
           <div class="str-side-label">FIND A SETTING</div>
-          <div class="str-search-wrap"><input id="strategySearch" class="str-search" placeholder="Search name, key or explanation…" autocomplete="off"></div>
+          <div class="str-search-wrap"><input id="strategySearch" class="str-search" placeholder="Search settings…  /" aria-label="Search strategy settings" autocomplete="off"></div>
           <div class="str-side-label">SHOW</div>
           <select id="strategyFilter">
             <option value="all">All settings</option>
@@ -1645,8 +1645,9 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
           <div class="str-side-actions">
             <button class="btn-sm" onclick="setStrategyGroups(true)">EXPAND ALL</button>
             <button class="btn-sm" onclick="setStrategyGroups(false)">COLLAPSE</button>
+            <button class="btn-sm str-next-change" id="btnStrategyNextChange" type="button" onclick="showNextStrategyChange()" disabled>NEXT UNSAVED</button>
           </div>
-          <div class="str-side-note">Changes are validated and written only when you press save. Strategy knobs hot-reload quickly; connection and runtime changes can require a restart.</div>
+          <div class="str-side-note">Changes are validated and written only when you press save. Strategy knobs hot-reload quickly; connection and runtime changes can require a restart. Shortcuts: / search · Ctrl/⌘+S save.</div>
           <div class="str-desktop-save-actions">
             <button id="btnSaveConfig" class="btn-primary">SAVE SETTINGS</button>
             <div id="saveStatus"></div>
@@ -3289,7 +3290,10 @@ document.querySelectorAll('.nav-tab').forEach(btn=>{
     syncMobileNav();
     document.querySelectorAll('.tab-section').forEach(s=>s.classList.remove('active'));
     $(`tab${btn.dataset.tab[0].toUpperCase()+btn.dataset.tab.slice(1)}`).classList.add('active');
-    if(S.curTab==='overview'){renderOverview(S.data||{status:{}});loadOverviewSlow(true);}
+    if(S.curTab==='overview'){
+      if(S.data){renderOperatorRadar(S.data,true);renderPositionTriage(S.data);}
+      renderOverview(S.data||{status:{}});loadOverviewSlow(true);
+    }
     if(S.curTab==='positions')loadActivity(true);
     if(S.curTab==='settlements')loadSettlementHistory(true);
     if(S.curTab==='execution')loadExecution(true);
@@ -3333,22 +3337,45 @@ function _demoHeaders(){
 }
 
 // ── Fetch helpers ─────────────────────────────────────────────────────────
-async function apiFetch(url){try{const r=await fetch(url,{headers:_demoHeaders()});return r.ok?r.json():null;}catch(_){return null;}}
-async function apiPost(url,body){try{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',..._demoHeaders()},body:JSON.stringify(body)});return r.json();}catch(e){return{error:String(e)};}}
+async function apiFetch(url,{timeoutMs=15000}={}){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const r=await fetch(url,{headers:_demoHeaders(),signal:controller.signal});
+    return r.ok?await r.json():null;
+  }catch(_){return null;}
+  finally{clearTimeout(timer);}
+}
+async function apiPost(url,body,{timeoutMs=30000}={}){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json',..._demoHeaders()},body:JSON.stringify(body),signal:controller.signal});
+    return await r.json();
+  }catch(e){return{error:controller.signal.aborted?`Request timed out after ${Math.ceil(timeoutMs/1000)} seconds`:String(e)};}
+  finally{clearTimeout(timer);}
+}
 
 // ── Main refresh ──────────────────────────────────────────────────────────
+let _lastLiveLitePaintTs=0;
 async function refresh(force=false){
   if((S.paused&&!force)||S.refreshing)return;
   S.refreshing=true;
   let d,t0=performance.now();
   try{
     const qs=S.curInstance?`?instance=${S.curInstance}`:'';
-    d=await apiFetch(`/api/live_lite${qs}`);
+    d=await apiFetch(`/api/live_lite${qs}`,{timeoutMs:5000});
   }finally{S.refreshing=false;}
   if(!d)return;
   const paint0=performance.now();
   S.fetchMs=Math.round(performance.now()-t0);
   S.lastLoopAt=Date.now();
+  const serverTs=Number(d.server_ts)||0;
+  if(!force&&serverTs&&serverTs===_lastLiveLitePaintTs){
+    S.lastServerTs=serverTs;
+    S.paintMs=Math.round(performance.now()-paint0);
+    updateSpeedPanel();
+    return;
+  }
+  _lastLiveLitePaintTs=serverTs;
   S.lastServerTs=d.server_ts||Date.now();
   S.data=d;
   const st=d.status||{};
@@ -3356,9 +3383,8 @@ async function refresh(force=false){
   updateStatsBar(st,d.health||{});
   $('modeBadge').textContent=(st.mode||'paper').toUpperCase();
   $('modeBadge').className=`mode-badge ${(st.mode||'paper').toLowerCase()}`;
-  renderOperatorRadar(d);
-  renderPositionTriage(d);
-  if(S.curTab==='overview')renderOverview(d);
+  renderOperatorRadar(d,S.curTab==='overview');
+  if(S.curTab==='overview'){renderPositionTriage(d);renderOverview(d);}
   if(S.curTab==='positions')renderPositions(d);
   if(S.curTab==='markets')renderMarkets(d.markets||{});
   S.paintMs=Math.round(performance.now()-paint0);
@@ -3743,7 +3769,7 @@ function persistenceQueueRadarAlerts(rows,sampledMs,now=Date.now(),available=tru
   return alerts;
 }
 
-function renderOperatorRadar(d){
+function renderOperatorRadar(d,paint=true){
   const host=$('operatorRadar');if(!host)return;
   const now=Date.now(),serverTs=Number(d?.server_ts);
   const complete=!!(d&&Array.isArray(d.radar)&&d.status&&typeof d.status==='object'&&
@@ -3759,6 +3785,10 @@ function renderOperatorRadar(d){
   host.dataset.radarAlertLevel=complete?(alerts.some(a=>a.level==='critical')?'critical':alerts.some(a=>a.level==='warn')?'warn':alerts.length?'info':'clear'):'';
   host.dataset.radarAlertsJson=complete?JSON.stringify(alerts):'[]';
   host.dataset.radarStaleEmpty='false';
+  const renderKey=complete?JSON.stringify(alerts):'incomplete';
+  if(!paint){updateOperatorRadarFreshness(now);return;}
+  if(host.dataset.radarMarkupKey===renderKey){updateOperatorRadarFreshness(now);return;}
+  host.dataset.radarMarkupKey=renderKey;
   if(!complete){
     host.innerHTML='<div class="radar-item warn"><div class="radar-level">UNKNOWN</div><div class="radar-main"><div class="radar-title">Alert snapshot unavailable</div><div class="radar-detail">Required status, position, market, health, or timestamp data is missing. Current alert state is unknown.</div></div><button class="radar-action" onclick="refresh(true)">RETRY</button></div>';
     updateOperatorRadarFreshness(now);return;
@@ -3866,6 +3896,7 @@ function updateOperatorRadarFreshness(now=Date.now()){
     if(host.dataset.radarAlertCount==='0'&&host.dataset.radarStaleEmpty!=='true'){
       host.innerHTML='<div class="radar-item warn"><div class="radar-level">UNKNOWN</div><div class="radar-main"><div class="radar-title">Last snapshot was clear</div><div class="radar-detail">That result is stale; the current operator alert state is unknown.</div></div><button class="radar-action" onclick="refresh(true)">RETRY</button></div>';
       host.dataset.radarStaleEmpty='true';
+      host.dataset.radarMarkupKey='';
     }
     return;
   }
@@ -3897,9 +3928,34 @@ function renderPositionTriage(d){
   }).join('');
 }
 
+function updateStrategyFeedFreshness(now=Date.now()){
+  const chip=$('strategyFeedFreshness');if(!chip)return;
+  const timestamp=Number(S.lastServerTs),age=timestamp>0?Math.max(0,now-timestamp):null;
+  const state=age===null?'unknown':age<2500?'fresh':age<7000?'delayed':'stale';
+  chip.dataset.state=state;
+  chip.textContent=age===null?'SNAPSHOT · WAITING':`SNAPSHOT · ${(age/1000).toFixed(1)}s`;
+  chip.setAttribute('aria-label',age===null?'Live REST snapshot waiting':`Live REST snapshot ${state}, ${Math.floor(age/1000)} seconds old`);
+}
+
 function updateSpeedPanel(){
   updateOperatorRadarFreshness();
+  updateStrategyFeedFreshness();
   const host=$('speedPanel');if(!host)return;
+  if(host.dataset.speedCellsBuilt){
+    const sseAge=ageMs(S.lastSseAt),serverLag=S.lastServerTs?Date.now()-S.lastServerTs:null;
+    const values=[
+      [S.fetchMs!=null?S.fetchMs+'ms':'—',speedClass(S.fetchMs)],
+      [S.paintMs!=null?S.paintMs+'ms':'—',speedClass(S.paintMs)],
+      [sseAge!=null?(Math.round(sseAge/100)/10)+'s':'—',sseAge==null?'warn':sseAge<1800?'good':sseAge<6000?'warn':'bad'],
+      [serverLag!=null?(Math.round(serverLag/100)/10)+'s':'—',serverLag==null?'warn':serverLag<1600?'good':serverLag<5000?'warn':'bad']
+    ];
+    host.querySelectorAll('.speed-val').forEach((el,index)=>{
+      const [text,state]=values[index]||['—','warn'];
+      if(el.textContent!==text)el.textContent=text;
+      const className='speed-val '+state;if(el.className!==className)el.className=className;
+    });
+    tickFeedPulse();return;
+  }
   const sseAge=ageMs(S.lastSseAt);
   const serverLag=S.lastServerTs?Date.now()-S.lastServerTs:null;
   host.innerHTML=`
@@ -3907,6 +3963,7 @@ function updateSpeedPanel(){
     <div class="speed-cell"><div class="speed-label">PAINT</div><div class="speed-val ${speedClass(S.paintMs)}">${S.paintMs!=null?S.paintMs+'ms':'—'}</div></div>
     <div class="speed-cell"><div class="speed-label">STREAM AGE</div><div class="speed-val ${sseAge==null?'warn':sseAge<1800?'good':sseAge<6000?'warn':'bad'}">${sseAge!=null?(Math.round(sseAge/100)/10)+'s':'—'}</div></div>
     <div class="speed-cell"><div class="speed-label">SERVER LAG</div><div class="speed-val ${serverLag==null?'warn':serverLag<1600?'good':serverLag<5000?'warn':'bad'}">${serverLag!=null?(Math.round(serverLag/100)/10)+'s':'—'}</div></div>`;
+  host.dataset.speedCellsBuilt='true';
   tickFeedPulse();
 }
 
@@ -8880,16 +8937,55 @@ function knobInput(entry){
   return`<input class="str-val" type="text" ${attrs} value="${esc(sv)}" oninput="onKnobEdit(this)" spellcheck="false">`;
 }
 
-async function loadConfigs(){
-  const r=await apiFetch('/api/configs');
-  const cfgs=(r||{}).configs||[];
-  $('configSelect').innerHTML=cfgs.map(c=>`<option value="${esc(c.name)}">${esc(c.label||c.name)}${c.external?' · EXTERNAL PROFILE':''}</option>`).join('');
-  if(cfgs.length&&!S.curConfig)S.curConfig=cfgs[0].name;
-  $('configSelect').value=S.curConfig;
-  if(S.curConfig)loadConfig(S.curConfig);
+let _strategyConfigsLoading=false,_strategyConfigsCheckedAt=0,_strategyConfigsSignature='';
+function strategyInvalidCount(){return document.querySelectorAll('#strategyEditor .knob-card.invalid').length;}
+function hasStrategyDrafts(){return Object.keys(S.configEdits||{}).length>0||strategyInvalidCount()>0;}
+function renderStrategyLoadState(state,title,detail){
+  const host=$('strategyEditor');if(!host)return;
+  host.innerHTML='<div class="strategy-load-state '+esc(state)+'" role="status"><h2>'+esc(title)+'</h2><p>'+esc(detail)+'</p><button type="button" class="btn-sm" onclick="loadConfigs(true)">RETRY CONNECTION</button></div>';
+}
+async function loadConfigs(force=false){
+  if(_strategyConfigsLoading)return;
+  if(!force&&Date.now()-_strategyConfigsCheckedAt<3000)return;
+  _strategyConfigsLoading=true;
+  try{
+    const r=await apiFetch('/api/configs',{timeoutMs:8000});
+    _strategyConfigsCheckedAt=Date.now();
+    if(!r||!Array.isArray(r.configs)){
+      if(S.configLoadedName)$('saveStatus').textContent='Profile list refresh failed; the loaded settings remain available.';
+      else renderStrategyLoadState('error','Could not load profiles','The cockpit did not return a readable profile list. Check the connection, then retry.');
+      return;
+    }
+    const cfgs=r.configs;
+    const signature=cfgs.map(c=>[String(c.name||''),String(c.mtime||0),String(c.label||''),c.external?'1':'0'].join(':')).join('|');
+    if(signature!==_strategyConfigsSignature){
+      $('configSelect').innerHTML=cfgs.map(c=>`<option value="${esc(c.name)}">${esc(c.label||c.name)}${c.external?' · EXTERNAL PROFILE':''}</option>`).join('');
+      _strategyConfigsSignature=signature;
+    }
+    if(S.curConfig&&!cfgs.some(c=>c.name===S.curConfig)){
+      if(hasStrategyDrafts()&&S.configLoadedName===S.curConfig){
+        const select=$('configSelect'),orphanName=S.configLoadedName;
+        if(!Array.from(select.options).some(option=>option.value===orphanName))select.add(new Option(orphanName+' · PROFILE NOT LISTED',orphanName));
+        select.value=orphanName;
+        $('saveStatus').textContent='This profile disappeared from the latest list. Your edits remain attached to it.';
+        return;
+      }
+      S.curConfig='';
+    }
+    if(cfgs.length&&!S.curConfig)S.curConfig=cfgs[0].name;
+    $('configSelect').value=S.curConfig||'';
+    if(S.curConfig)await loadConfig(S.curConfig);
+    else if(!Object.keys(S.configEdits||{}).length){
+      S.configLoadedName='';S.configFingerprint='';S.configEdits={};
+      $('strategyEditor').innerHTML='';
+      renderStrategyLoadState('empty','No strategy profiles available','No bot configuration profiles are available in this account.');
+    }
+  }finally{
+    _strategyConfigsLoading=false;
+  }
 }
 $('configSelect').onchange=function(){
-  if(Object.keys(S.configEdits||{}).length&&!confirm('Discard unsaved strategy changes?')){this.value=S.curConfig;return;}
+  if(hasStrategyDrafts()&&!confirm('Discard unsaved or invalid strategy edits?')){this.value=S.curConfig;return;}
   S.curConfig=this.value;S.configEdits={};loadConfig(S.curConfig);
 };
 
@@ -8921,13 +9017,18 @@ function renderStrategyRuntimeStatus(){
   if(button)button.disabled=state==='checking';
 }
 
-async function refreshStrategyRuntimeStatus(name=S.curConfig){
+let _strategyRuntimeCheckedAt=0,_strategyRuntimeCheckedName='';
+async function refreshStrategyRuntimeStatus(name,force){
+  if(name===undefined)name=S.curConfig;
+  if(force===undefined)force=true;
   if(!name||name!==S.curConfig)return null;
+  if(!force&&_strategyRuntimeCheckedName===name&&Date.now()-_strategyRuntimeCheckedAt<15000&&S.configRuntimeStatus?.state!=='checking')return S.configRuntimeStatus;
   S.configRuntimeStatus={state:'checking',instance:name};renderStrategyRuntimeStatus();
   let r=null;
-  try{r=await apiFetch(`/api/config/runtime?name=${encodeURIComponent(name)}`);}catch(_){r=null;}
+  try{r=await apiFetch('/api/config/runtime?name='+encodeURIComponent(name),{timeoutMs:8000});}catch(_){r=null;}
   if(name!==S.curConfig)return null;
   S.configRuntimeStatus=r&&!r.error?r:{state:'runtime_unverified',instance:name};
+  _strategyRuntimeCheckedName=name;_strategyRuntimeCheckedAt=Date.now();
   renderStrategyRuntimeStatus();
   return S.configRuntimeStatus;
 }
@@ -8935,9 +9036,7 @@ async function refreshStrategyRuntimeStatus(name=S.curConfig){
 let _strategyConfigLoadSeq=0;
 function applyStrategyDrafts(edits){
   for(const [qkey,value] of Object.entries(edits||{})){
-    const card=[...document.querySelectorAll('#strategyEditor .knob-card')]
-      .find(el=>el.querySelector('[data-qkey]')?.dataset.qkey===qkey||
-                el.querySelector('.asset-picker')?.dataset.qkey===qkey);
+    const card=S.strategyCardByKey?.get(qkey);
     if(!card)continue;
     const input=card.querySelector('.str-val'),picker=card.querySelector('.asset-picker');
     if(picker){
@@ -8956,29 +9055,58 @@ function applyStrategyDrafts(edits){
     }
     card.classList.add('changed');
   }
-  updateStrategyState();
+  updateStrategyState(true);
 }
 
 async function loadConfig(name,recheckRuntimeAfterSave=false,discardPending=false){
   const loadSeq=++_strategyConfigLoadSeq;
   const pending=!discardPending&&name===S.curConfig?{...(S.configEdits||{})}:{};
-  const r=await apiFetch(`/api/config?name=${encodeURIComponent(name)}`);
+  const r=await apiFetch('/api/config?name='+encodeURIComponent(name),{timeoutMs:10000});
   if(loadSeq!==_strategyConfigLoadSeq||name!==S.curConfig)return;
   if(!r||r.error){
-    if(Object.keys(pending).length){$('saveStatus').innerHTML=`<span class="save-status err">Could not refresh profile; ${Object.keys(pending).length} unsaved change${Object.keys(pending).length===1?'':'s'} kept.</span>`;return;}
-    $('strategyEditor').innerHTML=`<div class="empty-state"><div>${r&&r.error?r.error:'Not found'}</div></div>`;return;
+    if(Object.keys(pending).length){
+      $('saveStatus').innerHTML='<span class="save-status err">Could not refresh profile; '+Object.keys(pending).length+' unsaved change'+(Object.keys(pending).length===1?'':'s')+' kept.</span>';
+      return;
+    }
+    if(S.configLoadedName===name){
+      $('saveStatus').textContent='Profile refresh failed; the last loaded settings remain visible.';
+      return;
+    }
+    renderStrategyLoadState('error','Profile unavailable',r&&r.error?String(r.error):'The cockpit could not load this profile. Check the connection, then retry.');
+    return;
   }
-  S.configRaw=r.raw||'';S.configEdits={};S.configFingerprint=String(r.redacted_config_sha256||'');S.tunableKeys=new Set(r.tunable_keys||[]);S.configExternal=!!r.external_profile;
-  S.tunableSpecs=r.tunable_specs||{};S.fullConfigEditor=!!r.full_editor;S.strategyMode=(((r.config||{}).runtime||{}).mode||'').toLowerCase();
+  const fingerprint=String(r.redacted_config_sha256||'');
+  const configChanged=S.configLoadedName!==name||fingerprint!==S.configFingerprint;
+  if(configChanged&&!discardPending&&name===S.curConfig&&strategyInvalidCount()){
+    $('saveStatus').textContent='The saved profile changed, but invalid text is being kept on screen. Fix it or reset to load the latest profile.';
+    await refreshStrategyRuntimeStatus(name,false);
+    return;
+  }
+  if(!configChanged&&!discardPending){
+    await refreshStrategyRuntimeStatus(name,false);
+    return;
+  }
+  S.configRaw=r.raw||'';
+  S.configEdits={};
+  S.configFingerprint=fingerprint;
+  S.configLoadedName=name;
+  S.tunableKeys=new Set(r.tunable_keys||[]);
+  S.configExternal=!!r.external_profile;
+  S.tunableSpecs=r.tunable_specs||{};
+  S.fullConfigEditor=!!r.full_editor;
+  S.strategyMode=(((r.config||{}).runtime||{}).mode||'').toLowerCase();
   S.configRuntimeStatus={state:'checking',instance:name};
   renderConfigEditor(r.config||{});
   S.configEdits=pending;
   if(Object.keys(pending).length)applyStrategyDrafts(pending);
-  const status=await refreshStrategyRuntimeStatus(name);
-  if(recheckRuntimeAfterSave&&status&&status.state==='file_ahead')setTimeout(()=>refreshStrategyRuntimeStatus(name),2500);
+  const status=await refreshStrategyRuntimeStatus(name,!!(recheckRuntimeAfterSave||configChanged));
+  if(recheckRuntimeAfterSave&&status&&status.state==='file_ahead')setTimeout(()=>refreshStrategyRuntimeStatus(name,true),2500);
 }
 
 function renderConfigEditor(cfg){
+  const priorSearch=$('strategySearch')?.value||'';
+  const priorFilter=$('strategyFilter')?.value||'all';
+  const priorOpenGroups=new Map(Array.from($('strategyEditor')?.querySelectorAll('.str-group')||[]).map(group=>[group.dataset.group,group.open]));
   const TUNABLE=S.tunableKeys||new Set();
   const entries=[];
   Object.entries(cfg).forEach(([sec,vals])=>{
@@ -9001,7 +9129,7 @@ function renderConfigEditor(cfg){
   const scopeCopy=`${S.configExternal?'External user profile stored outside the repository. Cockpit edits stay in that local profile. ':''}${S.fullConfigEditor?'All settings in this profile are editable. Credentials are write-only and never returned. Fingerprint covers redacted settings, not engine defaults or runtime overrides.':'Editable strategy settings only. Fingerprint covers redacted profile values, not effective runtime state.'}`;
   const fingerprint=/^[\da-f]{64}$/i.test(S.configFingerprint)?S.configFingerprint:'';
   const fingerprintChip=`<span class="str-summary-chip str-fingerprint-chip"><small>REDACTED SHA-256</small><button type="button" class="str-fingerprint-copy" ${fingerprint?`title="Copy full SHA-256 of redacted profile settings; excludes credentials, engine defaults, and runtime overrides" aria-label="Copy full redacted-config SHA-256 ${esc(fingerprint)}" onclick="copyStrategyFingerprint()"`:'disabled aria-label="Configuration fingerprint unavailable"'}>${fingerprint?esc(fingerprint.slice(0,12)):'UNAVAILABLE'}${fingerprint?' ⧉':''}</button></span>`;
-  let html=`<div class="str-head"><div class="str-head-main"><div class="str-head-title">${esc((S.curConfig||'strategy').toUpperCase())}</div><div class="str-head-sub">${scopeCopy}</div></div><div class="str-summary"><span class="str-summary-chip ${esc(mode)}">${esc(mode.toUpperCase())}</span><span class="str-summary-chip"><b id="strategyVisibleCount">${entries.length}</b> / <span id="strategyTotalCount">${entries.length}</span> SHOWN</span><span class="str-summary-chip changed"><b id="strategyChangedCount">0</b> UNSAVED</span>${fingerprintChip}</div></div>`;
+  let html=`<div class="str-head"><div class="str-head-main"><div class="str-head-title">${esc((S.curConfig||'strategy').toUpperCase())}</div><div class="str-head-sub">${scopeCopy}</div></div><div class="str-summary"><span class="str-summary-chip ${esc(mode)}">${esc(mode.toUpperCase())}</span><span class="str-summary-chip"><b id="strategyVisibleCount">${entries.length}</b> / <span id="strategyTotalCount">${entries.length}</span> SHOWN</span><span class="str-summary-chip changed"><b id="strategyChangedCount">0</b> UNSAVED</span><span id="strategyFeedFreshness" class="str-summary-chip feed-freshness" data-state="unknown" aria-live="off">SNAPSHOT · WAITING</span>${fingerprintChip}</div></div>`;
   html+=`<section id="strategyRuntimeCard" class="str-runtime-card" data-state="checking" aria-live="polite"><div class="str-runtime-main"><small class="str-runtime-kicker">RUNNING BOT · LOADED CONFIG SOURCE</small><strong id="strategyRuntimeLabel" class="str-runtime-label">CHECKING SAME-NAME BOT…</strong></div><button id="strategyRuntimeRefresh" class="str-runtime-refresh" type="button" aria-label="Refresh running bot configuration source check" onclick="refreshStrategyRuntimeStatus()">↻ CHECK RUNTIME</button><p id="strategyRuntimeDetail" class="str-runtime-detail">Checking fresh PID-matched runtime status for this profile.</p></section><div class="cfg-legend">Values are validated against the range shown beside each control. <span style="color:var(--gold)">RISK</span> marks controls that can materially change exposure.</div><div class="str-groups">`;
   STRATEGY_GROUPS.forEach((g,idx)=>{
     const rows=byGroup[g.id];if(!rows.length)return;
@@ -9010,14 +9138,22 @@ function renderConfigEditor(cfg){
       const enabled=kind==='bool'&&!!e.v;
       return`<div class="knob-card" data-search="${esc(search)}" data-kind="${esc(kind)}" data-enabled="${enabled?'true':'false'}"><div class="knob-copy"><div class="knob-label">${esc(humanKnob(e.k))}${STRATEGY_HIGH_IMPACT.has(e.k)?'<span class="knob-risk">RISK</span>':''}</div><div class="knob-key">${esc(e.qkey)}</div><div class="knob-desc">${esc(desc)}</div></div><div class="knob-control">${knobInput(e)}<div class="knob-range">${esc(knobRange(e.spec,e.k))}</div></div></div>`;
     }).join('');
-    html+=`<details class="str-group" data-group="${g.id}"${idx<6?' open':''}><summary><span class="str-group-title">${g.title}</span><span class="str-group-desc">${g.desc}</span><span class="str-group-count">${rows.length}</span></summary><div class="str-grid">${cards}</div></details>`;
+    const open=priorOpenGroups.has(g.id)?priorOpenGroups.get(g.id):idx<3;
+    html+=`<details class="str-group" data-group="${g.id}"${open?' open':''}><summary><span class="str-group-title">${g.title}</span><span class="str-group-desc">${g.desc}</span><span class="str-group-count">${rows.length}</span></summary><div class="str-grid">${cards}</div></details>`;
   });
   html+='</div>';
   if(!entries.length)html+='<div class="strategy-empty">No editable strategy knobs are present in this configuration.</div>';
   $('strategyEditor').innerHTML=html;
+  S.strategyCards=Array.from($('strategyEditor').querySelectorAll('.knob-card'));
+  S.strategyGroups=Array.from($('strategyEditor').querySelectorAll('.str-group')).map(node=>({node,cards:Array.from(node.querySelectorAll('.knob-card'))}));
+  S.strategyCardByKey=new Map();
+  for(const card of S.strategyCards){
+    const field=card.querySelector('[data-qkey]')||card.querySelector('.asset-picker');
+    if(field?.dataset.qkey)S.strategyCardByKey.set(field.dataset.qkey,card);
+  }
   renderStrategyRuntimeStatus();
-  $('strategySearch').value='';$('strategyFilter').value='all';$('saveStatus').innerHTML='';
-  updateStrategyState();
+  $('strategySearch').value=priorSearch;$('strategyFilter').value=priorFilter;$('saveStatus').innerHTML='';
+  updateStrategyState(true);
 }
 
 async function copyStrategyFingerprint(){
@@ -9041,71 +9177,133 @@ function onKnobEdit(input){
     try{val=JSON.parse(input.value);valid=Array.isArray(val);}catch(_){valid=false;}
   }else val=input.value;
   card.classList.toggle('invalid',!valid);input.classList.toggle('changed',valid);
-  if(valid){card.classList.add('changed');S.configEdits[qkey]=val;}else delete S.configEdits[qkey];
-  updateStrategyState();
+  if(valid){card.classList.add('changed');S.configEdits[qkey]=val;}
+  else{card.classList.remove('changed');delete S.configEdits[qkey];}
+  updateStrategyState(false,card);
 }
 function toggleAssetKnob(btn){
   btn.classList.toggle('on');const picker=btn.closest('.asset-picker'),card=btn.closest('.knob-card');
   const val=[...picker.querySelectorAll('.asset-chip.on')].map(x=>x.dataset.asset);
   S.configEdits[picker.dataset.qkey]=val;card.classList.add('changed');card.dataset.enabled=val.length?'true':'false';
-  updateStrategyState();
+  updateStrategyState(false,card);
+}
+function strategyCardMatches(card,term,filter){
+  let matches=!term||(card.dataset.search||'').includes(term);
+  if(filter==='changed')matches=matches&&card.classList.contains('changed');
+  if(filter==='enabled')matches=matches&&card.dataset.kind==='bool'&&card.dataset.enabled==='true';
+  return matches;
+}
+function updateStrategyFilterCard(card){
+  const term=($('strategySearch')?.value||'').trim().toLowerCase(),filter=$('strategyFilter')?.value||'all';
+  const wasVisible=!card.classList.contains('str-hidden'),isVisible=strategyCardMatches(card,term,filter);
+  if(wasVisible!==isVisible){
+    card.classList.toggle('str-hidden',!isVisible);
+    const count=$('strategyVisibleCount');
+    if(count)count.textContent=Math.max(0,(Number(count.textContent)||0)+(isVisible?1:-1));
+  }
+  const group=card.closest('.str-group');
+  if(group){
+    const any=!!group.querySelector('.knob-card:not(.str-hidden)');
+    group.classList.toggle('str-hidden',!any);
+    if(term&&any)group.open=true;
+  }
 }
 function filterStrategyKnobs(){
   const term=($('strategySearch')?.value||'').trim().toLowerCase(),filter=$('strategyFilter')?.value||'all';
   let shown=0;
-  document.querySelectorAll('#strategyEditor .knob-card').forEach(card=>{
-    let ok=!term||card.dataset.search.includes(term);
-    if(filter==='changed')ok=ok&&card.classList.contains('changed');
-    if(filter==='enabled')ok=ok&&card.dataset.kind==='bool'&&card.dataset.enabled==='true';
-    card.classList.toggle('str-hidden',!ok);if(ok)shown++;
-  });
-  document.querySelectorAll('#strategyEditor .str-group').forEach(group=>{
-    const any=[...group.querySelectorAll('.knob-card')].some(x=>!x.classList.contains('str-hidden'));
-    group.classList.toggle('str-hidden',!any);if(term&&any)group.open=true;
-  });
+  for(const card of S.strategyCards||[]){
+    const matches=strategyCardMatches(card,term,filter);
+    card.classList.toggle('str-hidden',!matches);
+    if(matches)shown++;
+  }
+  for(const group of S.strategyGroups||[]){
+    const any=group.cards.some(card=>!card.classList.contains('str-hidden'));
+    group.node.classList.toggle('str-hidden',!any);
+    if((term||filter==='changed')&&any)group.node.open=true;
+  }
   const el=$('strategyVisibleCount');if(el)el.textContent=shown;
 }
+let _strategyFilterTimer=0;
+function scheduleStrategyFilter(){
+  clearTimeout(_strategyFilterTimer);
+  _strategyFilterTimer=setTimeout(filterStrategyKnobs,70);
+}
 function setStrategyGroups(open){document.querySelectorAll('#strategyEditor .str-group:not(.str-hidden)').forEach(x=>x.open=open);}
-$('strategySearch').addEventListener('input',filterStrategyKnobs);
+$('strategySearch').addEventListener('input',scheduleStrategyFilter);
 $('strategyFilter').addEventListener('change',filterStrategyKnobs);
+function showNextStrategyChange(){
+  const changed=(S.strategyCards||[]).filter(card=>card.classList.contains('changed'));
+  if(!changed.length){$('saveStatus').textContent='No unsaved settings to review.';return;}
+  $('strategySearch').value='';$('strategyFilter').value='changed';filterStrategyKnobs();
+  const index=(Number(S.strategyChangeCursor)||0)%changed.length,card=changed[index];
+  S.strategyChangeCursor=index+1;
+  const group=card.closest('.str-group');if(group)group.open=true;
+  card.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'center'});
+  const control=card.querySelector('.str-val,.asset-chip,.knob-toggle input');
+  if(control&&control.matches('input,button'))control.focus({preventScroll:true});
+}
+function focusStrategySearch(){
+  if(S.curTab!=='strategy')document.querySelector('.nav-tab[data-tab="strategy"]')?.click();
+  requestAnimationFrame(()=>$('strategySearch')?.focus({preventScroll:true}));
+}
+window.addEventListener('beforeunload',event=>{
+  if(!hasStrategyDrafts())return;
+  event.preventDefault();event.returnValue='';
+});
 const strategyToolsMedia=window.matchMedia('(max-width:700px)');
 function syncStrategyToolsDisclosure(){const d=$('strategyToolsDisclosure');if(d)d.open=!strategyToolsMedia.matches;}
 syncStrategyToolsDisclosure();
 strategyToolsMedia.addEventListener?.('change',syncStrategyToolsDisclosure);
 function syncMobileStrategyActions(){
-  const count=Object.keys(S.configEdits||{}).length,save=$('btnSaveConfigMobile'),label=$('mobileStrategyChangeCount'),dock=$('mobileStrategyActionDock');
-  if(dock)dock.classList.toggle('has-changes',count>0);
-  if(save)save.disabled=!count;
-  if(label)label.textContent=count?`${count} UNSAVED CHANGE${count===1?'':'S'}`:'NO UNSAVED CHANGES';
+  const count=Object.keys(S.configEdits||{}).length,invalid=strategyInvalidCount(),save=$('btnSaveConfigMobile'),label=$('mobileStrategyChangeCount'),dock=$('mobileStrategyActionDock');
+  if(dock)dock.classList.toggle('has-changes',count>0||invalid>0);
+  if(save)save.disabled=!count||invalid>0;
+  if(label)label.textContent=invalid?`${count} UNSAVED · FIX ${invalid} INVALID`:count?`${count} UNSAVED CHANGE${count===1?'':'S'}`:'NO UNSAVED CHANGES';
 }
-function updateStrategyState(){
-  const n=Object.keys(S.configEdits||{}).length,el=$('strategyChangedCount');if(el)el.textContent=n;
-  const b=$('btnSaveConfig');if(b)b.disabled=!n;
+function updateStrategyState(recomputeFilter=false,changedCard=null){
+  const n=Object.keys(S.configEdits||{}).length,invalid=strategyInvalidCount(),el=$('strategyChangedCount');if(el)el.textContent=n;
+  const b=$('btnSaveConfig');if(b)b.disabled=!n||invalid>0;
+  const next=$('btnStrategyNextChange');if(next)next.disabled=!n;
+  const status=$('saveStatus');
+  if(status&&invalid){status.dataset.strategyValidationError='true';status.textContent=`Fix ${invalid} invalid setting${invalid===1?'':'s'} before saving.`;status.className='save-status err';}
+  else if(status?.dataset.strategyValidationError){delete status.dataset.strategyValidationError;status.textContent='';status.className='';}
   syncMobileStrategyActions();
-  filterStrategyKnobs();
+  if(recomputeFilter)filterStrategyKnobs();
+  else if(changedCard&&['changed','enabled'].includes($('strategyFilter')?.value||'all'))updateStrategyFilterCard(changedCard);
 }
 // Keep the mobile action strip on the existing validated save/reset handlers.
 $('btnSaveConfigMobile').onclick=()=>{$('btnSaveConfigMobile').disabled=true;$('btnSaveConfig').click();};
 $('btnResetConfigMobile').onclick=()=>$('btnResetConfig').click();
 $('btnSaveConfig').disabled=true;
 $('btnSaveConfig').onclick=async()=>{
+  if(strategyInvalidCount()){$('saveStatus').textContent='Fix invalid settings before saving.';return;}
   if(!S.curConfig||!Object.keys(S.configEdits).length){$('saveStatus').innerHTML='<span class="save-status ok">No changes</span>';return;}
   $('btnSaveConfig').disabled=true;
   $('btnSaveConfigMobile').disabled=true;
+  const lockedControls=[...document.querySelectorAll('#strategyEditor input,#strategyEditor button'),$('configSelect'),$('btnResetConfig'),$('btnResetConfigMobile')].filter(Boolean);
+  const priorDisabled=lockedControls.map(control=>[control,control.disabled]);
+  lockedControls.forEach(control=>{control.disabled=true;});
+  const unlockControls=()=>priorDisabled.forEach(([control,disabled])=>{if(control.isConnected)control.disabled=disabled;});
   const pending={...S.configEdits};
-  const r=await apiPost('/api/config/write',{name:S.curConfig,updates:pending});
+  const r=await apiPost('/api/config/write',{name:S.curConfig,updates:pending},{timeoutMs:12000});
   if(r&&r.ok){
     const rejected=r.rejected&&Object.keys(r.rejected).length;
     if(rejected){
+      unlockControls();
       $('saveStatus').innerHTML=`<span class="save-status err">Rejected: ${Object.entries(r.rejected).map(([k,v])=>`${esc(k)} (${esc(v)})`).join(', ')}</span>`;
-      $('btnSaveConfig').disabled=false;syncMobileStrategyActions();
+      updateStrategyState();
     }else{
       toast('Settings saved',`${S.curConfig} · ${(r.changed||[]).length} setting${(r.changed||[]).length===1?'':'s'}`,'fill-buy');
-      await loadConfig(S.curConfig,true,true);$('saveStatus').innerHTML=`<span class="save-status ok">✓ ${(r.changed||[]).length} saved</span>`;
+      await loadConfig(S.curConfig,true,true);unlockControls();$('saveStatus').innerHTML=`<span class="save-status ok">✓ ${(r.changed||[]).length} saved</span>`;
     }
-  }else{$('saveStatus').innerHTML=`<span class="save-status err">✗ ${r&&r.error?r.error:'failed'}</span>`;$('btnSaveConfig').disabled=false;syncMobileStrategyActions();}
+  }else{
+    unlockControls();
+    const detail=r&&r.error?r.error:'failed';
+    $('saveStatus').innerHTML=`<span class="save-status err">${detail.includes('timed out')?'Save response timed out; refresh the profile before retrying because the write may have completed.':'✗ '+esc(detail)}</span>`;
+    updateStrategyState();
+  }
 }
-$('btnResetConfig').onclick=()=>{S.configEdits={};loadConfig(S.curConfig);$('saveStatus').innerHTML='';};
+$('btnResetConfig').onclick=()=>{if(!S.curConfig)return;S.configEdits={};S.strategyChangeCursor=0;loadConfig(S.curConfig,false,true);$('saveStatus').innerHTML='';};
 
 // ── PREDICTOR tab ─────────────────────────────────────────────────────────
 let _predCfg={inst:'',values:{}};
@@ -9669,6 +9867,9 @@ const CMD=[
   {name:'Open Predictions',hint:'manual trading board',keys:'5',run:()=>document.querySelector('.nav-tab[data-tab=manualpred]').click()},
   {name:'Open Fleet',hint:'bot controls',keys:'6',run:()=>document.querySelector('.nav-tab[data-tab=fleet]').click()},
   {name:'Open Strategy',hint:'all configuration settings',keys:'7',run:()=>document.querySelector('.nav-tab[data-tab=strategy]').click()},
+  {name:'Search strategy settings',hint:'focus the profile setting search',keys:'/',run:focusStrategySearch},
+  {name:'Next unsaved strategy setting',hint:'review pending changes',keys:'NEXT',run:showNextStrategyChange},
+  {name:'Save strategy changes',hint:'write validated settings',keys:'SAVE',run:()=>$('btnSaveConfig')?.click()},
   {name:'Open Predictor',hint:'model telemetry',keys:'8',run:()=>document.querySelector('.nav-tab[data-tab=predictor]').click()},
   {name:'Open Logs',hint:'diagnostics',keys:'9',run:()=>document.querySelector('.nav-tab[data-tab=logs]').click()},
   {name:'Open PolyTron',hint:'bot advisor',keys:'AI',run:()=>ptOpen(S.curInstance||'')},
@@ -9713,7 +9914,12 @@ $('btnPause').onclick=()=>{
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────
 document.addEventListener('keydown',e=>{
-  if(['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName))return;
+  const typing=['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)||e.target.isContentEditable;
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'&&S.curTab==='strategy'){
+    e.preventDefault();$('btnSaveConfig')?.click();return;
+  }
+  if(!typing&&e.key==='/'){e.preventDefault();focusStrategySearch();return;}
+  if(typing)return;
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openCommandPalette();return;}
   if(e.key>='1'&&e.key<='9'){const b=document.querySelectorAll('.nav-tab')[+e.key-1];if(b)b.click();}
   if(e.key==='r'||e.key==='R')refresh();
@@ -10015,9 +10221,9 @@ function refreshVisibleWorkspace(){
   if($('posChartModal')?.classList.contains('open'))_refreshPosChart();
 }
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshVisibleWorkspace();});
-setInterval(()=>{if(!document.hidden&&!S.paused)refresh();},750);
+setInterval(()=>{if(!document.hidden&&!S.paused)refresh();},500);
 setInterval(()=>{if(!document.hidden&&!S.paused)loadActivity();},2000);
-setInterval(()=>{if(!document.hidden)updateSpeedPanel();},500);
+setInterval(()=>{if(!document.hidden)updateSpeedPanel();},1000);
 setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='overview')loadOverviewSlow();},30000);
 setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='fleet')loadFleet();},3000);
 setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='scalpers')loadScalperDesk();},1500);
@@ -12847,6 +13053,163 @@ button:disabled,[aria-disabled="true"]{cursor:not-allowed!important;opacity:.58}
   #tabManualpred #predictionReferenceWorkspace:fullscreen .pred-reference-forecast{grid-template-columns:repeat(3,minmax(0,1fr))}
   #tabManualpred #predictionReferenceWorkspace:fullscreen .pred-reference-inspector{grid-template-columns:repeat(4,minmax(0,1fr))}
 }
+</style>
+
+<style id="cockpit-performance-polish">
+:root{
+  color-scheme:dark;
+  --bg:#080d10;--bg1:#0e1519;--bg2:#121c21;--bg3:#19262c;
+  --border:#2b3b41;--border2:#49616a;
+  --green:#63f2b4;--red:#ff7886;--gold:#ffd078;--cyan:#55dfff;
+  --blue:#8db7ff;--purple:#c1a3ff;--orange:#ffb961;--warn:#ffd078;
+  --text:#f0f6f7;--text2:#b5c4c9;--text3:#8b9da3;
+  --card-shadow:0 8px 24px rgba(0,0,0,.24);
+  --mono:ui-monospace,'Cascadia Code','JetBrains Mono','Fira Code',Consolas,monospace;
+}
+::selection{background:#176e59;color:#fff}
+body,body #hdr,body #mainNav,body .tab-section,body .card,body .pred-card,body .pred-panel,body .toast,body .pred-toast,
+body input,body select,body button,body textarea{font-family:Inter,system-ui,sans-serif!important}
+body{background:#080d10!important;background-image:radial-gradient(ellipse at 54% -20%,#14342c55,transparent 48%)!important;color:var(--text)!important;letter-spacing:0}
+body::after{display:none!important}
+:focus-visible{outline:2px solid var(--cyan)!important;outline-offset:3px}
+button:not(:disabled){touch-action:manipulation}
+button:disabled{cursor:not-allowed;opacity:.8;color:#a8b7bb!important}
+#hdr{height:66px!important;padding:0 22px!important;background:#0d1418!important;border-bottom:1px solid var(--border2)!important;box-shadow:none!important;gap:20px}
+.brand{width:205px;min-width:205px;gap:10px}
+.brand-name{font-family:Inter,system-ui,sans-serif!important;font-size:18px!important;font-weight:750!important;letter-spacing:-.55px!important;color:var(--text)!important;text-shadow:none!important;text-transform:none!important}
+.brand-name::after{content:none!important}
+.logo-ring{width:28px;height:28px;border:1px solid #35b98a!important;border-radius:8px!important;background:#10251d!important;box-shadow:inset 0 0 0 4px #0e1519!important;animation:none!important;transform:none!important}
+.logo-ring::before{content:'ϟ';position:absolute;inset:0;display:grid;place-items:center;color:var(--green);font:800 22px Inter,sans-serif}
+.logo-ring::after{display:none!important}
+.mode-badge.live{animation:none!important}
+#priceTicker{gap:0}
+.tick-asset{background:transparent!important;border:0!important;border-left:1px solid var(--border)!important;border-radius:0!important;padding:6px 12px}
+.tick-asset .px,.stat-val,.speed-val,.str-val,.knob-range,.knob-key,.market-price{font-family:var(--mono)!important;font-variant-numeric:tabular-nums}
+.tick-asset .sym,.tick-asset .chg{color:var(--text2)!important}
+#mainNav{top:66px!important;width:232px!important;padding:26px 16px!important;gap:4px!important;background:#0d1418!important;border-right:1px solid var(--border)!important;box-shadow:none!important}
+#mainNav::before{color:var(--text3)!important;letter-spacing:1.6px;padding:0 12px 12px}
+#mainNav::after{color:var(--text3)!important;line-height:1.8}
+#mainNav .nav-tab{display:flex;align-items:center;gap:12px;width:100%;padding:11px 13px!important;border:1px solid transparent!important;border-radius:8px!important;clip-path:none!important;background:transparent!important;color:var(--text2)!important;font:550 12px Inter,system-ui,sans-serif!important;letter-spacing:0!important;text-align:left;text-transform:none!important;transition:background-color .12s,color .12s,border-color .12s}
+#mainNav .nav-tab::before{content:none!important}
+#mainNav .nav-tab svg{width:17px;height:17px;opacity:.86}
+#mainNav .nav-tab:hover{background:#172328!important;color:var(--text)!important}
+#mainNav .nav-tab.active{background:#123126!important;border-color:#28694f!important;border-bottom-color:#28694f!important;color:var(--green)!important;box-shadow:inset 3px 0 var(--green)!important}
+#mainNav .nav-tab[data-tab=fleet]{margin-top:18px}
+#cbStrip,#fillTape,#instTabs,#mainContent,#statsBar{margin-left:232px}
+#cbStrip{background:#0b1216!important;border-bottom-color:var(--border)!important}
+#fillTape{background:#0d1418!important}
+#instTabs{background:#0b1216!important;border-color:var(--border)!important}
+#statsBar{background:#0b1216!important;border-top:1px solid var(--border)!important;box-shadow:none!important;color:var(--text2)}
+#mainContent{background:transparent}
+.tab-section{padding:14px 24px 28px!important}
+.tab-section.active{animation:none!important}
+.card,.pos-card,.fleet-card,.pred-card,.pred-panel,.ops-card,.str-sidebar,.str-group,.exec-kpi,.cross-sync-kpi{
+  clip-path:none!important;border:1px solid var(--border)!important;border-radius:10px!important;
+  background:#0e1519!important;box-shadow:none!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;
+}
+.card::before,.card::after,.pred-card::before,.pred-card::after{display:none!important}
+.card:hover,.pred-card:hover,.sh-mobile-card:hover{transform:none!important;border-color:var(--border2)!important}
+.card-title,.ops-title{color:#c8d9de!important}
+button,.btn-sm,.filter-btn,.action-btn,.fleet-btn,.hero-button,.str-runtime-refresh{
+  min-height:34px;border-radius:7px!important;border:1px solid #3d535b!important;
+  background:#111c21!important;color:var(--text)!important;box-shadow:none!important;
+  font:650 11px var(--mono)!important;letter-spacing:.035em!important;text-transform:uppercase;
+  transition:background-color .12s,border-color .12s,color .12s;
+}
+button:hover:not(:disabled),.btn-sm:hover:not(:disabled),.filter-btn:hover:not(:disabled),.action-btn:hover:not(:disabled),.fleet-btn:hover:not(:disabled){
+  background:#17262c!important;border-color:#67838d!important;color:#fff!important
+}
+.btn-primary,.filter-btn.active{background:#123c2d!important;border-color:#31966e!important;color:#87ffd0!important;box-shadow:none!important}
+.btn-primary:hover:not(:disabled),.filter-btn.active:hover{background:#174b37!important;border-color:var(--green)!important;color:#baffdf!important}
+.btn-primary:disabled{background:#14251e!important;border-color:#395d4b!important;color:#8ca99a!important;box-shadow:none!important}
+.btn-danger,.danger-zone button{border-color:#763f48!important;background:#29171b!important;color:#ff9ba5!important}
+#btnGoLive{background:#281f11!important;border-color:#8d6834!important;color:#ffd078!important}
+.danger-zone{border-color:#874954!important;background:#211317!important}
+input,select,textarea,.str-sidebar select,.configSelect,.str-search,.str-val{
+  color:var(--text)!important;background:#090f12!important;border:1px solid #3b5057!important;border-radius:7px!important;
+}
+input::placeholder,textarea::placeholder{color:#82969c!important;opacity:1}
+input:focus,select:focus,textarea:focus,.str-val:focus{outline:2px solid #55dfff!important;outline-offset:1px;border-color:#55dfff!important;box-shadow:none!important}
+table th{background:#121c21!important;color:#a9bcc2!important;border-color:#2d4148!important}
+table td{border-color:#26373d!important}
+.positive{color:var(--green)!important;text-shadow:none!important}
+.negative{color:var(--red)!important;text-shadow:none!important}
+.toast,.pred-toast{border-radius:9px!important;background:#111b1f!important;border-color:#49616a!important;box-shadow:0 12px 36px #0008!important}
+#bootOverlay{background:#080d10!important}
+#bootOverlay pre{color:var(--green)!important;text-shadow:none!important}
+#bootOverlay .dim{color:var(--text3)!important}
+#tabTermBar{background:#0b1216!important;border-bottom:1px solid var(--border)!important;color:var(--text2)!important}
+#tabTermBar .tt-live{color:var(--green)!important}
+#pnlCommand{background:#0b1216!important;border-bottom-color:var(--border)!important}
+#pnlCommand .pc-cell{border-color:var(--border)!important}
+#pnlCommand .pc-chip{background:#111c21!important;border-color:var(--border)!important;border-radius:5px!important}
+#pnlCommand .pc-big strong{font-family:var(--mono)!important;text-shadow:none!important}
+#pnlCommand .pc-bars i{background:var(--green)!important}
+#pnlCommand .pc-bars i.neg{background:var(--red)!important}
+#ptBtn{border-radius:12px!important;box-shadow:0 8px 24px #0007!important}
+#ptPanel{border-radius:14px!important}
+#strategyEditor{min-width:0}
+#tabStrategy .str-layout{grid-template-columns:minmax(250px,280px) minmax(0,1fr);gap:14px}
+#tabStrategy .str-sidebar{position:sticky;top:12px;max-height:calc(100vh - 180px);padding:15px;gap:10px;clip-path:none!important;background:#0e1519!important}
+#tabStrategy .str-tools-disclosure{overflow:visible}
+#tabStrategy .str-head{padding:17px;border:1px solid var(--border)!important;border-radius:10px;background:#111a1e!important;box-shadow:none!important;gap:14px}
+#tabStrategy .str-head-title{font-size:15px;letter-spacing:.035em;color:var(--cyan)!important}
+#tabStrategy .str-head-sub{font-size:11px;line-height:1.55;color:var(--text2)!important;max-width:72ch}
+#tabStrategy .str-summary{gap:7px;flex-wrap:wrap}
+#tabStrategy .str-summary-chip{padding:6px 8px;border-color:#40565e!important;background:#0a1114!important;color:var(--text2)!important;font:600 10px var(--mono)!important}
+#tabStrategy .str-summary-chip.live{color:var(--green)!important;border-color:#347a5e!important}
+#tabStrategy .str-summary-chip.paper{color:var(--gold)!important;border-color:#796333!important}
+#tabStrategy .str-summary-chip.changed{color:var(--gold)!important;border-color:#796333!important}
+#tabStrategy .feed-freshness{font-variant-numeric:tabular-nums}
+#tabStrategy .feed-freshness[data-state="fresh"]{color:var(--green)!important;border-color:#347a5e!important}
+#tabStrategy .feed-freshness[data-state="delayed"]{color:var(--gold)!important;border-color:#796333!important}
+#tabStrategy .feed-freshness[data-state="stale"]{color:var(--red)!important;border-color:#874954!important}
+#tabStrategy .feed-freshness[data-state="unknown"]{color:var(--text2)!important}
+#tabStrategy .str-runtime-card{padding:13px 15px;border-radius:9px;background:#0b1216!important}
+#tabStrategy .str-runtime-kicker,#tabStrategy .str-side-label{color:#9fb1b7!important;font-size:9px}
+#tabStrategy .str-runtime-label{color:var(--text)!important}
+#tabStrategy .str-runtime-detail{color:var(--text2)!important}
+#tabStrategy .str-runtime-card[data-state="in_sync"] .str-runtime-label{color:var(--green)!important}
+#tabStrategy .str-runtime-card[data-state="file_ahead"] .str-runtime-label,#tabStrategy .str-runtime-card[data-state="runtime_unsupported"] .str-runtime-label{color:var(--gold)!important}
+#tabStrategy .str-runtime-card[data-state="runtime_unverified"] .str-runtime-label,#tabStrategy .str-runtime-card[data-state="profile_unreadable"] .str-runtime-label{color:var(--red)!important}
+#tabStrategy .cfg-legend{margin:11px 0;padding:9px 11px;border-color:var(--border)!important;border-radius:7px;background:#0c1418!important;color:var(--text2)!important;font-size:10px;line-height:1.5}
+#tabStrategy .str-groups{gap:8px}
+#tabStrategy .str-group{border-color:var(--border)!important;border-radius:9px;background:#0d1519!important}
+#tabStrategy .str-group[open]{border-color:#40575f!important}
+#tabStrategy .str-group>summary{min-height:52px;padding:13px 15px;gap:10px}
+#tabStrategy .str-group>summary::before{color:var(--cyan)!important}
+#tabStrategy .str-group-title{min-width:140px;font-size:11px;letter-spacing:.065em;color:var(--text)!important}
+#tabStrategy .str-group-desc{font-size:10px;color:var(--text2)!important}
+#tabStrategy .str-group-count{border-color:#3e6570!important;color:var(--cyan)!important}
+#tabStrategy .str-grid{gap:8px;padding:0 9px 10px}
+#tabStrategy .knob-card{content-visibility:auto;contain-intrinsic-size:auto 122px;min-height:82px;padding:11px 12px;border:1px solid #2b3d43!important;border-radius:8px;background:#10191d!important;transition:border-color .12s,background-color .12s}
+#tabStrategy .knob-card:hover{border-color:#4e6870!important;background:#132025!important}
+#tabStrategy .knob-card.changed{border-color:#9e7840!important;background:#211b10!important;box-shadow:none!important}
+#tabStrategy .knob-card.invalid{border-color:#a84d59!important;background:#241317!important}
+#tabStrategy .knob-label{font-size:11px;line-height:1.4;color:var(--text)!important}
+#tabStrategy .knob-key{font-size:8px;line-height:1.45;color:#a2b2b8!important}
+#tabStrategy .knob-desc{font-size:9px;line-height:1.5;color:var(--text2)!important;max-width:68ch}
+#tabStrategy .knob-risk{border-color:#8a6a36!important;color:var(--gold)!important}
+#tabStrategy .str-val{min-height:36px;border-radius:6px!important;background:#080e11!important;color:var(--cyan)!important;font-size:11px;text-align:right;font-variant-numeric:tabular-nums}
+#tabStrategy .str-val.changed{border-color:#b78c42!important;color:var(--gold)!important}
+#tabStrategy .knob-range{font-size:8px;line-height:1.4;color:#a0b0b6!important}
+#tabStrategy .knob-toggle-state{color:#9bacb1!important}
+#tabStrategy .knob-toggle input:checked~.knob-toggle-state{color:var(--green)!important}
+#tabStrategy .knob-toggle input:focus-visible+.knob-switch{outline:2px solid var(--cyan);outline-offset:3px}
+#tabStrategy .str-side-note{border-left-color:var(--cyan)!important;background:#101c21!important;color:var(--text2)!important;line-height:1.55}
+#tabStrategy .str-side-actions{grid-template-columns:repeat(2,minmax(0,1fr))}
+#tabStrategy .str-next-change{grid-column:1/-1}
+#tabStrategy .strategy-load-state{display:grid;gap:11px;align-content:center;min-height:240px;padding:28px;border:1px solid var(--border)!important;border-radius:10px;background:#0e1519!important;box-shadow:none!important}
+#tabStrategy .strategy-load-state h2{margin:0;color:var(--text)!important;font-size:19px;line-height:1.3}
+#tabStrategy .strategy-load-state p{max-width:64ch;margin:0;color:var(--text2)!important;font-size:12px;line-height:1.65}
+#tabStrategy .strategy-load-state .btn-sm{justify-self:start;min-height:40px;padding:8px 14px}
+#tabStrategy .strategy-load-state.error{border-color:#79503e!important}
+#tabStrategy .strategy-load-state.empty{border-style:dashed!important}
+@media(max-width:1150px){#tabStrategy .str-layout{grid-template-columns:minmax(0,1fr);gap:11px}#tabStrategy .str-sidebar{position:static;max-height:none}}
+@media(max-width:900px){#hdr{height:auto!important;min-height:64px;padding:8px 14px!important}.tab-section{padding:12px 15px 24px!important}#tabStrategy .str-grid{grid-template-columns:1fr}}
+@media(max-width:850px){#mainNav{display:none!important}#cbStrip,#fillTape,#instTabs,#mainContent,#statsBar{margin-left:0!important}#mobileDock{background:#0d1519!important;border-top-color:var(--border)!important;box-shadow:0 -8px 24px #0008!important}}
+@media(max-width:700px){#tabStrategy .str-head{padding:14px}#tabStrategy .str-summary-chip{padding:6px 8px}#tabStrategy .strategy-load-state{min-height:180px;padding:20px}.str-side-actions{gap:7px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
 </style>
 </body>
 </html>
