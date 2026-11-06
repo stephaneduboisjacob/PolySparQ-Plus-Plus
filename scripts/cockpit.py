@@ -9556,19 +9556,36 @@ def api_supervisor_model(inst, model):
 
 _stream_cache = [0.0, None]
 _stream_cache_lock = threading.Lock()
+_stream_cache_refreshing = False
 
 
 def build_stream_payload():
-    # SSE clients poll at nearly the same cadence. Serialize the short cache
-    # check and rebuild so concurrent clients share one DB/position snapshot.
-    with _stream_cache_lock:
-        return _build_stream_payload_locked()
-
-
-def _build_stream_payload_locked():
+    # SSE clients poll at nearly the same cadence. Let one request rebuild the
+    # snapshot while other clients keep receiving the latest cached payload.
+    global _stream_cache_refreshing
+    empty = {"prices": {}, "recent_fills": [], "positions_marks": [],
+             "ts": int(time.time() * 1000)}
     now = time.monotonic()
-    if _stream_cache[1] and now - _stream_cache[0] < 0.5:
-        return _stream_cache[1]
+    with _stream_cache_lock:
+        cached = _stream_cache[1]
+        if cached and now - _stream_cache[0] < 0.5:
+            return cached
+        if _stream_cache_refreshing:
+            return cached or empty
+        _stream_cache_refreshing = True
+
+    try:
+        payload = _build_stream_payload()
+    except Exception:
+        payload = None
+    with _stream_cache_lock:
+        if payload is not None:
+            _stream_cache[0], _stream_cache[1] = time.monotonic(), payload
+        _stream_cache_refreshing = False
+        return _stream_cache[1] or empty
+
+
+def _build_stream_payload():
     try:
         oracle_rows = q("""SELECT DISTINCT ON (asset) asset, price,
                                   extract(epoch FROM ts)::double precision AS ts_epoch
@@ -9584,7 +9601,7 @@ def _build_stream_payload_locked():
                        WHERE symbol=ANY(%s) AND ts > now()-interval '2 minutes'
                        ORDER BY symbol, ts DESC""", (list(SYMBOL.values()),))
     except Exception:
-        return _stream_cache[1] or {"prices": {}, "ts": int(time.time() * 1000)}
+        return None
     now_s = time.time()
     om = {r["asset"]: r for r in oracle_rows}
     cm = {r["asset"]: r for r in cb_rows}
@@ -9648,7 +9665,6 @@ def _build_stream_payload_locked():
         pass
     payload = {"prices": prices, "recent_fills": fills,
                "positions_marks": pos_marks, "ts": int(time.time() * 1000)}
-    _stream_cache[0], _stream_cache[1] = now, payload
     return payload
 
 
