@@ -4097,7 +4097,7 @@ function renderPositionTriage(d){
   const rows=new Map(Array.from(host.querySelectorAll('.triage-row'),row=>[row.dataset.triageKey,row]));
   for(const child of Array.from(host.children))if(!child.classList.contains('triage-row'))child.remove();
   pos.forEach((p,index)=>{
-    const key=String(p.cid||`${p.instance||''}|${p.asset||''}|${p.side||''}|${p.question||''}|${index}`);
+    const key=p.cid?`${p.instance||''}|${p.cid}|${p.side||''}`:`${p.instance||''}|${p.asset||''}|${p.side||''}|${p.question||''}|${index}`;
     let row=rows.get(key);if(row)rows.delete(key);else{row=createPositionTriageRow();row.dataset.triageKey=key;}
     updatePositionTriageRow(row,p);
     const current=host.children[index];if(current!==row)host.insertBefore(row,current||null);
@@ -4709,7 +4709,10 @@ async function loadPolymarketAccount(loadMore=false){
   }
 }
 
+let _ordersTableRows=null,_settlesTableRows=null;
 function renderOrdersTable(orders){
+  if(orders===_ordersTableRows)return;
+  _ordersTableRows=orders;
   if(!orders.length){$('ordersTable').innerHTML='<div class="empty-state" style="padding:16px"><div>No recorded orders</div></div>';return;}
   $('ordersTable').innerHTML=`<table class="position-orders-table" style="width:100%;border-collapse:collapse;font-size:11px">
     <thead><tr style="color:var(--text3);border-bottom:1px solid var(--border)">
@@ -4739,6 +4742,8 @@ function renderOrdersTable(orders){
 }
 
 function renderSettlesTable(settles){
+  if(settles===_settlesTableRows)return;
+  _settlesTableRows=settles;
   if(!settles.length){$('settlesTable').innerHTML='<div style="color:var(--text3);font-size:11px;padding:10px">No settlements recorded</div>';return;}
   $('settlesTable').innerHTML=`<table class="settle-tbl position-settles-table">
     <thead><tr>
@@ -5292,7 +5297,7 @@ function tickMarketBookAges(){
 setInterval(tickMarketBookAges,1000);
 function renderMarkets(mkt){
   const rows=(mkt.markets||[]);
-  $('marketList').innerHTML=rows.length?rows.slice(0,30).map(m=>{
+  commitCockpitHtml($('marketList'),rows.length?rows.slice(0,30).map(m=>{
     const asset=String(m.asset||'?'),horizon=Number(m.horizon_seconds)||0;
     const phaseRaw=String(m.phase||'live').toLowerCase();
     const phase=['live','closing','upcoming'].includes(phaseRaw)?phaseRaw:'unknown';
@@ -5300,20 +5305,19 @@ function renderMarkets(mkt){
     const conditionId=String(m.condition_id||''),upBid=fmt(m.up_bid,3),downBid=fmt(m.down_bid,3);
     const upBookTs=Number.isFinite(Number(m.up_book_ts))?Number(m.up_book_ts):0;
     const downBookTs=Number.isFinite(Number(m.down_book_ts))?Number(m.down_book_ts):0;
-    const upAge=_marketBookAge(upBookTs),downAge=_marketBookAge(downBookTs);
     const tapeButton=/^[A-Za-z0-9_-]{1,160}$/.test(conditionId)?`<button type="button" class="mkt-tape-btn" data-tape-cid="${esc(conditionId)}" data-tape-asset="${esc(asset)}" data-tape-horizon="${horizon}" aria-label="Open locally captured book tape for ${esc(asset)} ${horizon/60} minute market" onclick="openPredictionTape(event,this)">OPEN WINDOW TAPE ↗</button>`:'';
     return `
     <div class="mkt-row">
       <span class="mkt-asset">${esc(asset)}</span>
       <span class="mkt-hz">${esc(horizLabel(horizon))}</span>
       <span class="mkt-q">${esc(String(m.question||'').trim().slice(0,120))}</span>
-      <span class="mkt-book mkt-up" data-label="UP BID" data-book-side="UP" data-book-value="${esc(upBid)}" aria-label="UP best bid ${esc(upBid)}; book age ${esc(upAge)}" data-book-ts="${upBookTs}"><b>${esc(upBid)}</b><small class="mkt-book-age" data-ts="${upBookTs}"></small></span>
-      <span class="mkt-book mkt-dn" data-label="DOWN BID" data-book-side="DOWN" data-book-value="${esc(downBid)}" aria-label="DOWN best bid ${esc(downBid)}; book age ${esc(downAge)}" data-book-ts="${downBookTs}"><b>${esc(downBid)}</b><small class="mkt-book-age" data-ts="${downBookTs}"></small></span>
+      <span class="mkt-book mkt-up" data-label="UP BID" data-book-side="UP" data-book-value="${esc(upBid)}" aria-label="UP best bid ${esc(upBid)}; live book age available" data-book-ts="${upBookTs}"><b>${esc(upBid)}</b><small class="mkt-book-age" data-ts="${upBookTs}"></small></span>
+      <span class="mkt-book mkt-dn" data-label="DOWN BID" data-book-side="DOWN" data-book-value="${esc(downBid)}" aria-label="DOWN best bid ${esc(downBid)}; live book age available" data-book-ts="${downBookTs}"><b>${esc(downBid)}</b><small class="mkt-book-age" data-ts="${downBookTs}"></small></span>
       <span class="mkt-count" data-wc="${Number(m.window_close)||0}" data-label="CLOSE IN" aria-label="Time until market close"></span>
       <span class="mkt-phase ${phase}">${phaseLabel}</span>
       ${tapeButton}
     </div>`;
-  }).join(''):'<div class="empty-state"><div>No active markets</div></div>';
+  }).join(''):'<div class="empty-state"><div>No active markets</div></div>');
   tickMarketCountdowns();
   tickMarketBookAges();
   loadCbEdgeLive();
