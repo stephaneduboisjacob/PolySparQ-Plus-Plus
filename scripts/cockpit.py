@@ -699,7 +699,7 @@ def toml_scalar(value):
 def invalidate_runtime_caches():
     _since_cache.clear()
     for name in ("_live_cache", "_live_lite_cache", "_activity_cache",
-                 "_execution_cache"):
+                 "_activity_tape_cache", "_execution_cache"):
         cache = globals().get(name)
         if isinstance(cache, dict):
             cache.clear()
@@ -1823,28 +1823,38 @@ def api_orders(limit=60, instance=None, all_modes=False):
         filters.append("o.instance = %s")
         args.append(instance)
     where_clause = " AND ".join(filters) if filters else "TRUE"
-    args.append(limit)
     rows = q(f"""
+        WITH recent_orders AS (
+            SELECT o.*
+              FROM vp.orders o
+             WHERE {where_clause}
+             ORDER BY o.ts_created DESC
+             LIMIT %s
+        )
         SELECT o.client_order_id::text AS client_order_id,
                o.ts_created, o.source, o.direction,
                COALESCE(NULLIF(to_jsonb(o)->>'outcome_label',''),o.side_label::text) AS side_label,
                COALESCE(NULLIF(to_jsonb(o)->>'manual_market_question',''),m.question) AS question,
                o.price, o.size_shares,
-               COALESCE(SUM(f.size_shares),0) AS filled_shares,
+               COALESCE(f.filled_shares,0) AS filled_shares,
                CASE WHEN o.status IN ('filled','partial','cancelled')
-                    THEN COALESCE(SUM(f.price * f.size_shares), o.notional_usd)
+                    THEN COALESCE(f.fill_notional, o.notional_usd)
                     ELSE o.notional_usd END AS notional_usd,
-               COALESCE(SUM(f.fee_usd), 0) AS fee_usd,
+               COALESCE(f.fee_usd, 0) AS fee_usd,
                o.status, o.reject_reason, o.condition_id, o.instance,
                m.asset, m.horizon_seconds, o.execution_mode, o.post_only,
                o.exchange_order_id, o.mode
-        FROM vp.orders o
-        LEFT JOIN vp.fills f ON f.client_order_id = o.client_order_id
+        FROM recent_orders o
+        LEFT JOIN LATERAL (
+            SELECT SUM(f.size_shares) AS filled_shares,
+                   SUM(f.price * f.size_shares) AS fill_notional,
+                   SUM(f.fee_usd) AS fee_usd
+              FROM vp.fills f
+             WHERE f.client_order_id = o.client_order_id
+        ) f ON TRUE
         LEFT JOIN vp.pm_markets m ON m.condition_id = o.condition_id
-        WHERE {where_clause}
-        GROUP BY o.client_order_id, m.asset, m.horizon_seconds, m.question
-        ORDER BY o.ts_created DESC LIMIT %s
-    """, tuple(args))
+        ORDER BY o.ts_created DESC
+    """, tuple(args + [limit]))
     for row in rows:
         if row.get("reject_reason"):
             row["reject_reason"] = _polytron_redact(str(row["reject_reason"]))
@@ -6673,6 +6683,9 @@ _live_lite_cache = {}
 _live_lite_cache_lock = threading.Lock()
 _live_lite_refreshing = set()
 _activity_cache = {}
+_activity_tape_cache = {}
+_activity_cache_lock = threading.Lock()
+_activity_refreshing = set()
 _exit_performance_cache = {}
 _execution_maker_pressure_cache = {}
 _execution_cache = {}
@@ -7049,6 +7062,36 @@ def api_activity_fill_events(order_rows, instance=None, limit=200):
 
 def api_activity(instance=None, tape_only=False, force=False):
     """Slower activity payload with durable cross-mode trade history."""
+    cache = _activity_tape_cache if tape_only else _activity_cache
+    key = instance or ""
+    refresh_key = (bool(tape_only), key)
+    now = time.monotonic()
+    with _activity_cache_lock:
+        hit = cache.get(key)
+        if not force and hit and now - hit[0] < 3.0:
+            return hit[1]
+        if refresh_key in _activity_refreshing:
+            return hit[1] if hit else {"orders": [], "warming_up": True}
+        _activity_refreshing.add(refresh_key)
+    try:
+        result = _build_api_activity(instance, tape_only)
+    except Exception:
+        with _activity_cache_lock:
+            _activity_refreshing.discard(refresh_key)
+            hit = cache.get(key)
+        if hit:
+            return hit[1]
+        raise
+    with _activity_cache_lock:
+        if len(cache) >= 128 and key not in cache:
+            oldest = min(cache, key=lambda cache_key: cache[cache_key][0])
+            cache.pop(oldest, None)
+        cache[key] = (time.monotonic(), result)
+        _activity_refreshing.discard(refresh_key)
+        return result
+
+
+def _build_api_activity(instance=None, tape_only=False):
     if tape_only:
         # Keep the always-visible fill ticker lightweight. The complete
         # activity payload also reconstructs settlement accounting and is
@@ -7077,11 +7120,6 @@ def api_activity(instance=None, tape_only=False, force=False):
                       r.side_label,r.price,r.notional_usd,r.instance,m.asset
              ORDER BY r.ts_created DESC,r.client_order_id DESC""", args)
         return {"orders": orders, "server_ts": int(time.time() * 1000)}
-    key = instance or ""
-    now = time.monotonic()
-    hit = _activity_cache.get(key)
-    if not force and hit and now - hit[0] < 3.0:
-        return hit[1]
     try:
         exit_performance = api_exit_performance(instance)
     except Exception:
@@ -7103,7 +7141,6 @@ def api_activity(instance=None, tape_only=False, force=False):
         "exit_performance": exit_performance,
         "server_ts": int(time.time() * 1000),
     }
-    _activity_cache[key] = (now, out)
     return out
 
 

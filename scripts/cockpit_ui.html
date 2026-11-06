@@ -3561,7 +3561,7 @@ async function loadActivity(force=false){
     if(force)params.set('force','1');
     const qs=params.toString();
     const r=await apiFetch(`/api/activity${qs?`?${qs}`:''}`);
-    if(!r)return;
+    if(!r||r.warming_up)return;
     S.activity={...r,ts:Date.now()};
     if(S.curTab==='logs')renderActivityStream(S.activity);
     S.data.orders=r.orders||S.data.orders;
@@ -3876,7 +3876,7 @@ async function loadFillTape(){
     const params=new URLSearchParams({tape:'1'});
     if(S.curInstance)params.set('instance',S.curInstance);
     const r=await apiFetch(`/api/activity?${params}`,{timeoutMs:4000});
-    if(r&&Array.isArray(r.orders))renderFillTape(r.orders);
+    if(r&&!r.warming_up&&Array.isArray(r.orders))renderFillTape(r.orders);
   }finally{_fillTapeRefreshing=false;}
 }
 
