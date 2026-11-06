@@ -3126,15 +3126,20 @@ function patchPositionMarks(marks){
     if(pm.awaiting_settlement)return;
     const me=$(`mark-${cid}`);
     if(me&&pm.mark!=null){
-      me.textContent=fmt(pm.mark,4);
-      me.className=`pos-px-val ${pm.avg!=null&&pm.mark>pm.avg?'mark-up':'mark-dn'}`;
+      const markText=fmt(pm.mark,4),markClass=`pos-px-val ${pm.avg!=null&&pm.mark>pm.avg?'mark-up':'mark-dn'}`;
+      if(me.textContent!==markText)me.textContent=markText;
+      if(me.className!==markClass)me.className=markClass;
     }
     const card=$(`poscard-${cid}`);
     if(card){
       if(pm.pnl_usd!=null){
         const pe=card.querySelector('.pos-pnl');
-        if(pe){pe.className=`pos-pnl ${pnlClass(pm.pnl_usd)}`;
-          pe.textContent=`${pnlSign(pm.pnl_usd)}$${fmt(Math.abs(pm.pnl_usd))} ${pm.pnl_pct!=null?`(${pnlSign(pm.pnl_pct)}${fmt(Math.abs(pm.pnl_pct),1)}%)`:''}`;}
+        if(pe){
+          const pnlText=`${pnlSign(pm.pnl_usd)}$${fmt(Math.abs(pm.pnl_usd))} ${pm.pnl_pct!=null?`(${pnlSign(pm.pnl_pct)}${fmt(Math.abs(pm.pnl_pct),1)}%)`:''}`;
+          const pnlClassName=`pos-pnl ${pnlClass(pm.pnl_usd)}`;
+          if(pe.textContent!==pnlText)pe.textContent=pnlText;
+          if(pe.className!==pnlClassName)pe.className=pnlClassName;
+        }
       }
       if(pm.avg!=null&&pm.mark!=null){
         card.classList.toggle('winning',pm.mark>pm.avg);
