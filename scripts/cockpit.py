@@ -709,6 +709,8 @@ def invalidate_runtime_caches():
         val = globals().get(name)
         if isinstance(val, list) and val:
             val[0] = 0.0
+    if "_pnl_retry_after" in globals():
+        globals()["_pnl_retry_after"] = 0.0
     capture_cache = globals().get("_capture_profiles_cache")
     if isinstance(capture_cache, list) and capture_cache:
         capture_cache[0] = 0.0
@@ -6854,7 +6856,7 @@ def _build_tournament_payload():
     out = []
     names = instance_names()
     instances = fleet_instances()
-    pnl_rows = api_pnl_by_instance().get("instances", {})
+    pnl_rows = api_pnl_by_instance(stale_while_refresh=True).get("instances", {})
     latest_runs = {}
     if instances:
         run_rows = q("""SELECT DISTINCT ON (r.instance)
@@ -6936,6 +6938,7 @@ _fleet_refreshing = False
 _pnl_cache   = [0.0, None]  # (built_monotonic, payload)
 _pnl_cache_lock = threading.Lock()
 _pnl_refreshing = False
+_pnl_retry_after = 0.0
 
 
 def api_live(instance=None):
@@ -8405,22 +8408,54 @@ def api_supervisor_log(limit=20):
     return {"exchanges": rows}
 
 
-def api_pnl_by_instance():
+def _refresh_pnl_by_instance_background():
+    """Refresh the shared P&L snapshot without blocking lightweight views."""
+    global _pnl_refreshing, _pnl_retry_after
+    retry_after = 0.0
+    try:
+        _build_pnl_by_instance()
+    except Exception:
+        # Consumers keep their last good snapshot and can retry after this.
+        retry_after = time.monotonic() + 10.0
+    finally:
+        with _pnl_cache_lock:
+            _pnl_retry_after = retry_after
+            _pnl_refreshing = False
+
+
+def api_pnl_by_instance(stale_while_refresh=False):
     """Share one expensive session-ledger rebuild across overlapping requests."""
-    global _pnl_refreshing
+    global _pnl_refreshing, _pnl_retry_after
     now = time.monotonic()
     with _pnl_cache_lock:
         cached = _pnl_cache[1]
         if cached and now - _pnl_cache[0] < 10.0:
             return cached
+        if stale_while_refresh and cached and now < _pnl_retry_after:
+            return cached
         if _pnl_refreshing:
             return cached or {"instances": {}, "rows": [],
                               "pnl_scope": "realized_session_after_fees"}
         _pnl_refreshing = True
+        if stale_while_refresh and cached:
+            try:
+                threading.Thread(
+                    target=_refresh_pnl_by_instance_background,
+                    daemon=True, name="cockpit-pnl-refresh",
+                ).start()
+            except Exception:
+                _pnl_refreshing = False
+            else:
+                return cached
+    refresh_succeeded = False
     try:
-        return _build_pnl_by_instance()
+        result = _build_pnl_by_instance()
+        refresh_succeeded = True
+        return result
     finally:
         with _pnl_cache_lock:
+            if refresh_succeeded:
+                _pnl_retry_after = 0.0
             _pnl_refreshing = False
 
 
