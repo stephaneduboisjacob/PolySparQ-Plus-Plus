@@ -16,6 +16,7 @@ straight from the public exchange websockets, so the server stays light.
 """
 import argparse
 import base64
+from collections import deque
 import hashlib
 import hmac
 import json
@@ -8847,6 +8848,80 @@ _WINDOW_LOG_ENGINE_STATE_RE = re.compile(r"WINDOW_BOT .*state=([^ ]+)")
 _WINDOW_LOG_FRAMES_RE = re.compile(r"pm-md frames: total=(\d+).*connected=(true|false)")
 _WINDOW_LOG_MARKETS_RE = re.compile(r"gamma discovered (\d+) up-down markets")
 _WINDOW_LOG_WS_STATE_RE = re.compile(r"pm-md ws state: (connected|disconnected)")
+_WINDOW_LOG_TAIL_CACHE = {}
+_WINDOW_LOG_TAIL_CACHE_LOCK = threading.Lock()
+
+
+def _decode_window_log_line(raw):
+    return raw.decode("utf-8", "replace").rstrip("\r")
+
+
+def _window_bot_log_tail(path, limit=6000):
+    """Keep a rolling tail and read only bytes appended since its last refresh."""
+    limit = max(1, int(limit))
+    cache_key = (os.path.abspath(path), limit)
+    try:
+        with _WINDOW_LOG_TAIL_CACHE_LOCK:
+            with open(path, "rb") as stream:
+                stat = os.fstat(stream.fileno())
+                cached = _WINDOW_LOG_TAIL_CACHE.get(cache_key)
+                same_file = (cached is not None and
+                             cached["identity"] == (stat.st_dev, stat.st_ino) and
+                             stat.st_size >= cached["offset"])
+                if same_file:
+                    offset = cached["offset"]
+                    guard = cached["guard"]
+                    if guard:
+                        stream.seek(offset - len(guard))
+                        same_file = stream.read(len(guard)) == guard
+                    if same_file:
+                        if stat.st_size > offset:
+                            stream.seek(offset)
+                            appended = stream.read(stat.st_size - offset)
+                            combined = cached["partial"] + appended
+                            pieces = combined.split(b"\n")
+                            if len(pieces) > 1:
+                                for complete_line in pieces[:-1]:
+                                    cached["lines"].append(_decode_window_log_line(complete_line))
+                            cached["partial"] = pieces[-1]
+                            cached["offset"] = stat.st_size
+                            stream.seek(max(0, stat.st_size - 4096))
+                            cached["guard"] = stream.read(min(4096, stat.st_size))
+                        cached_lines = list(cached["lines"])
+                        if cached["partial"]:
+                            cached_lines.append(_decode_window_log_line(cached["partial"]))
+                        return cached_lines[-limit:]
+
+                size = stat.st_size
+                remaining = size
+                data = b""
+                while remaining > 0 and data.count(b"\n") <= limit:
+                    step = min(8192, remaining)
+                    remaining -= step
+                    stream.seek(remaining)
+                    data = stream.read(step) + data
+                pieces = data.split(b"\n")
+                complete_lines = pieces[:-1]
+                partial = b"" if data.endswith(b"\n") else pieces[-1]
+                cached = {
+                    "identity": (stat.st_dev, stat.st_ino),
+                    "offset": size,
+                    "guard": data[-min(4096, size):] if size else b"",
+                    "lines": deque(
+                        (_decode_window_log_line(line)
+                         for line in complete_lines[-limit:]), maxlen=limit
+                    ),
+                    "partial": partial,
+                }
+                _WINDOW_LOG_TAIL_CACHE[cache_key] = cached
+                cached_lines = list(cached["lines"])
+                if partial:
+                    cached_lines.append(_decode_window_log_line(partial))
+                return cached_lines[-limit:]
+    except OSError:
+        with _WINDOW_LOG_TAIL_CACHE_LOCK:
+            _WINDOW_LOG_TAIL_CACHE.pop(cache_key, None)
+        return []
 
 
 def _window_bot_log_diagnostics(log_lines, hot, horizons):
@@ -9077,7 +9152,7 @@ def _build_window_bot_desk(scope, cache_key):
                 order.pop("exchange_order_id", None)
         # Keep enough history to retain a loss-pause event for the duration of
         # the configured cooldown, even while per-market scan logs are busy.
-        log_lines = tail(instance_log(inst), 6000)
+        log_lines = _window_bot_log_tail(instance_log(inst), 6000)
         log_diagnostics = _window_bot_log_diagnostics(log_lines, hot, horizons)
         entry_pause = log_diagnostics["entry_pause"]
         engine_state = log_diagnostics["engine_state"]
