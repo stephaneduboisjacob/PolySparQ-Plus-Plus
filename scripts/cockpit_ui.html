@@ -3620,6 +3620,14 @@ async function loadActivity(force=false){
   if(!force&&now<_activityRetryAt)return;
   if(!force&&S.activity.ts&&now-S.activity.ts<1800)return;
   S.activityRefreshing=true;
+  if(S.curTab==='logs'){
+    const updated=$('activityStreamUpdated'),age=S.activity.ts?Math.floor((Date.now()-S.activity.ts)/1000):null;
+    if(updated){
+      updated.classList.remove('slow');
+      updated.classList.toggle('stale',age!=null&&age>=5);
+      updated.textContent=age==null?'FETCHING SNAPSHOT…':`REFRESHING · LAST SNAPSHOT ${age}s AGO`;
+    }
+  }
   try{
     const params=new URLSearchParams();
     if(S.curInstance)params.set('instance',S.curInstance);
@@ -3628,7 +3636,13 @@ async function loadActivity(force=false){
     const requestStartedAt=performance.now();
     const r=await apiFetch(`/api/activity${qs?`?${qs}`:''}`);
     if(!r){noteActivityRequestFailure();return;}
-    if(r.warming_up)return;
+    if(r.warming_up){
+      if(S.curTab==='logs'){
+        const updated=$('activityStreamUpdated'),age=S.activity.ts?Math.floor((Date.now()-S.activity.ts)/1000):null;
+        if(updated){updated.classList.remove('stale');updated.classList.add('slow');updated.textContent=age==null?'SERVER REFRESH IN PROGRESS':`REFRESHING IN BACKGROUND · LAST SNAPSHOT ${age}s AGO`;}
+      }
+      return;
+    }
     const requestMs=performance.now()-requestStartedAt;
     _activityFailureCount=0;
     const slowCooldownMs=requestMs>=2500?Math.min(12000,Math.max(4000,Math.round(requestMs*2))):0;
