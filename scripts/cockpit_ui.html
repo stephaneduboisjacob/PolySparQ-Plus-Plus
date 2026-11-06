@@ -5143,9 +5143,11 @@ function startTimer(p){
 
 // ── Position live chart modal ─────────────────────────────────────────────
 const PCM={obj:null,series:null,markLine:null,cid:null,side:null,asset:null,inst:null,
-           avgEntry:0,targetPrice:1,question:'',shares:0,costBasis:0,ticker:null};
+           avgEntry:0,targetPrice:1,question:'',shares:0,costBasis:0,ticker:null,
+           resizeObserver:null,resizeHost:null,resizeWidth:0,resizeHeight:0,refreshing:false,session:0};
 
 function openPosChart(cid,side,asset,inst,avgEntry,targetPrice,question,shares,costBasis){
+  PCM.session++;
   PCM.cid=cid;PCM.side=side;PCM.asset=asset;PCM.inst=inst;
   PCM.avgEntry=+avgEntry||0;PCM.targetPrice=+targetPrice||1;
   PCM.question=question||'';PCM.shares=+shares||0;PCM.costBasis=+costBasis||0;
@@ -5161,6 +5163,7 @@ function openPosChart(cid,side,asset,inst,avgEntry,targetPrice,question,shares,c
 
 function closePosChart(){
   $('posChartModal').classList.remove('open');
+  PCM.session++;
   if(PCM.ticker){clearInterval(PCM.ticker);PCM.ticker=null;}
 }
 $('posChartModal').addEventListener('click',e=>{if(e.target===$('posChartModal'))closePosChart();});
@@ -5168,14 +5171,16 @@ $('posChartModal').addEventListener('click',e=>{if(e.target===$('posChartModal')
 function _initPosChart(){
   const host=$('pcmHost');
   if(PCM.obj){try{PCM.obj.remove();}catch(_){}PCM.obj=null;PCM.series=null;PCM.markLine=null;}
+  const width=Math.max(1,host.clientWidth),height=host.clientHeight||380;
   PCM.obj=LightweightCharts.createChart(host,{
     layout:{background:{color:'transparent'},textColor:'#7a8899'},
     grid:{vertLines:{color:'#1e2535'},horzLines:{color:'#1e2535'}},
     rightPriceScale:{borderColor:'#1e2535',scaleMargins:{top:.12,bottom:.12}},
     timeScale:{borderColor:'#1e2535',timeVisible:true,secondsVisible:true},
     crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
-    width:host.clientWidth,height:host.clientHeight||380,
+    width,height,
   });
+  PCM.resizeWidth=width;PCM.resizeHeight=height;
   PCM.series=PCM.obj.addLineSeries({color:'#39c5df',lineWidth:2,lastValueVisible:true,priceLineVisible:false,title:'Share Price'});
   // Dashed gold line at avg buy price
   if(PCM.avgEntry>0)
@@ -5184,45 +5189,54 @@ function _initPosChart(){
   PCM.series.createPriceLine({price:.999,color:'#18c98b',lineWidth:1,lineStyle:0,axisLabelVisible:true,title:'TARGET $1.00'});
   // Current mark price line (will be updated in _refreshPosChart)
   PCM.markLine=PCM.series.createPriceLine({price:0,color:'#ef4f5f',lineWidth:1,lineStyle:1,axisLabelVisible:false,title:''});
-  new ResizeObserver(()=>{
-    if(PCM.obj){const h=host.clientHeight||380;PCM.obj.resize(host.clientWidth,h);}
-  }).observe(host);
+  if(!PCM.resizeObserver||PCM.resizeHost!==host){
+    PCM.resizeObserver?.disconnect();PCM.resizeHost=host;
+    PCM.resizeObserver=new ResizeObserver(()=>{
+      if(!PCM.obj||PCM.resizeHost!==host)return;
+      const nextWidth=Math.max(1,host.clientWidth),nextHeight=host.clientHeight||380;
+      if(nextWidth===PCM.resizeWidth&&nextHeight===PCM.resizeHeight)return;
+      PCM.resizeWidth=nextWidth;PCM.resizeHeight=nextHeight;PCM.obj.resize(nextWidth,nextHeight);
+    });
+    PCM.resizeObserver.observe(host);
+  }
 }
 
 async function _refreshPosChart(){
-  if(!PCM.cid||!PCM.series)return;
-  const r=await apiFetch(`/api/price_history?cid=${encodeURIComponent(PCM.cid)}&side=${PCM.side}&minutes=120`);
-  if(!r)return;
-  const pts=(r.points||[]).map(p=>({time:Math.floor(new Date(p.ts).getTime()/1000),value:parseFloat(p.price)}))
-             .filter(p=>p.time>0&&p.value>0&&p.value<=1.01);
-  if(pts.length){
-    PCM.series.setData(pts);
-    PCM.obj.timeScale().fitContent();
-  }
-  // All markers (buys = green arrow up, sells = red arrow down)
-  const allMarks=(r.markers||[]).map(m=>({
-    time:Math.floor(new Date(m.ts_created).getTime()/1000),
-    position:m.direction==='buy'?'belowBar':'aboveBar',
-    color:m.direction==='buy'?'#18c98b':'#ef4f5f',
-    shape:m.direction==='buy'?'arrowUp':'arrowDown',
-    text:`${m.direction.toUpperCase()} @${fmt(m.price,4)} (${m.source||''})`
-  })).sort((a,b)=>a.time-b.time);
-  if(allMarks.length)PCM.series.setMarkers(allMarks);
-  // Current mark: latest data point
-  const lastPt=pts.length?pts[pts.length-1]:null;
-  const markPx=lastPt?lastPt.value:0;
-  if(markPx>0&&PCM.markLine){
-    try{PCM.markLine.applyOptions({price:markPx,color:markPx>PCM.avgEntry?'#18c98b':'#ef4f5f',axisLabelVisible:true,title:`MARK ${fmt(markPx,4)}`});}
-    catch(_){}
-  }
-  // P&L calc
-  const pnlUsd=markPx>0?((markPx-PCM.avgEntry)*PCM.shares):null;
-  const pnlPct=markPx>0&&PCM.avgEntry>0?((markPx-PCM.avgEntry)/PCM.avgEntry*100):null;
-  const pnlColor=pnlUsd==null?'var(--text3)':pnlUsd>=0?'var(--green)':'var(--red)';
-  // Info bar
-  const px=PCM.asset&&S.prices[PCM.asset]||{};
-  const orc=px.oracle,cb=px.coinbase,d=px.delta_pct;
-  $('pcmInfoBar').innerHTML=`
+  if(!PCM.cid||!PCM.series||PCM.refreshing)return;
+  const session=PCM.session,cid=PCM.cid,side=PCM.side;PCM.refreshing=true;
+  try{
+    const r=await apiFetch(`/api/price_history?cid=${encodeURIComponent(cid)}&side=${side}&minutes=120`);
+    if(!r||session!==PCM.session||cid!==PCM.cid||side!==PCM.side)return;
+    const pts=(r.points||[]).map(p=>({time:Math.floor(new Date(p.ts).getTime()/1000),value:parseFloat(p.price)}))
+               .filter(p=>p.time>0&&p.value>0&&p.value<=1.01);
+    if(pts.length){
+      PCM.series.setData(pts);
+      PCM.obj.timeScale().fitContent();
+    }
+    // All markers (buys = green arrow up, sells = red arrow down)
+    const allMarks=(r.markers||[]).map(m=>({
+      time:Math.floor(new Date(m.ts_created).getTime()/1000),
+      position:m.direction==='buy'?'belowBar':'aboveBar',
+      color:m.direction==='buy'?'#18c98b':'#ef4f5f',
+      shape:m.direction==='buy'?'arrowUp':'arrowDown',
+      text:`${m.direction.toUpperCase()} @${fmt(m.price,4)} (${m.source||''})`
+    })).sort((a,b)=>a.time-b.time);
+    PCM.series.setMarkers(allMarks);
+    // Current mark: latest data point
+    const lastPt=pts.length?pts[pts.length-1]:null;
+    const markPx=lastPt?lastPt.value:0;
+    if(markPx>0&&PCM.markLine){
+      try{PCM.markLine.applyOptions({price:markPx,color:markPx>PCM.avgEntry?'#18c98b':'#ef4f5f',axisLabelVisible:true,title:`MARK ${fmt(markPx,4)}`});}
+      catch(_){}
+    }
+    // P&L calc
+    const pnlUsd=markPx>0?((markPx-PCM.avgEntry)*PCM.shares):null;
+    const pnlPct=markPx>0&&PCM.avgEntry>0?((markPx-PCM.avgEntry)/PCM.avgEntry*100):null;
+    const pnlColor=pnlUsd==null?'var(--text3)':pnlUsd>=0?'var(--green)':'var(--red)';
+    // Info bar
+    const px=PCM.asset&&S.prices[PCM.asset]||{};
+    const orc=px.oracle,cb=px.coinbase,d=px.delta_pct;
+    $('pcmInfoBar').innerHTML=`
     <div class="pcm-info"><div class="pcm-lbl">${esc(PCM.asset||'')} ORACLE</div><div class="pcm-val" style="color:var(--cyan)">${fmtPx(orc)}</div></div>
     <div class="pcm-info"><div class="pcm-lbl">COINBASE</div><div class="pcm-val">${fmtPx(cb)}</div></div>
     ${d!=null?`<div class="pcm-info"><div class="pcm-lbl">CB/ORC Δ</div><div class="pcm-val" style="color:${d>0?'var(--green)':'var(--red)'}">${d>0?'+':''}${fmt(d,3)}%</div></div>`:''}
@@ -5230,9 +5244,10 @@ async function _refreshPosChart(){
     <div class="pcm-info"><div class="pcm-lbl">MARK</div><div class="pcm-val" style="color:${markPx>=PCM.avgEntry?'var(--green)':'var(--red)'}">${markPx>0?fmt(markPx,4):'—'}</div></div>
     <div class="pcm-info"><div class="pcm-lbl">SHARES</div><div class="pcm-val">${fmt(PCM.shares,2)}</div></div>
     <div class="pcm-info"><div class="pcm-lbl">P&L</div><div class="pcm-val" style="color:${pnlColor}">${pnlUsd!=null?(pnlUsd>=0?'+':'')+fmt(pnlUsd,2)+(pnlPct!=null?' ('+(pnlPct>=0?'+':'')+fmt(pnlPct,1)+'%)':''):'—'}</div></div>`;
-  // Data source label
-  const src=$('pcmDataSrc');
-  if(src)src.textContent=r.source==='fills'?'⚠ fill prices (no live feed)':r.source==='synthetic'?`≈ ${pts.length} oracle-estimated pts`:pts.length?`${pts.length} book pts`:'no data';
+    // Data source label
+    const src=$('pcmDataSrc');
+    if(src)src.textContent=r.source==='fills'?'⚠ fill prices (no live feed)':r.source==='synthetic'?`≈ ${pts.length} oracle-estimated pts`:pts.length?`${pts.length} book pts`:'no data';
+  }finally{PCM.refreshing=false;}
 }
 
 async function pcmForceSell(){
@@ -6665,30 +6680,48 @@ async function loadMarketArchiveCoverage(force=false){
   }finally{_marketArchiveLoading=false;if(button)button.disabled=false;}
 }
 
+let _candleLoadBusy=false,_candleResizeObserver=null,_candleResizeTarget=null,_candleLastSignature='',_candleLastWidth=0;
 async function loadCandles(){
-  const sym=$('assetSel').value;
-  const r=await apiFetch(`/api/candles?symbol=${sym}&limit=300`);
-  if(!r||!r.candles)return;
-  const el=$('chartEl');if(!el)return;
-  if(S.chartObj){S.chartObj.remove();S.chartObj=null;S.candleSeries=null;}
-  S.chartObj=LightweightCharts.createChart(el,{
-    layout:{background:{color:'transparent'},textColor:'#7a8899'},
-    grid:{vertLines:{color:'#1e2535'},horzLines:{color:'#1e2535'}},
-    rightPriceScale:{borderColor:'#1e2535'},timeScale:{borderColor:'#1e2535',timeVisible:true},
-    crosshair:{mode:LightweightCharts.CrosshairMode.Normal},width:el.clientWidth,height:300,
-  });
-  S.candleSeries=S.chartObj.addCandlestickSeries({upColor:'#18c98b',downColor:'#ef4f5f',borderUpColor:'#18c98b',borderDownColor:'#ef4f5f',wickUpColor:'#18c98b',wickDownColor:'#ef4f5f'});
-  const candles=r.candles.map(c=>({time:Math.floor(c.ts/1000),open:c.open,high:c.high,low:c.low,close:c.close})).filter(c=>c.time>0);
-  S.candleSeries.setData(candles);
-  new ResizeObserver(()=>S.chartObj&&S.chartObj.resize(el.clientWidth,300)).observe(el);
-  const staleEl=$('candleStaleWarn');
-  if(staleEl){
-    if(r.stale_hours!=null&&r.stale_hours>2){
-      staleEl.textContent=`⚠ candles_1m stale (${r.stale_hours}h ago) — showing live binance_ticks`;
-      staleEl.style.display='';
-    } else {
-      staleEl.style.display='none';
+  const selector=$('assetSel'),el=$('chartEl');
+  if(_candleLoadBusy||!selector||!el)return;
+  const sym=selector.value;_candleLoadBusy=true;
+  try{
+    const r=await apiFetch(`/api/candles?symbol=${encodeURIComponent(sym)}&limit=300`);
+    if(!r||!Array.isArray(r.candles)||selector.value!==sym)return;
+    if(!S.chartObj){
+      S.chartObj=LightweightCharts.createChart(el,{
+        layout:{background:{color:'transparent'},textColor:'#7a8899'},
+        grid:{vertLines:{color:'#1e2535'},horzLines:{color:'#1e2535'}},
+        rightPriceScale:{borderColor:'#1e2535'},timeScale:{borderColor:'#1e2535',timeVisible:true},
+        crosshair:{mode:LightweightCharts.CrosshairMode.Normal},width:Math.max(1,el.clientWidth),height:300,
+      });
+      S.candleSeries=S.chartObj.addCandlestickSeries({upColor:'#18c98b',downColor:'#ef4f5f',borderUpColor:'#18c98b',borderDownColor:'#ef4f5f',wickUpColor:'#18c98b',wickDownColor:'#ef4f5f'});
     }
+    if(!_candleResizeObserver||_candleResizeTarget!==el){
+      _candleResizeObserver?.disconnect();_candleResizeTarget=el;_candleLastWidth=Math.max(1,el.clientWidth);
+      _candleResizeObserver=new ResizeObserver(()=>{
+        if(!S.chartObj||_candleResizeTarget!==el)return;
+        const width=Math.max(1,Math.floor(el.clientWidth));
+        if(width===_candleLastWidth)return;
+        _candleLastWidth=width;S.chartObj.resize(width,300);
+      });
+      _candleResizeObserver.observe(el);
+    }
+    const candles=r.candles.map(c=>({time:Math.floor(c.ts/1000),open:c.open,high:c.high,low:c.low,close:c.close})).filter(c=>c.time>0);
+    const signature=`${sym}|${candles.map(c=>`${c.time},${c.open},${c.high},${c.low},${c.close}`).join(';')}`;
+    if(signature!==_candleLastSignature){S.candleSeries.setData(candles);_candleLastSignature=signature;}
+    const staleEl=$('candleStaleWarn');
+    if(staleEl){
+      if(r.stale_hours!=null&&r.stale_hours>2){
+        staleEl.textContent=`⚠ candles_1m stale (${r.stale_hours}h ago) — showing live binance_ticks`;
+        staleEl.style.display='';
+      } else {
+        staleEl.style.display='none';
+      }
+    }
+  }finally{
+    _candleLoadBusy=false;
+    if(selector.value!==sym&&S.curTab==='markets')setTimeout(loadCandles,0);
   }
 }
 $('assetSel').onchange=()=>loadCandles();
