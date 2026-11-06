@@ -9582,18 +9582,6 @@ setInterval(()=>{
   if(S.curTab==='predictor'&&!document.hidden)loadPredictor();
 },3000);
 
-async function loadPredictor(refreshCfg=false){
-  const sel=$('predInstSel'),inst=sel.value||'predictor';
-  // keep the selector stocked with running predictor-type bots
-  const running=((S.data||{}).status||{}).instances_running||[];
-  const have=new Set([...sel.options].map(o=>o.value));
-  running.forEach(i=>{if(!have.has(i)){const o=document.createElement('option');o.value=i;o.textContent=i;sel.appendChild(o);}});
-  const r=await apiFetch(`/api/predictor?instance=${encodeURIComponent(inst)}&limit=200`);
-  if(!r){$('predSummary').innerHTML='';return;}
-  renderPredictor(r);
-  if(refreshCfg||_predCfg.inst!==inst)loadPredictorConfig(inst);
-}
-
 function _accCell(a){
   const pct=a&&a.n?Math.round(100*a.accuracy):null;
   const col=pct===null?'var(--text3)':pct>=55?'var(--green)':pct>=45?'var(--gold)':'var(--red)';
@@ -9605,27 +9593,38 @@ function _pnlCell(v){
   return `<span style="color:${col};font-weight:700">${v>=0?'+':''}$${Number(v).toFixed(2)}</span>`;
 }
 
+let _crossAssetSyncLoading=false,_crossAssetSyncPending=false,_crossAssetSyncForcePending=false;
 setInterval(()=>{
   if(S.curTab==='crossasset'&&!document.hidden&&!S.paused)loadCrossAssetSync();
 },5000);
 
 async function loadCrossAssetSync(force=false){
-  const el=$('crossSyncFreshness');
-  if(el&&force)el.textContent='REFRESHING…';
-  const data=await apiFetch('/api/cross_asset_sync');
-  const view=data||{
-    available:false,
-    reason:'Cockpit API is unavailable in this static preview. Open this tab in the running cockpit to load its read-only shadow data.',
-    summary:{candidates:0,current_markets:0,eligible_assets:0,fresh_markets:0,settled:0,wins:0,win_rate_pct:null,hypothetical_net_pnl_usd:null},
-    current:[],chart:[],settled:[],settings:{},
-    method_notes:[
-      'The monitor is shadow-only and does not submit orders.',
-      'Settled scoring de-duplicates repeated samples to the first candidate per market window.',
-      'The $5 settlement estimate assumes a full top-ask fill and configured fees; it is not simulated execution.'
-    ]
-  };
-  S.crossAssetSync=view;
-  renderCrossAssetSync(view);
+  if(_crossAssetSyncLoading){_crossAssetSyncPending=true;_crossAssetSyncForcePending||=force;return;}
+  _crossAssetSyncLoading=true;
+  try{
+    const el=$('crossSyncFreshness');
+    if(el&&force)el.textContent='REFRESHING…';
+    const data=await apiFetch('/api/cross_asset_sync');
+    const view=data||{
+      available:false,
+      reason:'Cockpit API is unavailable in this static preview. Open this tab in the running cockpit to load its read-only shadow data.',
+      summary:{candidates:0,current_markets:0,eligible_assets:0,fresh_markets:0,settled:0,wins:0,win_rate_pct:null,hypothetical_net_pnl_usd:null},
+      current:[],chart:[],settled:[],settings:{},
+      method_notes:[
+        'The monitor is shadow-only and does not submit orders.',
+        'Settled scoring de-duplicates repeated samples to the first candidate per market window.',
+        'The $5 settlement estimate assumes a full top-ask fill and configured fees; it is not simulated execution.'
+      ]
+    };
+    S.crossAssetSync=view;
+    renderCrossAssetSync(view);
+  }finally{
+    _crossAssetSyncLoading=false;
+    if(_crossAssetSyncPending){
+      const pendingForce=_crossAssetSyncForcePending;_crossAssetSyncPending=false;_crossAssetSyncForcePending=false;
+      if(S.curTab==='crossasset'&&!document.hidden&&!S.paused)setTimeout(()=>loadCrossAssetSync(pendingForce),0);
+    }
+  }
 }
 
 function renderCrossAssetSync(data){
@@ -9830,29 +9829,43 @@ function renderPredictorBreakdown(){
   $('predBreakdown').innerHTML=rows||'<div class="empty-state"><div>no breakdown data</div></div>';
 }
 
+let _predictorLoading=false,_predictorPending=false,_predictorForcePending=false;
 async function loadPredictor(refreshCfg=false){
-  const sel=$('predInstSel'),inst=sel.value||'predictor';
-  const running=((S.data||{}).status||{}).instances_running||[];
-  const have=new Set([...sel.options].map(o=>o.value));
-  running.forEach(i=>{if(!have.has(i)){const o=document.createElement('option');o.value=i;o.textContent=i;sel.appendChild(o);}});
-  const r=await apiFetch(`/api/predictor?instance=${encodeURIComponent(inst)}&limit=200`);
-  if(!r){$('predSummary').innerHTML='';return;}
-  renderPredictor(r);
-  // Load trajectory data
-  const tr=await apiFetch(`/api/predictor_trajectory?limit=200`);
-  if(tr)   renderPredictorTrajectory(tr.samples||[]);
-  // Render gauges from latest watchlist data
-  renderPredictorGauges();
-  // Render signal breakdown
-  renderPredictorBreakdown();
-  if(refreshCfg||_predCfg.inst!==inst)loadPredictorConfig(inst);
+  if(_predictorLoading){_predictorPending=true;_predictorForcePending||=refreshCfg;return;}
+  _predictorLoading=true;
+  try{
+    const sel=$('predInstSel'),inst=sel.value||'predictor';
+    const running=((S.data||{}).status||{}).instances_running||[];
+    const have=new Set([...sel.options].map(o=>o.value));
+    running.forEach(i=>{if(!have.has(i)){const o=document.createElement('option');o.value=i;o.textContent=i;sel.appendChild(o);}});
+    const r=await apiFetch(`/api/predictor?instance=${encodeURIComponent(inst)}&limit=200`);
+    if(!r){$('predSummary').innerHTML='';return;}
+    if(inst!==($('predInstSel').value||'predictor'))return;
+    renderPredictor(r);
+    const tr=await apiFetch(`/api/predictor_trajectory?limit=200`);
+    if(tr&&inst===($('predInstSel').value||'predictor'))renderPredictorTrajectory(tr.samples||[]);
+    renderPredictorGauges();
+    renderPredictorBreakdown();
+    if(refreshCfg||_predCfg.inst!==inst)loadPredictorConfig(inst);
+  }finally{
+    _predictorLoading=false;
+    if(_predictorPending){
+      const force=_predictorForcePending;_predictorPending=false;_predictorForcePending=false;
+      if(S.curTab==='predictor'&&!document.hidden)setTimeout(()=>loadPredictor(force),0);
+    }
+  }
 }
 
+const _predConfigLoading=new Set();
 async function loadPredictorConfig(inst){
-  const r=await apiFetch(`/api/config?name=${encodeURIComponent(inst)}`);
-  if(!r||r.error){$('predConfigPanel').innerHTML=`<div class="empty-state"><div>${r&&r.error?esc(r.error):'config not found'}</div></div>`;return;}
-  const hot=(r.config||{})['strategy']||{};const vals=hot['hot']||{};
-  _predCfg={inst,values:vals};
+  if(_predConfigLoading.has(inst))return;
+  _predConfigLoading.add(inst);
+  try{
+    const r=await apiFetch(`/api/config?name=${encodeURIComponent(inst)}`);
+    if(inst!==($('predInstSel').value||'predictor'))return;
+    if(!r||r.error){$('predConfigPanel').innerHTML=`<div class="empty-state"><div>${r&&r.error?esc(r.error):'config not found'}</div></div>`;return;}
+    const hot=(r.config||{})['strategy']||{};const vals=hot['hot']||{};
+    _predCfg={inst,values:vals};
   $('predConfigPanel').innerHTML=PRED_CFG_FIELDS.map(f=>{
     const v=vals[f.k];
     const sv=Array.isArray(v)?JSON.stringify(v):(v===undefined?'':String(v));
@@ -9870,6 +9883,7 @@ async function loadPredictorConfig(inst){
     return `<div><div class="str-key" style="margin-bottom:2px">🔧 ${f.label}</div>${input}
       <div style="font-size:9px;color:var(--text3);margin-top:1px">${f.hint}</div></div>`;
   }).join('');
+  }finally{_predConfigLoading.delete(inst);}
 }
 $('btnSavePredictor').onclick=async()=>{
   const updates={};
