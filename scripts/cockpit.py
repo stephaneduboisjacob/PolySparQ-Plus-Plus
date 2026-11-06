@@ -6809,7 +6809,7 @@ def paper_since(instance=None, mode=None):
     val = None
     if mode == "paper":
         if instance:
-            runtime = _cached_systemd_bot_status_many(fleet_instances())
+            runtime = _cached_systemd_bot_status_many((instance,))
             status = runtime.get(instance)
             val = status.get("session_start") if status else None
             if val is None:
@@ -9422,9 +9422,10 @@ def _build_window_bot_desk(scope, cache_key):
     if hit and now - hit[0] < 1.5:
         return hit[1]
 
-    fleet_rows = {x["instance"]: x for x in api_fleet_detail().get("fleet", [])}
-    names = sorted((_WINDOW_BOT_IDS & set(fleet_rows)) if scope is None
-                   else (_WINDOW_BOT_IDS & set(fleet_rows) & set(scope)))
+    configured = set(fleet_instances())
+    names = sorted((_WINDOW_BOT_IDS & configured) if scope is None
+                   else (_WINDOW_BOT_IDS & configured & set(scope)))
+    display_names = instance_names()
     bot_configs = {}
     for inst in names:
         path = _instance_config_file(inst)
@@ -9433,6 +9434,18 @@ def _build_window_bot_desk(scope, cache_key):
                 bot_configs[inst] = tomllib.load(stream)
         except Exception:
             continue
+    _cached_systemd_bot_status_many(names)
+    fleet_rows = {}
+    for inst in names:
+        config = bot_configs.get(inst, {})
+        label = display_names.get(inst)
+        if not label:
+            label = str(config.get("runtime", {}).get("instance_label") or "").strip()
+        if not label:
+            label = (inst.replace("-", " ").title()
+                     if _instance_config_is_external(inst) else inst)
+        fleet_rows[inst] = {"instance": inst, "name": label,
+                            "running": instance_running(inst)}
     recent_orders_by_instance = api_window_bot_recent_orders(bot_configs, 12)
     execution_by_instance = api_window_bot_execution_modes({
         inst: cfg.get("runtime", {}).get("mode", "?")
