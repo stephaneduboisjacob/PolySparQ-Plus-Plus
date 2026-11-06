@@ -10489,8 +10489,8 @@ function refreshVisibleWorkspace(){
   if($('posChartModal')?.classList.contains('open'))_refreshPosChart();
 }
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshVisibleWorkspace();});
-// /api/live_lite reuses snapshots for 650ms; a 500ms poll often fetches the
-// same payload twice. SSE still carries prices and position marks between polls.
+// /api/live_lite shares one-second snapshots across cockpit windows. SSE carries
+// live prices and position marks between these accounting and status refreshes.
 setInterval(()=>{if(!document.hidden&&!S.paused)refresh();},1000);
 setInterval(()=>{if(!document.hidden&&!S.paused)loadActivity();},2000);
 setInterval(()=>{if(!document.hidden)updateSpeedPanel();},1000);

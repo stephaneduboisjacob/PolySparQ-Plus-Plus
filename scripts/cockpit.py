@@ -1009,17 +1009,34 @@ def _pgrep_bot_status():
 
 
 _bot_status_cache = [0.0, None]  # [built_monotonic, payload]
+_bot_status_cache_lock = threading.Lock()
+_bot_status_refreshing = False
 
 
 def bot_status_detail():
     # 5s TTL: this fans out to several systemctl subprocesses and is hit by
     # status/health/orderstats on every dashboard poll.
+    global _bot_status_refreshing
     now = time.monotonic()
-    if _bot_status_cache[1] is not None and now - _bot_status_cache[0] < 5.0:
-        return _bot_status_cache[1]
-    s = _bot_status_detail_uncached()
-    _bot_status_cache[0], _bot_status_cache[1] = now, s
-    return s
+    with _bot_status_cache_lock:
+        cached = _bot_status_cache[1]
+        if cached is not None and now - _bot_status_cache[0] < 5.0:
+            return cached
+        if _bot_status_refreshing:
+            return cached or {"running": False, "pid": None, "launcher": "refreshing"}
+        _bot_status_refreshing = True
+    try:
+        status = _bot_status_detail_uncached()
+    except Exception:
+        with _bot_status_cache_lock:
+            _bot_status_refreshing = False
+            if _bot_status_cache[1] is not None:
+                return _bot_status_cache[1]
+        raise
+    with _bot_status_cache_lock:
+        _bot_status_cache[0], _bot_status_cache[1] = time.monotonic(), status
+        _bot_status_refreshing = False
+        return status
 
 
 def _bot_status_detail_uncached():
@@ -6653,6 +6670,8 @@ def api_supervisor_feed(limit=15):
 
 _live_cache = {}   # instance-key -> (built_monotonic, payload)
 _live_lite_cache = {}
+_live_lite_cache_lock = threading.Lock()
+_live_lite_refreshing = set()
 _activity_cache = {}
 _exit_performance_cache = {}
 _execution_maker_pressure_cache = {}
@@ -6809,12 +6828,40 @@ def build_operator_radar(status, positions_payload, markets_payload, health):
 
 
 def api_live_lite(instance=None):
-    """Slim high-frequency payload for the cockpit paint loop."""
+    """Share a one-second live snapshot across simultaneous cockpit clients."""
     key = instance or ""
     now = time.monotonic()
-    hit = _live_lite_cache.get(key)
-    if hit and now - hit[0] < 0.65:
-        return hit[1]
+    with _live_lite_cache_lock:
+        hit = _live_lite_cache.get(key)
+        if hit and now - hit[0] < 1.0:
+            return hit[1]
+        if key in _live_lite_refreshing:
+            return hit[1] if hit else {
+                "status": {}, "positions": {"positions": []}, "markets": {"markets": []},
+                "health": {}, "tournament": {"instances": []}, "radar": [],
+                "instance": instance or "", "server_ts": int(time.time() * 1000),
+            }
+        _live_lite_refreshing.add(key)
+    try:
+        result = _build_api_live_lite(instance)
+    except Exception:
+        with _live_lite_cache_lock:
+            _live_lite_refreshing.discard(key)
+            cached = _live_lite_cache.get(key)
+        if cached:
+            return cached[1]
+        raise
+    with _live_lite_cache_lock:
+        if len(_live_lite_cache) >= 128 and key not in _live_lite_cache:
+            oldest = min(_live_lite_cache,
+                         key=lambda cache_key: _live_lite_cache[cache_key][0])
+            _live_lite_cache.pop(oldest, None)
+        _live_lite_cache[key] = (time.monotonic(), result)
+        _live_lite_refreshing.discard(key)
+        return result
+
+
+def _build_api_live_lite(instance=None):
     mode = current_mode(instance)
     since = accounting_since(instance, mode)
     positions = reconstructed_positions(mode, since, instance)
@@ -6831,7 +6878,6 @@ def api_live_lite(instance=None):
         "instance": instance or "",
         "server_ts": int(time.time() * 1000),
     }
-    _live_lite_cache[key] = (now, out)
     return out
 
 
@@ -9755,25 +9801,33 @@ def build_stream_payload():
 
 def _build_stream_payload():
     try:
-        oracle_rows = q("""SELECT DISTINCT ON (asset) asset, price,
+        source_rows = q("""SELECT 'oracle'::text AS source,asset AS symbol,price,
                                   extract(epoch FROM ts)::double precision AS ts_epoch
-                           FROM vp.oracle_ticks WHERE ts > now()-interval '2 minutes'
-                           ORDER BY asset, ts DESC""")
-        cb_rows = q("""SELECT DISTINCT ON (asset) asset, price,
-                             extract(epoch FROM ts)::double precision AS ts_epoch
-                       FROM vp.coinbase_ticks WHERE ts > now()-interval '2 minutes'
-                       ORDER BY asset, ts DESC""")
-        bn_rows = q("""SELECT DISTINCT ON (symbol) symbol, price,
-                             extract(epoch FROM ts)::double precision AS ts_epoch
-                       FROM vp.binance_ticks
-                       WHERE symbol=ANY(%s) AND ts > now()-interval '2 minutes'
-                       ORDER BY symbol, ts DESC""", (list(SYMBOL.values()),))
+                             FROM (SELECT DISTINCT ON (asset) asset,price,ts
+                                     FROM vp.oracle_ticks
+                                    WHERE asset=ANY(%s) AND ts>now()-interval '2 minutes'
+                                    ORDER BY asset,ts DESC) oracle
+                           UNION ALL
+                           SELECT 'coinbase'::text AS source,asset AS symbol,price,
+                                  extract(epoch FROM ts)::double precision AS ts_epoch
+                             FROM (SELECT DISTINCT ON (asset) asset,price,ts
+                                     FROM vp.coinbase_ticks
+                                    WHERE asset=ANY(%s) AND ts>now()-interval '2 minutes'
+                                    ORDER BY asset,ts DESC) coinbase
+                           UNION ALL
+                           SELECT 'binance'::text AS source,symbol,price,
+                                  extract(epoch FROM ts)::double precision AS ts_epoch
+                             FROM (SELECT DISTINCT ON (symbol) symbol,price,ts
+                                     FROM vp.binance_ticks
+                                    WHERE symbol=ANY(%s) AND ts>now()-interval '2 minutes'
+                                    ORDER BY symbol,ts DESC) binance""",
+                       (ASSETS, ASSETS, list(SYMBOL.values())))
     except Exception:
         return None
     now_s = time.time()
-    om = {r["asset"]: r for r in oracle_rows}
-    cm = {r["asset"]: r for r in cb_rows}
-    bm = {asset: row for row in bn_rows
+    om = {r["symbol"]: r for r in source_rows if r["source"] == "oracle"}
+    cm = {r["symbol"]: r for r in source_rows if r["source"] == "coinbase"}
+    bm = {asset: row for row in source_rows if row["source"] == "binance"
           for asset, symbol in SYMBOL.items() if row.get("symbol") == symbol}
     prices = {}
     for a in ASSETS:
