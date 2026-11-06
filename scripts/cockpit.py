@@ -6660,6 +6660,8 @@ ADMIN_WALLET_CREDENTIALS_FILE = "./secrets/polymarket_admin_credentials.json"
 ADMIN_WALLET_PRIVATE_KEY_FILE = "./secrets/polymarket_admin_private_key.txt"
 _fleet_cache = [0.0, None]  # (built_monotonic, payload)
 _pnl_cache   = [0.0, None]  # (built_monotonic, payload)
+_pnl_cache_lock = threading.Lock()
+_pnl_refreshing = False
 
 
 def api_live(instance=None):
@@ -8017,6 +8019,25 @@ def api_supervisor_log(limit=20):
 
 
 def api_pnl_by_instance():
+    """Share one expensive session-ledger rebuild across overlapping requests."""
+    global _pnl_refreshing
+    now = time.monotonic()
+    with _pnl_cache_lock:
+        cached = _pnl_cache[1]
+        if cached and now - _pnl_cache[0] < 10.0:
+            return cached
+        if _pnl_refreshing:
+            return cached or {"instances": {}, "rows": [],
+                              "pnl_scope": "realized_session_after_fees"}
+        _pnl_refreshing = True
+    try:
+        return _build_pnl_by_instance()
+    finally:
+        with _pnl_cache_lock:
+            _pnl_refreshing = False
+
+
+def _build_pnl_by_instance():
     now = time.monotonic()
     if _pnl_cache[1] and now - _pnl_cache[0] < 10.0:
         return _pnl_cache[1]
