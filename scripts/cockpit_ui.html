@@ -1010,6 +1010,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
 #tabScalpers .sd-hero p{max-width:720px;margin:0;color:#a1ada6;font-size:10px;line-height:1.7}
 #tabScalpers .sd-controls{display:flex;align-items:center;gap:8px;flex-shrink:0}
 #tabScalpers .sd-updated{color:var(--sd-muted);font:8px var(--mono);white-space:nowrap}
+#tabScalpers .sd-updated.stale{color:#ff8588}
 #tabScalpers .sd-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:11px 0}
 #tabScalpers .sd-kpi{padding:13px 15px;border:1px solid var(--sd-line);background:linear-gradient(145deg,#111916,#0b1011)}
 #tabScalpers .sd-kpi small{display:block;color:#7e8e85;font:7px var(--mono);letter-spacing:1px}
@@ -1617,7 +1618,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
     <div class="sd-hero">
       <div><div class="sd-kicker">BTC / ETH / SOL / XRP · 5M / 15M · WINDOW BOT TELEMETRY</div><h1>Window bots</h1>
         <p>Live per-bot scope, entry gates, feed health, exposure, resting orders, and recent fills. Auto-refresh every 1.5 seconds.</p></div>
-      <div class="sd-controls"><span class="sd-updated" id="scalperDeskUpdated">CONNECTING</span><button class="btn-sm" onclick="loadScalperDesk(true)">↻ REFRESH</button><button class="btn-sm" onclick="document.querySelector('[data-tab=fleet]').click()">BOT CONTROLS</button></div>
+      <div class="sd-controls"><span class="sd-updated" id="scalperDeskUpdated" aria-live="polite">CONNECTING</span><button class="btn-sm" onclick="loadScalperDesk(true)">↻ REFRESH</button><button class="btn-sm" onclick="document.querySelector('[data-tab=fleet]').click()">BOT CONTROLS</button></div>
     </div>
     <div class="sd-kpis" id="scalperDeskKpis"></div>
     <div class="sd-sample" id="windowBotNote"><b>STRATEGY SCOPE</b><span>Every card reports that bot’s configured horizon, assets, entry band, and timing. Scalp entry gates require current source and book data; settlement-only profiles show their own per-horizon entry window and conservative edge threshold.</span></div>
@@ -6816,6 +6817,8 @@ async function loadFleet(){
 
 let _scalperDeskBusy=false;
 let _lastScalperDeskServerTs=0;
+let _lastScalperDeskLabel='CONNECTING';
+let _scalperDeskRequestFailed=false;
 function _sdUsd(v){const n=Number(v)||0;return`${n<0?'−':n>0?'+':''}$${Math.abs(n).toFixed(2)}`;}
 function _sdHorizon(v){return Number(v)===300?'5M':Number(v)===900?'15M':`${Math.round(Number(v)/60)}M`;}
 function _sdAge(ts){if(!ts)return'—';const d=new Date(ts);return Number.isNaN(d.getTime())?'—':d.toISOString().slice(11,19)+'Z';}
@@ -6945,17 +6948,42 @@ async function loadScalperDesk(force=false){
   if(_scalperDeskBusy)return;
   _scalperDeskBusy=true;
   try{
-    const r=await apiFetch('/api/window_bots');
+    const r=await apiFetch('/api/window_bots',{timeoutMs:8000});
+    if(!r){
+      _scalperDeskRequestFailed=true;
+      updateScalperDeskFreshness();
+      return;
+    }
+    _scalperDeskRequestFailed=false;
     if(r){
       const serverTs=Number(r.server_ts)||0;
       if(force||!serverTs||serverTs!==_lastScalperDeskServerTs){
         renderScalperDesk(r);
         if(serverTs)_lastScalperDeskServerTs=serverTs;
         const t=serverTs?new Date(serverTs).toISOString().slice(11,19)+'Z':'—';
-        $('scalperDeskUpdated').textContent=`UPDATED ${t} · AUTO ${Math.round((r.refresh_ms||1500)/1000*10)/10}s`;
+        _lastScalperDeskLabel=`UPDATED ${t} · AUTO ${Math.round((r.refresh_ms||1500)/1000*10)/10}s`;
       }
     }
+    updateScalperDeskFreshness();
   }finally{_scalperDeskBusy=false;}
+}
+
+function updateScalperDeskFreshness(){
+  if(S.curTab!=='scalpers'||document.hidden)return;
+  const label=$('scalperDeskUpdated');
+  if(!label)return;
+  const ageMs=_lastScalperDeskServerTs?Math.max(0,Date.now()-_lastScalperDeskServerTs):null;
+  if(_scalperDeskRequestFailed||(ageMs!=null&&ageMs>=5000)){
+    label.classList.add('stale');
+    if(_scalperDeskRequestFailed){
+      label.textContent=ageMs==null?'NO SERVER RESPONSE · RETRYING':`NO RESPONSE · LAST ${Math.floor(ageMs/1000)}s · RETRYING`;
+    }else if(ageMs!=null){
+      label.textContent=`STALE ${Math.floor(ageMs/1000)}s · RETRYING`;
+    }
+    return;
+  }
+  label.classList.remove('stale');
+  label.textContent=_lastScalperDeskLabel;
 }
 
 function cfgSelChange(inst){
@@ -10538,6 +10566,7 @@ setInterval(()=>{if(!document.hidden)updateSpeedPanel();},1000);
 setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='overview')loadOverviewSlow();},30000);
 setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='fleet')loadFleet();},3000);
 setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='scalpers')loadScalperDesk();},1500);
+setInterval(updateScalperDeskFreshness,1000);
 setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='markets')loadCandles();},20000);
 setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='execution')loadExecution();},1000);
 
