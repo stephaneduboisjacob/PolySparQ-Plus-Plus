@@ -2853,7 +2853,10 @@ function renderPredictionReferenceChart(){
   for(const source of PREDICTION_REFERENCE_SOURCES){
     const points=rawBySource[source.key];let sourceLow=Infinity,sourceHigh=-Infinity,count=0;
     for(const point of points){
-      point.move_pct=anchorPrice?(point.value/anchorPrice-1)*100:null;
+      if(point._predictionReferenceAnchorPrice!==anchorPrice||point._predictionReferenceMoveSourceValue!==point.value){
+        point.move_pct=anchorPrice?(point.value/anchorPrice-1)*100:null;
+        point._predictionReferenceAnchorPrice=anchorPrice;point._predictionReferenceMoveSourceValue=point.value;
+      }
       if(!Number.isFinite(point.move_pct))continue;
       if(!hasMoves){low=high=point.move_pct;hasMoves=true;}
       else{low=Math.min(low,point.move_pct);high=Math.max(high,point.move_pct);}
