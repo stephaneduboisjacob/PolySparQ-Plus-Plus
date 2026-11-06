@@ -4029,7 +4029,7 @@ function renderPositionTriage(d){
 }
 
 function updateStrategyFeedFreshness(now=Date.now()){
-  const chip=$('strategyFeedFreshness');if(!chip)return;
+  const chip=$('strategyFeedFreshness');if(!chip||S.curTab!=='strategy'||document.hidden)return;
   const timestamp=Number(S.lastServerTs),age=timestamp>0?Math.max(0,now-timestamp):null;
   const state=age===null?'unknown':age<2500?'fresh':age<7000?'delayed':'stale';
   chip.dataset.state=state;
