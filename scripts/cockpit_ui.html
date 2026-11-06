@@ -4608,6 +4608,7 @@ async function loadPnlByInstance(){
 let _posSig='';
 function renderPositions(d){
   const positions=(d.positions||{}).positions||[];
+  syncPositionTimers(positions);
   $('posHeader').textContent=`${positions.length} Open Position${positions.length!==1?'s':''}`;
   const sig=positions.map(p=>`${p.instance||''}:${p.cid}:${p.side||''}`).join('|');
   if(!positions.length){$('posGrid').innerHTML='<div class="empty-state"><div class="empty-icon">📭</div><div>No open positions</div></div>';_posSig='';}
@@ -5070,6 +5071,8 @@ function _renderSettlementDetail(data){
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('shDetailOverlay')?.classList.contains('open'))closeSettlementDetail();});
 
+function positionTimerKey(p){return`${p.instance||''}|${p.cid||''}|${p.side||'UP'}`;}
+function positionTimerDomId(p){return`timer-${encodeURIComponent(positionTimerKey(p))}`;}
 function renderPosCard(p){
   const side=(p.side||'UP').toLowerCase(),avg=p.avg||0,bid=p.mark,target=p.target_price;
   const secsLeft=p.seconds_left,pnl=p.pnl_usd,pnlPct=p.pnl_pct;
@@ -5079,7 +5082,7 @@ function renderPosCard(p){
   const rc=secsLeft==null?'ok':secsLeft>totalH*.3?'ok':secsLeft>60?'warn':'crit';
   const R=14,circ=2*Math.PI*R,dash=circ*pct/100;
   const markClass=bid==null?'':bid>avg?'mark-up':'mark-dn';
-  const cid=p.cid||'',s=p.side||'UP';
+  const cid=p.cid||'',s=p.side||'UP',timerKey=positionTimerKey(p),timerId=positionTimerDomId(p);
   const sideUp=side==='up';
   const px=p.asset&&S.prices[p.asset];
   const oraclePx=px?px.oracle:null;
@@ -5114,7 +5117,7 @@ function renderPosCard(p){
           <circle class="ring-bg" cx="16" cy="16" r="${R}" fill="none" stroke-width="3"/>
           <circle class="ring-fg ${rc}" cx="16" cy="16" r="${R}" fill="none" stroke-width="3" stroke-dasharray="${circ}" stroke-dashoffset="${circ-dash}"/>
         </svg>
-        <div class="timer-txt" id="timer-${esc(cid)}">${fmtSecs(secsLeft)}</div>
+        <div class="timer-txt" id="${esc(timerId)}" data-position-timer="${esc(timerKey)}">${fmtSecs(secsLeft)}</div>
       </div>
     </div>
     <div class="pos-actions">
@@ -5124,21 +5127,30 @@ function renderPosCard(p){
   </div>`;
 }
 
-const _timers={};
+const _timers=new Map();
+function stopPositionTimer(key){
+  const timer=_timers.get(key);if(timer==null)return;
+  clearInterval(timer);_timers.delete(key);
+}
+function syncPositionTimers(positions){
+  const active=new Set(positions.filter(p=>Number(p.seconds_left)>0).map(positionTimerKey));
+  for(const[key,timer]of _timers){if(!active.has(key)){clearInterval(timer);_timers.delete(key);}}
+}
 function startTimer(p){
-  const cid=p.cid||'';
-  if(_timers[cid])clearInterval(_timers[cid]);
+  const key=positionTimerKey(p),deadline=Date.now()+Math.max(0,Number(p.seconds_left)||0)*1000;
+  stopPositionTimer(key);
   if(p.seconds_left==null||p.seconds_left<=0)return;
-  let rem=p.seconds_left;const totalH=p.horizon_seconds||300,R=14,circ=2*Math.PI*R;
-  _timers[cid]=setInterval(()=>{
-    rem--;
-    const el=$(`timer-${cid}`);
-    if(!el){clearInterval(_timers[cid]);return;}
+  const totalH=p.horizon_seconds||300,R=14,circ=2*Math.PI*R;
+  const timer=setInterval(()=>{
+    const rem=Math.max(0,Math.ceil((deadline-Date.now())/1000));
+    const el=$(positionTimerDomId(p));
+    if(!el){stopPositionTimer(key);return;}
     el.textContent=fmtSecs(rem);
     const pct=Math.max(0,rem/totalH*100),ring=el.closest('.timer-ring');
     if(ring){const fg=ring.querySelector('.ring-fg');if(fg){fg.style.strokeDashoffset=circ-(circ*pct/100);fg.className=`ring-fg ${rem>totalH*.3?'ok':rem>60?'warn':'crit'}`;}}
-    if(rem<=0)clearInterval(_timers[cid]);
+    if(rem<=0)stopPositionTimer(key);
   },1000);
+  _timers.set(key,timer);
 }
 
 // ── Position live chart modal ─────────────────────────────────────────────
