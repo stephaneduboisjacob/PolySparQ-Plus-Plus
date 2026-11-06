@@ -2329,21 +2329,44 @@ function connectPredictionReferencePolySocket(data){
   const previous=S.predictionReferencePolySocket;if(previous&&!previous.closed&&previous.key===key)return;
   stopPredictionReferencePolySocket('market changed');
   if(S.curTab!=='manualpred'||document.hidden){predictionReferencePolyStatus();return;}
-  const state=S.predictionReferencePolySocket={key,asset:S.predictionReferenceAsset,windowKey:S.predictionReferenceWindow?.key,tokens:{[up]:'up',[down]:'down'},books:{[up]:{bids:new Map(),asks:new Map()},[down]:{bids:new Map(),asks:new Map()}},closed:false,status:'connecting',socket:null,attempts:0,heartbeat:null,statusTimer:null,retryTimer:null,lastQuoteAt:0,lastSourceTimestamp:null};
+  const state=S.predictionReferencePolySocket={key,asset:S.predictionReferenceAsset,windowKey:S.predictionReferenceWindow?.key,tokens:{[up]:'up',[down]:'down'},books:{[up]:{bids:new Map(),asks:new Map(),bestBid:null,bestAsk:null},[down]:{bids:new Map(),asks:new Map(),bestBid:null,bestAsk:null}},closed:false,status:'connecting',socket:null,attempts:0,heartbeat:null,statusTimer:null,retryTimer:null,lastQuoteAt:0,lastSourceTimestamp:null};
   const updateStatus=()=>{if(S.predictionReferencePolySocket===state)predictionReferencePolyStatus();};
-  const bestFromBook=book=>{
-    const bids=[...book.bids.keys()].map(Number).filter(Number.isFinite),asks=[...book.asks.keys()].map(Number).filter(Number.isFinite);
-    return{bid:bids.length?Math.max(...bids):null,ask:asks.length?Math.min(...asks):null};
+  const bestPrice=(levels,highest)=>{
+    let best=null;
+    for(const rawPrice of levels.keys()){
+      const price=Number(rawPrice);if(!Number.isFinite(price))continue;
+      if(best===null||(highest?price>best:price<best))best=price;
+    }
+    return best;
   };
   const refreshBook=(token,timestamp,bestBid=null,bestAsk=null)=>{
     const book=state.books[token];if(!book)return;
     let bid=Number(bestBid),ask=Number(bestAsk),hasBid=bestBid!=null&&Number.isFinite(bid)&&bid>=0,hasAsk=bestAsk!=null&&Number.isFinite(ask)&&ask>=0;
-    if(!hasBid||!hasAsk){const best=bestFromBook(book);if(!hasBid)bid=best.bid;if(!hasAsk)ask=best.ask;}
+    if(hasBid)book.bestBid=bid;else bid=book.bestBid;
+    if(hasAsk)book.bestAsk=ask;else ask=book.bestAsk;
     if(Number.isFinite(bid)&&Number.isFinite(ask)&&ask>=bid&&(bid>0||ask>0))recordPredictionReferencePolyTick(state.tokens[token],(bid+ask)/2,timestamp);
   };
-  const applyLevels=(book,levels,map)=>{
+  const applyLevels=(book,levels,side)=>{
     if(!Array.isArray(levels))return;
-    map.clear();for(const level of levels){const price=Number(level?.price??level?.[0]),size=Number(level?.size??level?.[1]);if(Number.isFinite(price)&&Number.isFinite(size)&&size>0)map.set(String(price),size);}
+    const map=book[side];map.clear();let best=null;
+    for(const level of levels){
+      const price=Number(level?.price??level?.[0]),size=Number(level?.size??level?.[1]);
+      if(!Number.isFinite(price)||!Number.isFinite(size)||size<=0)continue;
+      map.set(String(price),size);
+      if(best===null||(side==='bids'?price>best:price<best))best=price;
+    }
+    book[side==='bids'?'bestBid':'bestAsk']=best;
+  };
+  const applyLevelChange=(book,side,rawPrice,rawSize)=>{
+    const price=Number(rawPrice),size=Number(rawSize);if(!Number.isFinite(price)||!Number.isFinite(size))return;
+    const map=book[side],bestKey=side==='bids'?'bestBid':'bestAsk',best=book[bestKey];
+    if(size<=0){
+      map.delete(String(price));
+      if(price===best)book[bestKey]=bestPrice(map,side==='bids');
+    }else{
+      map.set(String(price),size);
+      if(best===null||(side==='bids'?price>best:price<best))book[bestKey]=price;
+    }
   };
   const handleMessage=message=>{
     if(!message||typeof message!=='object')return;
@@ -2353,7 +2376,7 @@ function connectPredictionReferencePolySocket(data){
     const tokenOf=item=>String(item?.asset_id??item?.assetId??payload.asset_id??payload.assetId??message.asset_id??message.assetId??'');
     if(type==='book'||Array.isArray(payload.bids)||Array.isArray(payload.asks)){
       const token=tokenOf(payload),book=state.books[token];if(!book)return;
-      applyLevels(book,payload.bids,book.bids);applyLevels(book,payload.asks,book.asks);refreshBook(token,timestamp);
+      applyLevels(book,payload.bids,'bids');applyLevels(book,payload.asks,'asks');refreshBook(token,timestamp);
       return;
     }
     if(type==='best_bid_ask'||payload.best_bid!=null||payload.bestBid!=null){
@@ -2363,8 +2386,8 @@ function connectPredictionReferencePolySocket(data){
     if(type==='price_change'||Array.isArray(payload.price_changes)||Array.isArray(payload.priceChanges)){
       for(const change of payload.price_changes||payload.priceChanges||[]){
         const token=tokenOf(change),book=state.books[token];if(!book)continue;
-        const side=String(change.side||'').toUpperCase()==='BUY'?'bids':'asks',price=Number(change.price),size=Number(change.size);
-        if(Number.isFinite(price)&&Number.isFinite(size)){if(size<=0)book[side].delete(String(price));else book[side].set(String(price),size);}
+        const side=String(change.side||'').toUpperCase()==='BUY'?'bids':'asks';
+        applyLevelChange(book,side,change.price,change.size);
         refreshBook(token,change.timestamp??timestamp,change.best_bid??change.bestBid,change.best_ask??change.bestAsk);
       }
     }
