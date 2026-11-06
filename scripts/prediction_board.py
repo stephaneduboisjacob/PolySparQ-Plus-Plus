@@ -29,6 +29,8 @@ SHADOW_CALIBRATION_VERSION = 'multisource-v4'
 SERVER_REFRESH_SECONDS = 1.0
 SNAPSHOT_STALE_SECONDS = 3.0
 MIN_REFRESH_GAP_SECONDS = 0.05
+_BOARD_IO_EXECUTOR = ThreadPoolExecutor(
+    max_workers=12, thread_name_prefix='prediction-board-io')
 
 # Fixed, CLOB-free 5-minute correction (v2): a 17-feature logistic refit of the
 # settlement kernel on resolved checkpoints. The v1 correction re-scaled the
@@ -1393,17 +1395,16 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         rows = cached('market:'+slug,30,lambda:public_json(
             'https://gamma-api.polymarket.com/markets?'+urlencode({'slug':slug}),timeout=2.0))
         return rows[0] if rows else {'slug':slug}
-    with ThreadPoolExecutor(max_workers=12) as pool:
-        jobs = [(pool.submit(market,*key),'market',key) for key in windows]
-        jobs += [(pool.submit(cached,'candles:'+a,20,
-                    lambda a=a:recent_candles(query,public_json,a,now)),'candles',a) for a in ASSETS]
-        jobs += [(pool.submit(_asset_tape,query,a),'tape',a) for a in ASSETS]
-        for future,kind,key in jobs:
-            try:
-                value=future.result()
-                (markets if kind=='market' else candles if kind=='candles' else tape)[key]=value
-            except Exception:
-                errors.append(f'{kind} unavailable: {key}')
+    jobs = [(_BOARD_IO_EXECUTOR.submit(market,*key),'market',key) for key in windows]
+    jobs += [(_BOARD_IO_EXECUTOR.submit(cached,'candles:'+a,20,
+                lambda a=a:recent_candles(query,public_json,a,now)),'candles',a) for a in ASSETS]
+    jobs += [(_BOARD_IO_EXECUTOR.submit(_asset_tape,query,a),'tape',a) for a in ASSETS]
+    for future,kind,key in jobs:
+        try:
+            value=future.result()
+            (markets if kind=='market' else candles if kind=='candles' else tape)[key]=value
+        except Exception:
+            errors.append(f'{kind} unavailable: {key}')
     # One batched CLOB read covers both sides of every current and next market.
     tokens=list({str(t) for m in markets.values() for t in array(m.get('clobTokenIds'))})
     books={};books_received_at_s=now_s
