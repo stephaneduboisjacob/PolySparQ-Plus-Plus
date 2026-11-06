@@ -3244,13 +3244,15 @@ def api_prediction_reference(asset, horizon_seconds, window_open_ms,
         ("okx", "spot_exchange_ticks", "asset", asset, "venue", "okx"),
     )
     series, latest, errors = {}, {}, {}
-    for name, table, key_column, key_value, extra_column, extra_value in source_queries:
+    def fetch_source(source):
+        name, table, key_column, key_value, extra_column, extra_value = source
         # Table and key-column names come only from the constant tuple above.
         where = f"{key_column}=%s"
         params = [key_value]
         if extra_column:
             where += f" AND {extra_column}=%s"
             params.append(extra_value)
+        source_series, latest_tick, source_error = [], None, None
         try:
             rows = q(f"""WITH ranked AS (
                     SELECT ts,price,row_number() OVER (ORDER BY ts) AS rn,
@@ -3267,11 +3269,10 @@ def api_prediction_reference(asset, horizon_seconds, window_open_ms,
                 ORDER BY ts LIMIT %s""",
                 (*params, window_open_ms, tick_end_ms,
                  point_limit, point_limit, point_limit)) if tick_end_ms >= window_open_ms else []
-            series[name] = [{"ts_ms": int(row["ts_ms"]), "price": float(row["price"])}
-                            for row in rows if row.get("ts_ms") is not None and row.get("price") is not None]
+            source_series = [{"ts_ms": int(row["ts_ms"]), "price": float(row["price"])}
+                             for row in rows if row.get("ts_ms") is not None and row.get("price") is not None]
         except Exception as exc:
-            series[name] = []
-            errors[name] = str(exc)[:180]
+            source_error = str(exc)[:180]
         try:
             received_fields = (", (extract(epoch FROM received_at)*1000)::bigint AS received_ts_ms,"
                                " bid_price, ask_price, pair") if table == "spot_exchange_ticks" else ""
@@ -3288,12 +3289,22 @@ def api_prediction_reference(asset, horizon_seconds, window_open_ms,
                     for field in ("bid_price", "ask_price", "pair"):
                         if row.get(field) is not None:
                             latest_tick[field] = row[field]
-                latest[name] = latest_tick
-            else:
-                latest[name] = None
         except Exception as exc:
-            latest[name] = None
-            errors.setdefault(name, str(exc)[:180])
+            latest_tick = None
+            if source_error is None:
+                source_error = str(exc)[:180]
+        return name, source_series, latest_tick, source_error
+
+    from concurrent.futures import ThreadPoolExecutor
+    # Initialize the shared pool before the worker threads borrow connections.
+    get_pool()
+    with ThreadPoolExecutor(max_workers=min(6, len(source_queries)),
+                            thread_name_prefix="prediction-reference") as workers:
+        for name, source_series, latest_tick, source_error in workers.map(fetch_source, source_queries):
+            series[name] = source_series
+            latest[name] = latest_tick
+            if source_error:
+                errors[name] = source_error
 
     window = q("""SELECT (extract(epoch FROM window_open)*1000)::bigint AS window_open_ms,
                        (extract(epoch FROM window_close)*1000)::bigint AS window_close_ms,
