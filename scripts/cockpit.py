@@ -1038,6 +1038,42 @@ def _systemd_bot_status_many(instances):
     return status_by_instance
 
 
+_systemd_instance_status_cache = [0.0, (), {}]  # sampled, covered instances, statuses
+_systemd_instance_status_lock = threading.Lock()
+_systemd_instance_status_refreshing = False
+
+
+def _cached_systemd_bot_status_many(extra_instances=()):
+    """Share the batched systemd snapshot across session and fleet readers."""
+    global _systemd_instance_status_refreshing
+    requested = tuple(sorted({
+        str(instance) for instance in extra_instances
+        if re.fullmatch(r"[\w-]+", str(instance or ""))
+    }))
+    now = time.monotonic()
+    with _systemd_instance_status_lock:
+        sampled, covered, statuses = _systemd_instance_status_cache
+        if set(requested) <= set(covered) and now - sampled < 2.0:
+            return statuses
+        if _systemd_instance_status_refreshing:
+            return statuses if set(requested) <= set(covered) else {}
+        _systemd_instance_status_refreshing = True
+
+    try:
+        result = _systemd_bot_status_many(requested)
+    except Exception:
+        result = {}
+    with _systemd_instance_status_lock:
+        _systemd_instance_status_refreshing = False
+        if result:
+            _systemd_instance_status_cache[:] = [time.monotonic(), requested, result]
+            return result
+        sampled, covered, statuses = _systemd_instance_status_cache
+        if set(requested) <= set(covered) and time.monotonic() - sampled < 15.0:
+            return statuses
+        return {}
+
+
 def _pidfile_bot_status():
     try:
         with open(PID_FILE) as f:
@@ -1067,8 +1103,7 @@ _bot_status_refreshing = False
 
 
 def bot_status_detail():
-    # 5s TTL: this fans out to several systemctl subprocesses and is hit by
-    # status/health/orderstats on every dashboard poll.
+    # 5s TTL: status/health/orderstats share the same fleet-wide probe.
     global _bot_status_refreshing
     now = time.monotonic()
     with _bot_status_cache_lock:
@@ -1098,7 +1133,7 @@ def _bot_status_detail_uncached():
         if s and s.get("running"):
             return s
     # Tournament mode: discover any running polypulse-bot@*.service dynamically.
-    up = []
+    active_instances = []
     try:
         r = subprocess.run(
             ["systemctl", "--user", "list-units", "polypulse-bot@*.service",
@@ -1106,14 +1141,19 @@ def _bot_status_detail_uncached():
             capture_output=True, text=True, timeout=3.0, env=_SYSTEMD_ENV)
         for line in r.stdout.splitlines():
             unit = line.strip().split()[0] if line.strip() else ""
-            if "@" in unit and unit.endswith(".service"):
-                inst = unit.split("@")[1].replace(".service", "")
-                s = _systemd_bot_status(f"polypulse-bot@{inst}.service")
-                if s and s.get("running"):
-                    s["instance"] = inst
-                    up.append(s)
+            match = re.fullmatch(r"polypulse-bot@([\w-]+)\.service", unit)
+            if match:
+                active_instances.append(match.group(1))
     except Exception:
         pass
+    statuses = _cached_systemd_bot_status_many(active_instances)
+    up = []
+    for inst in active_instances:
+        status = statuses.get(inst)
+        if status and status.get("running"):
+            item = dict(status)
+            item["instance"] = inst
+            up.append(item)
     if up:
         lead = dict(up[0])
         lead["launcher"] = f"tournament x{len(up)}"
@@ -6692,19 +6732,16 @@ def instance_session_start(inst):
     """When this instance's current session began. systemd's start stamp is
     authoritative (paper sessions are per-process); the old log scan broke
     silently once the boot line scrolled past the tail window."""
-    try:
-        out = subprocess.run(
-            ["systemctl", "--user", "show", f"polypulse-bot@{inst}.service",
-             "--property=ActiveEnterTimestamp", "--value"],
-            capture_output=True, text=True, timeout=5, env=_SYSTEMD_ENV).stdout.strip()
-        # "Thu 2026-06-11 00:02:12 EDT" -> "2026-06-11 00:02:12 EDT"
-        # Preserve timezone so PostgreSQL ::timestamptz cast is correct.
-        # Stripping it caused a 4-hour offset (EDT interpreted as UTC).
-        m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+([A-Z]{2,4})", out)
-        if m:
-            return f"{m.group(1)} {m.group(2)}"
-    except Exception:
-        pass
+    status = _cached_systemd_bot_status_many((inst,)).get(inst)
+    if status and status.get("session_start"):
+        return status["session_start"]
+    if status is None:
+        try:
+            status = _systemd_bot_status(f"polypulse-bot@{inst}.service")
+            if status and status.get("session_start"):
+                return status["session_start"]
+        except Exception:
+            pass
     try:  # fallback: the instance's own boot line, if still in the tail window
         lines = tail(instance_log(inst), 6000)
     except OSError:
@@ -6716,23 +6753,29 @@ def instance_session_start(inst):
 
 
 def instance_running(inst):
-    """Authoritative check via systemd is-active (fast, works regardless of
-    which log file the bot writes). Falls back to the instance log mtime."""
+    """Use cached batched systemd state; fall back to the instance log mtime."""
     cache = _instance_running_cache
     now = time.monotonic()
     hit = cache.get(inst)
     if hit and hit[0] > now:
         return hit[1]
-    running = False
-    authoritative = False
-    try:
-        out = subprocess.run(
-            ["systemctl", "--user", "is-active", f"polypulse-bot@{inst}.service"],
-            capture_output=True, text=True, timeout=3, env=_SYSTEMD_ENV).stdout.strip()
-        running = (out == "active")
-        authoritative = out in ("active", "inactive", "failed", "activating", "deactivating", "unknown")
-    except Exception:
-        pass
+    status = _cached_systemd_bot_status_many((inst,)).get(inst)
+    if status is not None:
+        running = bool(status.get("running"))
+        authoritative = True
+    else:
+        running = False
+        authoritative = False
+        try:
+            out = subprocess.run(
+                ["systemctl", "--user", "is-active", f"polypulse-bot@{inst}.service"],
+                capture_output=True, text=True, timeout=3, env=_SYSTEMD_ENV).stdout.strip()
+            running = out == "active"
+            authoritative = out in (
+                "active", "inactive", "failed", "activating", "deactivating", "unknown"
+            )
+        except Exception:
+            pass
     if not authoritative:
         try:
             running = time.time() - os.stat(instance_log(inst)).st_mtime < 60
@@ -6763,10 +6806,26 @@ def paper_since(instance=None, mode=None):
     val = None
     if mode == "paper":
         if instance:
-            val = instance_session_start(instance)
+            runtime = _cached_systemd_bot_status_many(fleet_instances())
+            status = runtime.get(instance)
+            val = status.get("session_start") if status else None
+            if val is None:
+                val = instance_session_start(instance)
         else:
-            starts = [instance_session_start(i) for i in fleet_instances()
-                      if instance_running(i)]
+            instances = fleet_instances()
+            runtime = _cached_systemd_bot_status_many(instances)
+            starts = []
+            for inst in instances:
+                detail = runtime.get(inst)
+                if detail is not None:
+                    if detail.get("running"):
+                        start = detail.get("session_start") or instance_session_start(inst)
+                        if start:
+                            starts.append(start)
+                elif instance_running(inst):
+                    start = instance_session_start(inst)
+                    if start:
+                        starts.append(start)
             starts.append(session_start_for_mode())
             starts = [s for s in starts if s]
             val = min(starts) if starts else None
@@ -8651,6 +8710,52 @@ def _supervisor_running(inst):
         return False
 
 
+def _supervisor_running_many(instances):
+    """Read supervisor services together, then check manual launches once."""
+    names = tuple(sorted({str(inst) for inst in instances
+                          if re.fullmatch(r"[\w-]+", str(inst or ""))}))
+    running = {inst: False for inst in names}
+    if not names:
+        return running
+    units = [f"polypulse-supervisor@{inst}.service" for inst in names]
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show", *units,
+             "--property=Id", "--property=ActiveState", "--no-pager"],
+            capture_output=True, text=True, timeout=5, env=_SYSTEMD_ENV,
+        )
+        if result.returncode == 0:
+            properties = {}
+            for line in result.stdout.splitlines() + [""]:
+                if not line.strip():
+                    unit = properties.get("Id", "")
+                    match = re.fullmatch(r"polypulse-supervisor@([\w-]+)\.service", unit)
+                    if match:
+                        running[match.group(1)] = properties.get("ActiveState") == "active"
+                    properties = {}
+                elif "=" in line:
+                    key, value = line.split("=", 1)
+                    properties[key] = value
+    except Exception:
+        pass
+
+    fallback = {inst for inst, active in running.items() if not active}
+    if fallback:
+        try:
+            result = subprocess.run(
+                ["pgrep", "-af", "supervisor_brain.py"],
+                capture_output=True, text=True, timeout=5,
+            )
+            pattern = re.compile(r"(?:^|\s)--instance(?:=|\s+)([\w-]+)(?:\s|$)")
+            for line in result.stdout.splitlines():
+                match = pattern.search(line)
+                if match and match.group(1) in fallback:
+                    running[match.group(1)] = True
+        except Exception:
+            pass
+    return running
+
+
 def _models_env():
     out = {}
     try:
@@ -8796,6 +8901,7 @@ def _build_fleet_detail():
         for row in _fleet_runtime_snapshot().get("fleet", [])
         if isinstance(row, dict) and isinstance(row.get("instance"), str)
     }
+    supervisor_by_instance = _supervisor_running_many(all_insts)
     strategy_rows = q("""SELECT instance,strategy_id,llm_model,
                                 CASE WHEN seq=1 THEN reason ELSE LEFT(reason,60) END AS reason,
                                 created_at,strategies_total,seq
@@ -8862,7 +8968,7 @@ def _build_fleet_detail():
         config_path = _instance_config_file(inst)
         if not os.path.isfile(config_path):
             continue
-        sup_run = _supervisor_running(inst)
+        sup_run = supervisor_by_instance.get(inst, False)
         strategy = strategy_by_instance.get(inst, {"total": 0, "last": None, "recent": []})
         last = strategy["last"]
         out.append({
@@ -11029,7 +11135,7 @@ def _fleet_runtime_snapshot():
     """Fresh, PID-matched runtime state shared by the root fleet and API views."""
     fleet = []
     instances = fleet_instances()
-    systemd_by_instance = _systemd_bot_status_many(instances)
+    systemd_by_instance = _cached_systemd_bot_status_many(instances)
     for inst in instances:
         service = (systemd_by_instance.get(inst)
                    or _systemd_bot_status(f"polypulse-bot@{inst}.service") or {})
