@@ -2657,10 +2657,15 @@ function capturePredictionReferenceSample(prices=S.prices,receivedAt=Date.now())
     const sourceTime=Number(quote[`${source.key}_ts_ms`]),sampleTime=Number.isFinite(sourceTime)&&sourceTime>0?sourceTime:receivedAt;
     if(window&&(sampleTime<Number(window.window_open)||sampleTime>Number(window.window_close)))continue;
     const points=series[source.key]||(series[source.key]=[]);
-    if(points.some(point=>point.t===sampleTime))continue;
-    points.push({t:sampleTime,value,age_s:Number.isFinite(age)?age:null});
-    points.sort((a,b)=>a.t-b.t);
-    while(points.length>1200)points.shift();
+    const last=points.at(-1),point={t:sampleTime,value,age_s:Number.isFinite(age)?age:null};
+    if(last?.t===sampleTime)continue;
+    if(!last||sampleTime>last.t)points.push(point);
+    else{
+      const [from,to]=predictionReferenceRangeBounds(points,sampleTime,sampleTime);
+      if(from<to)continue;
+      points.splice(from,0,point);
+    }
+    if(points.length>1200+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-1200);
   }
 }
 function predictionReferenceSelectedWindow(board=S.predictionBoard){
