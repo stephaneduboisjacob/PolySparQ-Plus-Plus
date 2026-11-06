@@ -17,6 +17,8 @@ from urllib.parse import urlencode
 
 _cache = {}
 _cache_lock = threading.Lock()
+_CACHE_MAX_ENTRIES = 256
+_CACHE_MAX_AGE_SECONDS = 900.0
 _quality_cache = {}
 _quality_cache_lock = threading.Lock()
 _calibration_cache = {}
@@ -310,11 +312,19 @@ def cached(key, seconds, fetch):
             return old[1]
         raise
     with _cache_lock:
-        _cache[key] = (time.monotonic(), value)
-        if len(_cache) > 256:
-            for k in list(_cache):
-                if time.monotonic() - _cache[k][0] > 900:
-                    del _cache[k]
+        cached_at = time.monotonic()
+        _cache[key] = (cached_at, value)
+        if len(_cache) > _CACHE_MAX_ENTRIES:
+            expired_before = cached_at - _CACHE_MAX_AGE_SECONDS
+            for old_key, (old_at, _old_value) in list(_cache.items()):
+                if old_key != key and old_at < expired_before:
+                    _cache.pop(old_key, None)
+            while len(_cache) > _CACHE_MAX_ENTRIES:
+                oldest = min(_cache, key=lambda old_key: _cache[old_key][0])
+                if oldest == key and len(_cache) > 1:
+                    oldest = min((old_key for old_key in _cache if old_key != key),
+                                 key=lambda old_key: _cache[old_key][0])
+                _cache.pop(oldest, None)
     return value
 
 
