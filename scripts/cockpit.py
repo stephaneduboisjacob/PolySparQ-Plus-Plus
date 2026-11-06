@@ -8876,6 +8876,8 @@ _WINDOW_LOG_MARKETS_RE = re.compile(r"gamma discovered (\d+) up-down markets")
 _WINDOW_LOG_WS_STATE_RE = re.compile(r"pm-md ws state: (connected|disconnected)")
 _WINDOW_LOG_TAIL_CACHE = {}
 _WINDOW_LOG_TAIL_CACHE_LOCK = threading.Lock()
+_WINDOW_LOG_DIAGNOSTICS_CACHE = {}
+_WINDOW_LOG_DIAGNOSTICS_CACHE_LOCK = threading.Lock()
 
 
 def _decode_window_log_line(raw):
@@ -9098,6 +9100,42 @@ def _window_bot_log_diagnostics(log_lines, hot, horizons):
     }
 
 
+def _window_bot_log_version(path):
+    """Cheap identity for a log tail; changes when a file is appended or rotated."""
+    try:
+        stat = os.stat(path)
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+    except OSError:
+        return None
+
+
+def _window_bot_log_diagnostics_cached(path, version, log_lines, hot, horizons):
+    """Reuse parsed status while the source log and relevant config are unchanged."""
+    key = os.path.abspath(path)
+    config_key = (
+        bool(hot.get("lead_lag_scalp_enabled")),
+        hot.get("lead_lag_scalp_horizon_s"),
+        tuple(str(value) for value in (horizons or [])),
+    )
+    with _WINDOW_LOG_DIAGNOSTICS_CACHE_LOCK:
+        cached = _WINDOW_LOG_DIAGNOSTICS_CACHE.get(key)
+        # Diagnostics include log ages and pause countdowns, so refresh their
+        # derived values every 2s even when the underlying tail is unchanged.
+        if (cached and cached[0] == version and cached[1] == config_key
+                and cached[3] > time.monotonic()):
+            return cached[2]
+
+    result = _window_bot_log_diagnostics(log_lines, hot, horizons)
+    with _WINDOW_LOG_DIAGNOSTICS_CACHE_LOCK:
+        if (len(_WINDOW_LOG_DIAGNOSTICS_CACHE) >= 256
+                and key not in _WINDOW_LOG_DIAGNOSTICS_CACHE):
+            _WINDOW_LOG_DIAGNOSTICS_CACHE.clear()
+        _WINDOW_LOG_DIAGNOSTICS_CACHE[key] = (
+            version, config_key, result, time.monotonic() + 2.0
+        )
+    return result
+
+
 def _build_window_bot_desk(scope, cache_key):
     """Live operational view for the window-bot profiles and PAPER challengers."""
     now = time.monotonic()
@@ -9181,8 +9219,12 @@ def _build_window_bot_desk(scope, cache_key):
                 order.pop("exchange_order_id", None)
         # Keep enough history to retain a loss-pause event for the duration of
         # the configured cooldown, even while per-market scan logs are busy.
-        log_lines = _window_bot_log_tail(instance_log(inst), 6000)
-        log_diagnostics = _window_bot_log_diagnostics(log_lines, hot, horizons)
+        log_path = instance_log(inst)
+        log_version = _window_bot_log_version(log_path)
+        log_lines = _window_bot_log_tail(log_path, 6000)
+        log_diagnostics = _window_bot_log_diagnostics_cached(
+            log_path, log_version, log_lines, hot, horizons
+        )
         entry_pause = log_diagnostics["entry_pause"]
         engine_state = log_diagnostics["engine_state"]
         engine_match = log_diagnostics["engine_match"]
