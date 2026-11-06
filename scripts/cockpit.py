@@ -954,6 +954,22 @@ def parse_systemd_wall_ts(value):
     return f"{m.group(1)}{offsets.get(m.group(2), '')}"
 
 
+def _systemd_status_from_properties(data, service):
+    pid = int(data.get("MainPID") or 0)
+    active = data.get("ActiveState") or "unknown"
+    sub = data.get("SubState") or "unknown"
+    return {
+        "running": active == "active" and pid > 0,
+        "pid": pid or None,
+        "launcher": "systemd",
+        "service": service,
+        "active_state": active,
+        "sub_state": sub,
+        "exit_status": int(data.get("ExecMainStatus") or 0),
+        "session_start": parse_systemd_wall_ts(data.get("ActiveEnterTimestamp")),
+    }
+
+
 def _systemd_bot_status(service=None):
     try:
         r = subprocess.run(
@@ -971,19 +987,53 @@ def _systemd_bot_status(service=None):
         if "=" in line:
             k, v = line.split("=", 1)
             data[k] = v
-    pid = int(data.get("MainPID") or 0)
-    active = data.get("ActiveState") or "unknown"
-    sub = data.get("SubState") or "unknown"
-    return {
-        "running": active == "active" and pid > 0,
-        "pid": pid or None,
-        "launcher": "systemd",
-        "service": service or BOT_SERVICE,
-        "active_state": active,
-        "sub_state": sub,
-        "exit_status": int(data.get("ExecMainStatus") or 0),
-        "session_start": parse_systemd_wall_ts(data.get("ActiveEnterTimestamp")),
+    return _systemd_status_from_properties(data, service or BOT_SERVICE)
+
+
+def _systemd_bot_status_many(instances):
+    """Read all configured bot unit states in one systemd round trip."""
+    instance_units = {
+        str(instance): f"polypulse-bot@{instance}.service"
+        for instance in instances
+        if re.fullmatch(r"[\w-]+", str(instance or ""))
     }
+    if not instance_units:
+        return {}
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show", *instance_units.values(),
+             "--property=Id", "--property=ActiveState", "--property=SubState",
+             "--property=MainPID", "--property=ExecMainStatus",
+             "--property=ActiveEnterTimestamp"],
+            capture_output=True, text=True, timeout=3.0, env=_SYSTEMD_ENV,
+        )
+    except Exception:
+        return {}
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+
+    properties_by_unit = {}
+    properties = {}
+    for line in result.stdout.splitlines() + [""]:
+        if not line.strip():
+            unit = properties.get("Id")
+            if unit:
+                properties_by_unit[unit] = properties
+            properties = {}
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+            if key == "Id" and properties.get("Id"):
+                properties_by_unit[properties["Id"]] = properties
+                properties = {}
+            properties[key] = value
+
+    status_by_instance = {}
+    for instance, unit in instance_units.items():
+        data = properties_by_unit.get(unit)
+        if data is not None:
+            status_by_instance[instance] = _systemd_status_from_properties(data, unit)
+    return status_by_instance
 
 
 def _pidfile_bot_status():
@@ -10943,8 +10993,11 @@ def _runtime_risk_limits(observed):
 def _fleet_runtime_snapshot():
     """Fresh, PID-matched runtime state shared by the root fleet and API views."""
     fleet = []
-    for inst in fleet_instances():
-        service = _systemd_bot_status(f"polypulse-bot@{inst}.service") or {}
+    instances = fleet_instances()
+    systemd_by_instance = _systemd_bot_status_many(instances)
+    for inst in instances:
+        service = (systemd_by_instance.get(inst)
+                   or _systemd_bot_status(f"polypulse-bot@{inst}.service") or {})
         pid = service.get("pid")
         rss_mb = None
         if pid:
