@@ -2136,7 +2136,7 @@ function loadPnlCommand(force){
   if(force)return doLoad();
   try{doLoad();}catch(e){}
 }
-let _eqHeroRangeDays=30,_eqHeroPayload=null;
+let _eqHeroRangeDays=30,_eqHeroPayload=null,_eqHeroLoading=false;
 function setEquityHeroRange(days){
   const next=Number(days);if(next!==7&&next!==30)return;
   _eqHeroRangeDays=next;
@@ -2173,7 +2173,9 @@ function renderEquityHero(r){
   $('eqHeroStats').innerHTML=`<span>peak ${peak>=0?'+':'−'}$${Math.abs(peak).toFixed(2)}</span><span>trough ${Math.min(...vals)>=0?'+':'−'}$${Math.abs(Math.min(...vals)).toFixed(2)}</span><span>${d[0].day} → ${d[d.length-1].day} UTC</span>`;
 }
 function loadEquityHero(){
-  apiFetch('/api/pnl_today').then(r=>{_eqHeroPayload=r;renderEquityHero(r);}).catch(()=>{});
+  if(document.hidden||S.curTab!=='overview'||_eqHeroLoading)return;
+  _eqHeroLoading=true;
+  apiFetch('/api/pnl_today').then(r=>{_eqHeroPayload=r;if(!document.hidden&&S.curTab==='overview')renderEquityHero(r);}).catch(()=>{}).finally(()=>{_eqHeroLoading=false;});
 }
 const cls=v=>v>0.005?'pos':v<-0.005?'neg':'';
 const TAB_TERM={overview:'deck_control — fleet overview, equity & risk',positions:'open_positions — live exposure & settlement clocks',settlements:'trade_ledger — durable exits, fees & fill history',
@@ -2199,8 +2201,8 @@ setInterval(()=>{if(document.hidden)return;const c=$('ttClock');if(c)c.textConte
   step();ov.onclick=finish;document.addEventListener('keydown',finish,{once:true});
 })();
 document.addEventListener('keydown',predShortcut);
-setInterval(()=>{if(!document.hidden)loadEquityHero();},60000);
-setTimeout(()=>{if(!document.hidden)loadEquityHero();},1200);
+setInterval(()=>{if(!document.hidden&&S.curTab==='overview')loadEquityHero();},60000);
+setTimeout(()=>{if(!document.hidden&&S.curTab==='overview')loadEquityHero();},1200);
 document.addEventListener('click',()=>{try{predAC2=predAC2||new (window.AudioContext||window.webkitAudioContext)();predAC2.resume&&predAC2.resume();}catch(e){}},{passive:true});
 setInterval(()=>{if(!document.hidden)loadPnlCommand();},30000);
 setTimeout(()=>{if(!document.hidden)loadPnlCommand();},800);
@@ -3385,7 +3387,7 @@ document.querySelectorAll('.nav-tab').forEach(btn=>{
     $(`tab${btn.dataset.tab[0].toUpperCase()+btn.dataset.tab.slice(1)}`).classList.add('active');
     if(S.curTab==='overview'){
       if(S.data){renderOperatorRadar(S.data,true);renderPositionTriage(S.data);}
-      renderOverview(S.data||{status:{}});loadOverviewSlow(true);
+      renderOverview(S.data||{status:{}});loadEquityHero();loadOverviewSlow(true);
     }
     if(S.curTab==='positions')loadActivity(true);
     if(S.curTab==='settlements')loadSettlementHistory(true);
