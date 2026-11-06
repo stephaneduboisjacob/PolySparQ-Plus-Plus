@@ -5187,6 +5187,7 @@ function _marketBookAge(ts){
   return seconds<10?seconds.toFixed(1)+'s':Math.floor(seconds)+'s';
 }
 function tickMarketBookAges(){
+  if(document.hidden||!$('tabMarkets')?.classList.contains('active'))return;
   document.querySelectorAll('#tabMarkets .mkt-book-age').forEach(el=>{
     const age=_marketBookAge(el.dataset.ts),unknown=age==='UNKNOWN'||age==='CLOCK OFFSET';
     el.classList.toggle('unknown',unknown);
@@ -6070,7 +6071,7 @@ async function loadOlderMarketExplorerTrades(conditionId){
   renderMarketExplorer();
 }
 function updateMarketExplorerBookFreshness(){
-  if(document.visibilityState!=='visible')return;
+  if(document.visibilityState!=='visible'||!$('tabMarkets')?.classList.contains('active'))return;
   for(const node of document.querySelectorAll('[data-market-book-age-id][data-market-book-age-index]')){
     const id=node.dataset.marketBookAgeId,index=Number(node.dataset.marketBookAgeIndex);
     const book=_marketExplorerState.bookCache[id]?.payloads?.[index],age=_marketExplorerBookAgeSeconds(book);
@@ -6423,6 +6424,7 @@ function _fmtCountdown(ms){
   return m+':'+String(s).padStart(2,'0');
 }
 function tickMarketCountdowns(){
+  if(document.hidden||!$('tabMarkets')?.classList.contains('active'))return;
   const now=Date.now();
   document.querySelectorAll('.mkt-count').forEach(el=>{
     const wc=+el.dataset.wc||0;
