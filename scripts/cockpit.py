@@ -1154,6 +1154,11 @@ def accounting_since(instance=None, mode=None, bot=None):
     if mode == 'live':
         return None  # owned positions survive a process restart
     if instance:
+        if mode == "paper":
+            # The window desk refreshes more often than a bot session changes.
+            # Reuse the shared TTL cache instead of running systemctl for every
+            # instance on every dashboard poll.
+            return paper_since(instance, mode=mode)
         return normalize_since(instance_session_start(instance))
     if mode == "paper":
         return normalize_since(session_start_for_mode(mode, bot))
@@ -6691,13 +6696,13 @@ _instance_running_cache = {}  # inst -> (expires_monotonic, running)
 _since_cache = {}  # instance-key -> (expires_monotonic, value)
 
 
-def paper_since(instance=None):
+def paper_since(instance=None, mode=None):
     """Session-start cutoff for paper accounting, instance-aware.
     ALL view = earliest start among running instances + the main bot.
     TTL-cached: the underlying lookup tails thousands of log lines per
     instance, which at dashboard poll rates was most of /api/live's cost
     (session start only changes when a bot restarts)."""
-    mode = current_mode(instance).lower()
+    mode = (mode or current_mode(instance)).lower()
     key = f"{instance or '*'}:{mode}"
     now = time.monotonic()
     hit = _since_cache.get(key)
