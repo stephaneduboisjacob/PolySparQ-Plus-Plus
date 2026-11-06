@@ -10627,7 +10627,9 @@ function refreshVisibleWorkspace(){
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshVisibleWorkspace();});
 // /api/live_lite shares 1.5-second snapshots across cockpit windows. SSE carries
 // live prices and position marks between these accounting and status refreshes.
-setInterval(()=>{if(!document.hidden&&!S.paused)refresh();},1000);
+// Match the shared live_lite snapshot cadence; SSE keeps prices and position
+// marks on their faster stream while this poll handles account/status data.
+setInterval(()=>{if(!document.hidden&&!S.paused)refresh();},1500);
 setInterval(()=>{if(!document.hidden&&!S.paused)loadActivity();},2000);
 setInterval(()=>{if(!document.hidden)updateSpeedPanel();},1000);
 setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='overview')loadOverviewSlow();},30000);
