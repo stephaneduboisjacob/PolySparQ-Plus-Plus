@@ -2261,6 +2261,7 @@ const PREDICTION_REFERENCE_SOURCES=[
 ];
 const PREDICTION_REFERENCE_SERIES=[...PREDICTION_REFERENCE_SOURCES.map(source=>({key:source.key,label:source.key==='oracle'?'CHAINLINK':source.label})),{key:'poly_up',label:'POLY UP'},{key:'poly_down',label:'POLY DOWN'}];
 const PREDICTION_REFERENCE_POLY_LIMIT=12000,PREDICTION_REFERENCE_DIRECT_LIMIT=6000,PREDICTION_REFERENCE_TRIM_BATCH=512;
+const PREDICTION_REFERENCE_SOURCE_STALE_MS=10000,PREDICTION_REFERENCE_POLY_STALE_MS=15000;
 const PREDICTION_REFERENCE_PAINT_INTERVAL_MS=200;
 function schedulePredictionReferenceChartPaint(){
   if(S.predictionReferencePaintTimer)return;
@@ -2336,7 +2337,7 @@ function connectPredictionReferencePolySocket(data){
   const previous=S.predictionReferencePolySocket;if(previous&&!previous.closed&&previous.key===key)return;
   stopPredictionReferencePolySocket('market changed');
   if(S.curTab!=='manualpred'||document.hidden){predictionReferencePolyStatus();return;}
-  const state=S.predictionReferencePolySocket={key,asset:S.predictionReferenceAsset,windowKey:S.predictionReferenceWindow?.key,tokens:{[up]:'up',[down]:'down'},books:{[up]:{bids:new Map(),asks:new Map(),bestBid:null,bestAsk:null},[down]:{bids:new Map(),asks:new Map(),bestBid:null,bestAsk:null}},closed:false,status:'connecting',socket:null,attempts:0,heartbeat:null,statusTimer:null,retryTimer:null,lastQuoteAt:0,lastSourceTimestamp:null};
+  const state=S.predictionReferencePolySocket={key,asset:S.predictionReferenceAsset,windowKey:S.predictionReferenceWindow?.key,tokens:{[up]:'up',[down]:'down'},books:{[up]:{bids:new Map(),asks:new Map(),bestBid:null,bestAsk:null},[down]:{bids:new Map(),asks:new Map(),bestBid:null,bestAsk:null}},closed:false,status:'connecting',socket:null,attempts:0,heartbeat:null,statusTimer:null,retryTimer:null,lastQuoteAt:0,connectedAt:0,staleReconnectRequested:false,lastSourceTimestamp:null};
   const updateStatus=()=>{if(S.predictionReferencePolySocket===state)predictionReferencePolyStatus();};
   const bestPrice=(levels,highest)=>{
     let best=null;
@@ -2404,16 +2405,22 @@ function connectPredictionReferencePolySocket(data){
     state.status='connecting';updateStatus();
     let socket;try{socket=new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market');state.socket=socket;}catch(error){schedule();return;}
     socket.onopen=()=>{
-      if(state.closed)return;state.status='connected';state.attempts=0;
+      if(state.closed)return;state.status='connected';state.attempts=0;state.connectedAt=Date.now();state.staleReconnectRequested=false;
       try{socket.send(JSON.stringify({type:'market',assets_ids:[up,down],custom_feature_enabled:true}));}catch(error){socket.close();return;}
       state.heartbeat=setInterval(()=>{if(socket.readyState===WebSocket.OPEN)try{socket.send('PING');}catch(error){}},10000);
-      state.statusTimer=setInterval(updateStatus,1000);updateStatus();
+      state.statusTimer=setInterval(()=>{
+        updateStatus();
+        const lastBookAt=state.lastQuoteAt||state.connectedAt;
+        if(state.closed||state.staleReconnectRequested||!lastBookAt||Date.now()-lastBookAt<=PREDICTION_REFERENCE_POLY_STALE_MS)return;
+        state.staleReconnectRequested=true;state.status='error';updateStatus();
+        try{socket.close(4000,'no recent market book updates');}catch(error){schedule();}
+      },1000);updateStatus();
     };
     socket.onmessage=event=>{
       if(state.closed||typeof event.data!=='string'||event.data==='PONG')return;
       try{const decoded=JSON.parse(event.data);for(const message of Array.isArray(decoded)?decoded:[decoded])handleMessage(message);}catch(error){}
     };
-    socket.onerror=()=>{if(state.closed)return;state.status='error';updateStatus();};
+    socket.onerror=()=>{if(state.closed)return;state.status='error';updateStatus();try{socket.close();}catch(error){schedule();}};
     socket.onclose=()=>{
       clearInterval(state.heartbeat);clearInterval(state.statusTimer);state.heartbeat=null;state.statusTimer=null;
       if(state.closed||S.predictionReferencePolySocket!==state)return;
@@ -2563,8 +2570,19 @@ function startPredictionReferenceSockets(){
   if(previous&&!previous.closed&&previous.asset===asset)return;
   stopPredictionReferenceSockets();
   const sourceKeys=['oracle','coinbase','binance','kraken','gemini','okx'];
-  const state=S.predictionReferenceSockets={asset,closed:false,sockets:{},states:Object.fromEntries(sourceKeys.map(key=>[key,'connecting'])),attempts:Object.fromEntries(sourceKeys.map(key=>[key,0])),retryTimers:{},heartbeats:{},connectedAt:{}};
-  state.statusTimer=setInterval(()=>{if(!state.closed&&S.predictionReferenceSockets===state)predictionReferenceDirectStatus();},1000);
+  const state=S.predictionReferenceSockets={asset,closed:false,sockets:{},states:Object.fromEntries(sourceKeys.map(key=>[key,'connecting'])),attempts:Object.fromEntries(sourceKeys.map(key=>[key,0])),retryTimers:{},heartbeats:{},connectedAt:{},lastTickAt:{},staleReconnectRequested:{}};
+  state.statusTimer=setInterval(()=>{
+    if(state.closed||S.predictionReferenceSockets!==state)return;
+    const now=Date.now();
+    for(const source of sourceKeys){
+      if(!['connected','live'].includes(state.states[source])||state.staleReconnectRequested[source])continue;
+      const lastTick=state.lastTickAt[source]||state.connectedAt[source];
+      if(!lastTick||now-lastTick<=PREDICTION_REFERENCE_SOURCE_STALE_MS)continue;
+      state.staleReconnectRequested[source]=true;state.states[source]='fallback';
+      try{state.sockets[source]?.close(4000,'no recent source ticks');}catch(error){schedule(source);}
+    }
+    predictionReferenceDirectStatus();
+  },1000);
   predictionReferenceDirectStatus();
   const symbols={BTC:{kraken:'BTC/USD',okx:'BTC-USDT',binance:'btcusdt',gemini:'btcusd'},ETH:{kraken:'ETH/USD',okx:'ETH-USDT',binance:'ethusdt',gemini:'ethusd'},SOL:{kraken:'SOL/USD',okx:'SOL-USDT',binance:'solusdt',gemini:'solusd'},XRP:{kraken:'XRP/USD',okx:'XRP-USDT',binance:'xrpusdt',gemini:'xrpusd'}}[asset];
   const specs={
@@ -2572,7 +2590,7 @@ function startPredictionReferenceSockets(){
     coinbase:{url:'wss://advanced-trade-ws.coinbase.com',connect:socket=>socket.send(JSON.stringify({type:'subscribe',product_ids:[`${asset}-USD`],channel:'ticker'}))},
     binance:{url:`wss://stream.binance.com:9443/ws/${symbols.binance}@trade`,connect:()=>{}},
     kraken:{url:'wss://ws.kraken.com/v2',connect:socket=>socket.send(JSON.stringify({method:'subscribe',params:{channel:'ticker',symbol:[symbols.kraken],event_trigger:'bbo',snapshot:true},req_id:1}))},
-    gemini:{url:'wss://ws.gemini.com',connect:socket=>socket.send(JSON.stringify({id:'1',method:'subscribe',params:[`${symbols.gemini}@bookTicker`]}))},
+    gemini:{url:'wss://ws.gemini.com',assets:['BTC'],connect:socket=>socket.send(JSON.stringify({id:'1',method:'subscribe',params:[`${symbols.gemini}@bookTicker`]}))},
     okx:{url:'wss://ws.okx.com/ws/v5/public',connect:socket=>socket.send(JSON.stringify({op:'subscribe',args:[{channel:'books5',instId:symbols.okx}]}))}
   };
   const connect=source=>{
@@ -2582,7 +2600,7 @@ function startPredictionReferenceSockets(){
     state.states[source]='connecting';predictionReferenceDirectStatus();
     let socket;
     try{socket=new WebSocket(spec.url);state.sockets[source]=socket;}catch(error){schedule(source);return;}
-    socket.onopen=()=>{if(state.closed)return;state.attempts[source]=0;state.connectedAt[source]=Date.now();state.states[source]='connected';try{spec.connect(socket);}catch(error){socket.close();}predictionReferenceDirectStatus();};
+    socket.onopen=()=>{if(state.closed)return;state.attempts[source]=0;state.connectedAt[source]=Date.now();state.lastTickAt[source]=0;state.staleReconnectRequested[source]=false;state.states[source]='connected';try{spec.connect(socket);}catch(error){socket.close();}predictionReferenceDirectStatus();};
     socket.onmessage=event=>{if(state.closed||typeof event.data!=='string')return;try{
       const message=JSON.parse(event.data);
       if(source==='oracle'){
@@ -2615,7 +2633,7 @@ function startPredictionReferenceSockets(){
         if(bid>0&&ask>=bid)recordPredictionReferenceDirectTick(asset,'okx',(bid+ask)/2,Number.isFinite(ts)&&ts>0?ts:Date.now());
       }
     }catch(error){}}
-    socket.onerror=()=>{state.states[source]='fallback';predictionReferenceDirectStatus();};
+    socket.onerror=()=>{if(state.closed)return;state.states[source]='fallback';predictionReferenceDirectStatus();try{socket.close();}catch(error){schedule(source);}};
     socket.onclose=()=>{clearInterval(state.heartbeats[source]);state.heartbeats[source]=null;if(state.closed||S.predictionReferenceSockets!==state)return;state.sockets[source]=null;state.connectedAt[source]=0;state.states[source]='fallback';predictionReferenceDirectStatus();schedule(source);};
   };
   const schedule=source=>{
@@ -2627,7 +2645,7 @@ function startPredictionReferenceSockets(){
 }
 function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
   const ts=Number(timestamp),now=Date.now();if(!Number.isFinite(ts)||ts<=0||now-ts>15000||ts-now>5000)return;
-  const socketState=S.predictionReferenceSockets;if(socketState&&!socketState.closed&&socketState.asset===asset&&socketState.states[source]!=='unsupported')socketState.states[source]='live';
+  const socketState=S.predictionReferenceSockets;if(socketState&&!socketState.closed&&socketState.asset===asset&&socketState.states[source]!=='unsupported'){socketState.states[source]='live';socketState.lastTickAt[source]=now;}
   const direct=S.predictionReferenceDirectPrices[asset]||(S.predictionReferenceDirectPrices[asset]={}),previous=direct[source];
   if(previous&&ts<previous.ts_ms)return;
   direct[source]={value,ts_ms:ts,received_at_ms:now};
