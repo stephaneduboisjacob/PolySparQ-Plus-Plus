@@ -3998,7 +3998,7 @@ async function cancelOpenOrders(){
 }
 
 // ── Live fill ticker tape ─────────────────────────────────────────────────
-let _tapeSig='',_tapeRows=[];
+let _tapeSig='',_tapeRows=[],_streamFillSig='';
 function _fillTapeKey(o){
   return String(o.client_order_id||[o.instance,o.asset,o.ts_created,o.source,o.direction,o.side_label,o.price,o.notional_usd].join(':'));
 }
@@ -4009,6 +4009,11 @@ function _fillTapeTime(o){
 }
 function renderStreamFillTape(fills){
   if(!Array.isArray(fills)||!fills.length)return;
+  const signature=JSON.stringify([String(S.curInstance||''),fills.map(f=>[
+    f.instance,f.asset,f.ts,f.source,f.direction,f.side_label,f.price,f.size_shares
+  ])]);
+  if(signature===_streamFillSig)return;
+  _streamFillSig=signature;
   const rows=fills.map(f=>{
     const rawTs=f.ts;
     const tsMs=typeof rawTs==='number'?(rawTs<1e12?rawTs*1000:rawTs):Date.parse(rawTs||'');
