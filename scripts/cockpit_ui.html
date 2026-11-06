@@ -2805,26 +2805,46 @@ function renderPredictionReferenceChart(){
   }
   const anchorPrice=hasExplicitOpen?explicitOpen:(firstSpot?.value||null);
   const anchorSource=hasExplicitOpen?(openRef?.source||'window opening reference'):(firstSpot?'first available in-window feed':'opening reference unavailable');
-  const samplesBySource=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,rawBySource[source.key].map(point=>({...point,move_pct:anchorPrice?(point.value/anchorPrice-1)*100:null}))]));
+  const samplesBySource={},sourceMoveStats={};
+  let hasMoves=false,low=0,high=0;
+  for(const source of PREDICTION_REFERENCE_SOURCES){
+    const points=rawBySource[source.key];let sourceLow=Infinity,sourceHigh=-Infinity,count=0;
+    for(const point of points){
+      point.move_pct=anchorPrice?(point.value/anchorPrice-1)*100:null;
+      if(!Number.isFinite(point.move_pct))continue;
+      if(!hasMoves){low=high=point.move_pct;hasMoves=true;}
+      else{low=Math.min(low,point.move_pct);high=Math.max(high,point.move_pct);}
+      sourceLow=Math.min(sourceLow,point.move_pct);sourceHigh=Math.max(sourceHigh,point.move_pct);count++;
+    }
+    samplesBySource[source.key]=points;
+    sourceMoveStats[source.key]={low:count?sourceLow:0,high:count?sourceHigh:0,count};
+  }
+  const closeMove=visible.oracle!==false&&closeRef?.price!=null&&anchorPrice?(Number(closeRef.price)/anchorPrice-1)*100:null;
+  if(Number.isFinite(closeMove)){
+    if(!hasMoves){low=high=closeMove;hasMoves=true;}
+    else{low=Math.min(low,closeMove);high=Math.max(high,closeMove);}
+  }
   const visibleShares=Object.fromEntries(['up','down'].map(side=>[side,visible[`poly_${side}`]!==false?predictionReferenceTimeRange(sourceSeries[`poly_${side}`]||[],viewportStart,viewEnd):[]]));
   const openingShares=Object.fromEntries(['up','down'].map(side=>[side,predictionReferenceFirstInRange(sourceSeries[`poly_${side}`]||[],start,windowEnd)]));
-  const allMoves=PREDICTION_REFERENCE_SOURCES.flatMap(source=>samplesBySource[source.key].map(point=>point.move_pct).filter(Number.isFinite));
-  if(visible.oracle!==false&&closeRef?.price!=null&&anchorPrice)allMoves.push((Number(closeRef.price)/anchorPrice-1)*100);
   const shareMode=S.predictionReferenceShareMode||'delta';
   const shareYValue=(value,side)=>shareMode==='delta'&&openingShares[side]?(Number(value)-Number(openingShares[side].value))*100:Number(value)*100;
-  const shareMoves=['up','down'].flatMap(side=>visibleShares[side].map(point=>shareYValue(point.value,side)).filter(Number.isFinite));
+  let maxAbsShare=0;
+  if(shareMode==='delta')for(const side of ['up','down'])for(const point of visibleShares[side]){
+    const value=shareYValue(point.value,side);
+    if(Number.isFinite(value))maxAbsShare=Math.max(maxAbsShare,Math.abs(value));
+  }
   const hasShares=visibleShares.up.length>0||visibleShares.down.length>0;
-  if(!allMoves.length&&!hasShares){
+  if(!hasMoves&&!hasShares){
     const message=now<start?'This market window has not opened yet.':'No visible series has data in this range. Enable a data series above or return to FOLLOW LIVE.';
     target.innerHTML=`<div class="pred-reference-chart-empty" role="status" aria-live="polite">${message}</div>`;return;
   }
+  if(hasMoves){low=Math.min(low,0);high=Math.max(high,0);}else{low=-.5;high=.5;}
   const compact=target.clientWidth<760,W=Math.max(320,Math.round(target.clientWidth||1280)),H=Math.max(compact?390:480,Math.round(target.clientHeight||560)),L=compact?62:104,R=compact?10:64,plotRight=W-R,PW=plotRight-L;
   const priceTop=54,priceBottom=Math.round(H*.45),shareTop=Math.round(H*.59),shareBottom=H-58;
-  let low=allMoves.length?Math.min(...allMoves,0):-.5,high=allMoves.length?Math.max(...allMoves,0):.5;
   const pad=Math.max((high-low)*.14,.035);low-=pad;high+=pad;
   let shareLow=0,shareHigh=100;
   if(shareMode==='delta'){
-    const extent=Math.max(.5,...shareMoves.map(value=>Math.abs(value)))*1.2;
+    const extent=Math.max(.5,maxAbsShare)*1.2;
     shareLow=-extent;shareHigh=extent;
   }
   const x=t=>L+Math.max(0,Math.min(1,(t-viewportStart)/duration))*PW;
@@ -2859,8 +2879,8 @@ function renderPredictionReferenceChart(){
   };
   const liveQuote=predictionReferenceLivePrices()[asset]||{};
   const spotLines=PREDICTION_REFERENCE_SOURCES.map(source=>{
-    if(visible[source.key]===false)return'';
-    const points=samplesBySource[source.key].filter(point=>Number.isFinite(point.move_pct));
+    if(visible[source.key]===false||!sourceMoveStats[source.key].count)return'';
+    const allPoints=samplesBySource[source.key],points=sourceMoveStats[source.key].count===allPoints.length?allPoints:allPoints.filter(point=>Number.isFinite(point.move_pct));
     const path=linePath(points,point=>yMove(point.move_pct)),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
     return path?`<path class="pred-reference-line ${source.key}" d="${path}" data-fresh="${fresh}"/>${last?`<circle class="pred-reference-dot ${source.key}" cx="${x(last.t).toFixed(1)}" cy="${yMove(last.move_pct).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
   }).join('');
@@ -2873,7 +2893,6 @@ function renderPredictionReferenceChart(){
     const yy=shareMode==='delta'?shareTop+(shareHigh/(shareHigh-shareLow))*(shareBottom-shareTop):yShare(point.value,side);
     return`<line class="pred-reference-share-open ${side}" x1="${L}" y1="${yy.toFixed(1)}" x2="${plotRight}" y2="${yy.toFixed(1)}"><title>${side.toUpperCase()} opening midpoint ${(point.value*100).toFixed(1)}¢</title></line>`;
   }).join('');
-  const closeMove=closeRef?.price!=null&&anchorPrice?(Number(closeRef.price)/anchorPrice-1)*100:null;
   const closeLine=visible.oracle!==false&&closeMove!=null&&Number.isFinite(closeMove)?`<line class="pred-reference-close-line" x1="${x(Math.max(viewportStart,Number(closeRef.ts_ms)||close)).toFixed(1)}" y1="${yMove(closeMove).toFixed(1)}" x2="${plotRight}" y2="${yMove(closeMove).toFixed(1)}"><title>Window close reference ${predictionReferencePrice(closeRef.price,asset)}</title></line>`:'';
   const priceLabel=`${asset} MOVE FROM OPEN · ${anchorPrice?predictionReferencePrice(anchorPrice,asset):'OPEN REFERENCE UNAVAILABLE'}`;
   const aria=`${asset} ${window.horizon/60}-minute ${window.period==='NEXT'?'upcoming':'current'} window. Spot venues are percent from ${anchorSource}; Polymarket UP and DOWN use ${shareMode==='delta'?'change in cents from their first in-window midpoint':'midpoint prices in cents'}. ${PREDICTION_REFERENCE_SERIES.filter(series=>visible[series.key]!==false).map(series=>`${series.label} ${series.key.startsWith('poly_')?visibleShares[series.key.slice(5)].length:samplesBySource[series.key]?.length||0} ticks`).join(', ')}.`;
@@ -2885,7 +2904,7 @@ function renderPredictionReferenceChart(){
     const spotStats=PREDICTION_REFERENCE_SOURCES.map(source=>{
       if(visible[source.key]===false)return'';
       const points=samplesBySource[source.key];if(!points.length)return`<div class="pred-reference-stat ${source.key}" data-empty="true"><b>${source.label}</b><span>NO TICKS IN VIEW</span><small>${source.assets&&!source.assets.includes(asset)?'PAIR NOT SUPPORTED':'Waiting for venue data'}</small></div>`;
-      const values=points.map(point=>point.move_pct).filter(Number.isFinite),last=points.at(-1),lo=values.length?Math.min(...values):0,hi=values.length?Math.max(...values):0,move=last?.move_pct,sign=move>0?'+':'';
+      const range=sourceMoveStats[source.key],last=points.at(-1),lo=range.low,hi=range.high,move=last?.move_pct,sign=move>0?'+':'';
       return`<div class="pred-reference-stat ${source.key}"><b>${source.label}</b><span>FROM OPEN ${Number.isFinite(move)?`${sign}${move.toFixed(3)}%`:'—'}</span><small>${predictionReferencePrice(last?.value,asset)} · ${lo>0?'+':''}${lo.toFixed(3)}% to ${hi>0?'+':''}${hi.toFixed(3)}% · ${points.length} ticks</small></div>`;
     });
     for(const side of ['up','down']){
