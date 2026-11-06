@@ -3977,6 +3977,12 @@ function renderOperatorRadar(d,paint=true){
     typeof d.status.mode==='string'&&Array.isArray(d.positions?.positions)&&
     Array.isArray(d.markets?.markets)&&d.health&&typeof d.health==='object'&&
     Number.isFinite(serverTs)&&serverTs>0&&serverTs<=now+1500);
+  const sameSnapshot=complete&&host.dataset.radarSnapshotReady==='true'&&Number(host.dataset.radarServerTs)===serverTs;
+  const reusableMarkup=host.dataset.radarMarkupKey===host.dataset.radarAlertsJson||
+    (host.dataset.radarStaleEmpty==='true'&&host.dataset.radarAlertCount==='0');
+  if(sameSnapshot&&(!paint||reusableMarkup)){
+    updateOperatorRadarFreshness(now);return;
+  }
   host.dataset.radarSnapshotReady=String(complete);
   host.dataset.radarServerTs=complete?String(serverTs):'';
   const priority={critical:0,warn:1,info:2};
