@@ -2763,24 +2763,36 @@ function predictionReferenceTimeRange(points,start,end){
 function predictionReferenceFirstInRange(points,start,end){
   const [from,to]=predictionReferenceRangeBounds(points,start,end);return from<to?points[from]:null;
 }
+let _predictionReferenceForecastHtml=null,_predictionReferenceStatsContext='',_predictionReferenceStatsPaintAt=0;
+function setPredictionReferenceChartStatsMessage(message){
+  const stats=$('predictionReferenceChartStats');if(!stats)return;
+  const html=`<span class="pred-reference-no-series">${esc(message)}</span>`;
+  if(stats.innerHTML!==html)stats.innerHTML=html;
+  _predictionReferenceStatsContext=`empty:${message}`;_predictionReferenceStatsPaintAt=Date.now();
+}
 function renderPredictionReferenceForecast(){
   const target=$('predictionReferenceForecast');if(!target)return;
   const card=predictionReferenceSelectedWindow();
-  if(!card){target.innerHTML='<span class="pred-reference-forecast-empty">PREDICTOR · WAITING FOR SELECTED WINDOW</span>';return;}
+  if(!card){
+    const html='<span class="pred-reference-forecast-empty">PREDICTOR · WAITING FOR SELECTED WINDOW</span>';
+    if(html!==_predictionReferenceForecastHtml){target.innerHTML=html;_predictionReferenceForecastHtml=html;}
+    return;
+  }
   const probability=Number(card.independent_up_probability??card.up_probability),direction=String(card.independent_direction??card.direction??'WAIT').toUpperCase();
   const validProbability=Number.isFinite(probability)&&probability>=0&&probability<=1;
   const side=direction==='UP'?'up':direction==='DOWN'?'down':'wait';
   const period=card.period==='NEXT'?'NEXT WINDOW':'LIVE WINDOW';
   const label=validProbability?`${(probability*100).toFixed(1)}% UP PROBABILITY`:'UP PROBABILITY UNAVAILABLE';
   const openSource=String(S.predictionReferenceTimeline?.open_reference?.source||'Awaiting selected-window reference');
-  target.innerHTML=`<div class="pred-reference-forecast-call ${side}"><small>POLYSPARQ PREDICTOR · ${Number(card.horizon_seconds)/60} MIN · ${period}</small><strong>MODEL TENDENCY <b>${esc(direction)}</b></strong></div><div class="pred-reference-forecast-probability"><small>INDEPENDENT FORECAST</small><strong>${label}</strong><span>${esc(card.independent_model_version||card.model_version||card.prediction_basis||'MODEL VERSION UNAVAILABLE')}</span></div><div class="pred-reference-forecast-open"><small>WINDOW OPEN REFERENCE</small><strong>${predictionReferencePrice(S.predictionReferenceTimeline?.open_reference?.price,card.asset)}</strong><span title="${esc(openSource)}">${esc(predictionReferenceSourceLabel(openSource))}</span></div>`;
+  const html=`<div class="pred-reference-forecast-call ${side}"><small>POLYSPARQ PREDICTOR · ${Number(card.horizon_seconds)/60} MIN · ${period}</small><strong>MODEL TENDENCY <b>${esc(direction)}</b></strong></div><div class="pred-reference-forecast-probability"><small>INDEPENDENT FORECAST</small><strong>${label}</strong><span>${esc(card.independent_model_version||card.model_version||card.prediction_basis||'MODEL VERSION UNAVAILABLE')}</span></div><div class="pred-reference-forecast-open"><small>WINDOW OPEN REFERENCE</small><strong>${predictionReferencePrice(S.predictionReferenceTimeline?.open_reference?.price,card.asset)}</strong><span title="${esc(openSource)}">${esc(predictionReferenceSourceLabel(openSource))}</span></div>`;
+  if(html!==_predictionReferenceForecastHtml){target.innerHTML=html;_predictionReferenceForecastHtml=html;}
 }
 function renderPredictionReferenceChart(){
   const target=$('predictionReferenceChart');if(!target)return;
   renderPredictionReferenceSeriesControls();
   const asset=S.predictionReferenceAsset||'BTC',now=Date.now(),window=S.predictionReferenceWindow;
   renderPredictionReferenceForecast();
-  if(!window){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">Waiting for the selected prediction window…</div>';return;}
+  if(!window){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">Waiting for the selected prediction window…</div>';setPredictionReferenceChartStatsMessage('Waiting for the selected window.');return;}
   const start=Number(window.window_open),close=Number(window.window_close),windowEnd=Math.min(now,close),windowDuration=Math.max(1,close-start),rangeMs=Math.max(0,Number(S.predictionReferenceRangeMs)||0);
   const span=rangeMs?Math.min(windowDuration,Math.max(5000,rangeMs)):Math.max(5000,windowEnd-start);
   let viewEnd=S.predictionReferenceViewEndMs==null?windowEnd:Number(S.predictionReferenceViewEndMs);
@@ -2789,7 +2801,7 @@ function renderPredictionReferenceChart(){
   const follow=$('predictionReferenceFollow');if(follow){follow.setAttribute('aria-pressed',String(S.predictionReferenceViewEndMs==null));follow.title=S.predictionReferenceViewEndMs==null?'Live edge is following. Click to pause the chart.':'Chart is paused. Click to return to the live edge.';}
   document.querySelectorAll('[data-ref-share-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.refShareMode===S.predictionReferenceShareMode)));
   document.querySelectorAll('[data-ref-range]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.refRange)===rangeMs)));
-  if(windowEnd<start){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">This window has not opened yet. Live venue prices are shown above.</div>';return;}
+  if(windowEnd<start){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">This window has not opened yet. Live venue prices are shown above.</div>';setPredictionReferenceChartStatsMessage('Window has not opened yet.');return;}
   const sourceSeries=S.predictionReferenceSamples[asset]||{},openRef=S.predictionReferenceTimeline?.open_reference,closeRef=S.predictionReferenceTimeline?.close_reference;
   const visible=S.predictionReferenceSeriesVisibility;
   // Feed producers keep each series time-ordered; use binary range bounds so
@@ -2836,7 +2848,7 @@ function renderPredictionReferenceChart(){
   const hasShares=visibleShares.up.length>0||visibleShares.down.length>0;
   if(!hasMoves&&!hasShares){
     const message=now<start?'This market window has not opened yet.':'No visible series has data in this range. Enable a data series above or return to FOLLOW LIVE.';
-    target.innerHTML=`<div class="pred-reference-chart-empty" role="status" aria-live="polite">${message}</div>`;return;
+    target.innerHTML=`<div class="pred-reference-chart-empty" role="status" aria-live="polite">${message}</div>`;setPredictionReferenceChartStatsMessage(message);return;
   }
   if(hasMoves){low=Math.min(low,0);high=Math.max(high,0);}else{low=-.5;high=.5;}
   const compact=target.clientWidth<760,W=Math.max(320,Math.round(target.clientWidth||1280)),H=Math.max(compact?390:480,Math.round(target.clientHeight||560)),L=compact?62:104,R=compact?10:64,plotRight=W-R,PW=plotRight-L;
@@ -2900,7 +2912,10 @@ function renderPredictionReferenceChart(){
   const shareCursorDots=['up','down'].filter(side=>visible[`poly_${side}`]!==false).map(side=>`<circle id="predictionReferenceCursor${side[0].toUpperCase()+side.slice(1)}" class="pred-reference-cursor share ${side}" r="5" visibility="hidden"/>`).join('');
   target.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(aria)}"><title>${esc(aria)}</title><g class="pred-reference-grid">${priceGrid}${shareGrid}${timeTicks}</g>${stageLines}<line class="pred-reference-zero-line" x1="${L}" y1="${yMove(0).toFixed(1)}" x2="${plotRight}" y2="${yMove(0).toFixed(1)}"/><text class="pred-reference-panel-title" x="${L}" y="${priceTop-25}">${esc(priceLabel)}</text><text class="pred-reference-panel-title" x="${L}" y="${shareTop-23}">POLYMARKET UP / DOWN · ${shareMode==='delta'?'CHANGE FROM FIRST IN-WINDOW MIDPOINT':'SHARE MIDPOINT PRICE'}</text><text class="pred-reference-panel-unit" x="${plotRight}" y="${shareTop-23}" text-anchor="end">${shareMode==='delta'?'Δ CENTS FROM OPEN':'PRICE IN CENTS · 0–100¢'}</text>${closeLine}${spotLines}${shareOpenLines}${shareLines}<g id="predictionReferenceCursor" visibility="hidden"><line id="predictionReferenceCursorLine" class="pred-reference-cursor-line" y1="${priceTop}" y2="${shareBottom}"/>${cursorDots}${shareCursorDots}</g></svg>`;
   const stats=$('predictionReferenceChartStats');
-  if(stats){
+  const visibilityKey=PREDICTION_REFERENCE_SERIES.map(series=>visible[series.key]!==false?'1':'0').join('');
+  const viewportKey=S.predictionReferenceViewEndMs==null?'follow':String(S.predictionReferenceViewEndMs);
+  const statsContext=`${asset}|${start}|${close}|${rangeMs}|${viewportKey}|${anchorPrice||''}|${closeMove??''}|${shareMode}|${visibilityKey}`;
+  if(stats&&(statsContext!==_predictionReferenceStatsContext||now-_predictionReferenceStatsPaintAt>=250)){
     const spotStats=PREDICTION_REFERENCE_SOURCES.map(source=>{
       if(visible[source.key]===false)return'';
       const points=samplesBySource[source.key];if(!points.length)return`<div class="pred-reference-stat ${source.key}" data-empty="true"><b>${source.label}</b><span>NO TICKS IN VIEW</span><small>${source.assets&&!source.assets.includes(asset)?'PAIR NOT SUPPORTED':'Waiting for venue data'}</small></div>`;
@@ -2915,6 +2930,7 @@ function renderPredictionReferenceChart(){
       spotStats.push(points.length?`<div class="pred-reference-stat share ${colorClass}"><b>POLY ${label}</b><span>${(Number(last.value)*100).toFixed(1)}¢ · ${delta==null?'OPEN —':`OPEN ${(Number(opened.value)*100).toFixed(1)}¢ · Δ ${sign}${delta.toFixed(1)}¢`}</span><small>${points.length} BBO points · ${quoteAge==null?clock(last.t):`updated ${quoteAge<1?`${Math.round(quoteAge*1000)}ms`:quoteAge.toFixed(1)+'s'} ago`}</small></div>`:`<div class="pred-reference-stat share ${colorClass}" data-empty="true"><b>POLY ${label}</b><span>NO BOOK DATA</span><small>Waiting for live CLOB midpoint</small></div>`);
     }
     stats.innerHTML=spotStats.filter(Boolean).join('')||'<span class="pred-reference-no-series">All series are hidden. Turn a series back on above.</span>';
+    _predictionReferenceStatsContext=statsContext;_predictionReferenceStatsPaintAt=now;
   }
   bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,{L,plotRight,priceTop,priceBottom,shareTop,shareBottom,W,H,asset,samplesBySource,visibleShares,visible,anchorPrice,x,yMove,yShare,shareMode,openingShares,windowStart:start,windowClose:close,windowEnd,viewEnd,span});
 }
