@@ -7080,12 +7080,12 @@ def build_operator_radar(status, positions_payload, markets_payload, health):
 
 
 def api_live_lite(instance=None):
-    """Share a one-second live snapshot across simultaneous cockpit clients."""
+    """Share a short-lived accounting snapshot across simultaneous clients."""
     key = instance or ""
     now = time.monotonic()
     with _live_lite_cache_lock:
         hit = _live_lite_cache.get(key)
-        if hit and now - hit[0] < 1.0:
+        if hit and now - hit[0] < 1.5:
             return hit[1]
         if key in _live_lite_refreshing:
             return hit[1] if hit else {

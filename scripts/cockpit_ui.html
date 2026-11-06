@@ -10530,7 +10530,7 @@ function refreshVisibleWorkspace(){
   if($('posChartModal')?.classList.contains('open'))_refreshPosChart();
 }
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshVisibleWorkspace();});
-// /api/live_lite shares one-second snapshots across cockpit windows. SSE carries
+// /api/live_lite shares 1.5-second snapshots across cockpit windows. SSE carries
 // live prices and position marks between these accounting and status refreshes.
 setInterval(()=>{if(!document.hidden&&!S.paused)refresh();},1000);
 setInterval(()=>{if(!document.hidden&&!S.paused)loadActivity();},2000);
