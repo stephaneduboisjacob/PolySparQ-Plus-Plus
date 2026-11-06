@@ -8405,7 +8405,7 @@ def _build_fleet_detail():
             }
         entry["recent"].append({
             "id": strategy_row["strategy_id"],
-            "reason": strategy_row.get("reason") or "",
+            "reason": str(strategy_row.get("reason") or "")[:60],
         })
     # Available configs: all .toml files that are NOT timestamped backups
     # (backups match polypulse-*-YYYYMMDD*.toml or *-YYYYMMDD_*.toml patterns)
@@ -8469,6 +8469,8 @@ def _build_fleet_detail():
 
 
 _window_bot_desk_cache = {}
+_window_bot_desk_lock = threading.Lock()
+_window_bot_desk_refreshing = set()
 _WINDOW_BOT_IDS = {
     "btc-5m-article-sim-test",
     "btc-5m-ofi-impulse-paper-test",
@@ -8496,9 +8498,30 @@ _WINDOW_BOT_ASSETS = ("BTC", "ETH", "SOL", "XRP")
 
 
 def api_window_bot_desk(allowed_instances=None):
-    """Live operational view for the window-bot profiles and PAPER challengers."""
+    """Return a shared live desk snapshot without stacking full rebuilds."""
     scope = None if allowed_instances is None else tuple(sorted(allowed_instances))
     cache_key = ("admin",) if scope is None else ("user", *scope)
+    now = time.monotonic()
+    with _window_bot_desk_lock:
+        hit = _window_bot_desk_cache.get(cache_key)
+        if hit and now - hit[0] < 1.5:
+            return hit[1]
+        if cache_key in _window_bot_desk_refreshing:
+            return hit[1] if hit else {
+                "bots": [], "server_ts": int(time.time() * 1000),
+                "refresh_ms": 1500,
+                "mode_policy": "Dedicated multi-asset strategy view. Profiles default to PAPER.",
+            }
+        _window_bot_desk_refreshing.add(cache_key)
+    try:
+        return _build_window_bot_desk(scope, cache_key)
+    finally:
+        with _window_bot_desk_lock:
+            _window_bot_desk_refreshing.discard(cache_key)
+
+
+def _build_window_bot_desk(scope, cache_key):
+    """Live operational view for the window-bot profiles and PAPER challengers."""
     now = time.monotonic()
     hit = _window_bot_desk_cache.get(cache_key)
     if hit and now - hit[0] < 1.5:
