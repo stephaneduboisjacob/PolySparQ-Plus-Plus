@@ -19,6 +19,8 @@ _cache = {}
 _cache_lock = threading.Lock()
 _quality_cache = {}
 _quality_cache_lock = threading.Lock()
+_calibration_cache = {}
+_calibration_cache_lock = threading.Lock()
 QUALITY_SUMMARY_REFRESH_SECONDS = 30.0
 ASSETS = ('BTC', 'ETH', 'SOL', 'XRP')
 INDEPENDENT_MODEL_VERSION = 'vantagepulse-independent-v2'
@@ -985,6 +987,12 @@ def journal_calibration(root, min_n=20, prior=15.0,
     observations) once the decile holds min_n settled samples. Version suffixes
     keep current-window and provisional next-window calibration separate.'''
     path = os.path.join(root, 'logs', 'prediction_quality.sqlite3')
+    cache_key = (path, version, min_n, prior)
+    now = time.monotonic()
+    with _calibration_cache_lock:
+        cached = _calibration_cache.get(cache_key)
+        if cached and now-cached[0] < QUALITY_SUMMARY_REFRESH_SECONDS:
+            return cached[1]
     try:
         with sqlite3.connect(path, timeout=2) as db:
             rows = db.execute('''SELECT CAST(p*10 AS INTEGER), COUNT(*), SUM(outcome), AVG(p)
@@ -993,13 +1001,20 @@ def journal_calibration(root, min_n=20, prior=15.0,
             total, wins = db.execute("""SELECT COUNT(*), COALESCE(SUM(outcome),0) FROM forecasts
                 WHERE outcome IS NOT NULL AND bucket=2 AND version=?""", (version,)).fetchone()
     except Exception:
-        return {}
+        return cached[1] if cached else {}
     deciles = {}
     for dec, n, w, avg_p in rows:
         if dec is None or not n: continue
         deciles[int(dec)] = {'n': int(n), 'wins': float(w or 0), 'avg_p': float(avg_p or 0)}
-    return {'deciles': deciles, 'total': int(total or 0),
-            'total_wins': float(wins or 0), 'min_n': min_n, 'prior': prior}
+    result = {'deciles': deciles, 'total': int(total or 0),
+              'total_wins': float(wins or 0), 'min_n': min_n, 'prior': prior}
+    with _calibration_cache_lock:
+        if len(_calibration_cache) >= 32 and cache_key not in _calibration_cache:
+            oldest = min(_calibration_cache,
+                         key=lambda key: _calibration_cache[key][0])
+            _calibration_cache.pop(oldest, None)
+        _calibration_cache[cache_key] = (time.monotonic(), result)
+    return result
 
 
 def _calibrate_up(p, calibration):
