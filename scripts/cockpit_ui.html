@@ -3552,16 +3552,26 @@ async function apiPost(url,body,{timeoutMs=30000}={}){
 }
 
 // ── Main refresh ──────────────────────────────────────────────────────────
-let _lastLiveLitePaintTs=0;
+let _lastLiveLitePaintTs=0,_liveLiteRetryAt=0,_liveLiteFailureCount=0;
 async function refresh(force=false){
   if((S.paused&&!force)||S.refreshing)return;
+  if(!force&&Date.now()<_liveLiteRetryAt)return;
   S.refreshing=true;
   let d,t0=performance.now();
   try{
     const qs=S.curInstance?`?instance=${S.curInstance}`:'';
     d=await apiFetch(`/api/live_lite${qs}`,{timeoutMs:5000});
   }finally{S.refreshing=false;}
-  if(!d||d.warming_up)return;
+  if(!d){
+    _liveLiteFailureCount=Math.min(4,_liveLiteFailureCount+1);
+    _liveLiteRetryAt=Date.now()+Math.min(5000,500*2**_liveLiteFailureCount);
+    S.fetchMs=Math.round(performance.now()-t0);
+    S.lastLoopAt=Date.now();
+    updateSpeedPanel();
+    return;
+  }
+  if(d.warming_up)return;
+  _liveLiteFailureCount=0;_liveLiteRetryAt=0;
   const paint0=performance.now();
   S.fetchMs=Math.round(performance.now()-t0);
   S.lastLoopAt=Date.now();
