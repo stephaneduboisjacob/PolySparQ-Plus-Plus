@@ -4159,7 +4159,7 @@ function renderPersistenceQueue(payload){
   tickPersistenceQueue();
 }
 function tickPersistenceQueue(){
-  const host=$('persistQueueGrid');if(!host)return;
+  const host=$('persistQueueGrid');if(!host||S.curTab!=='overview'||document.hidden)return;
   const elapsed=_feedPulseReceivedAt?Math.max(0,(performance.now()-_feedPulseReceivedAt)/1000):0;
   let healthy=0,warning=0,critical=0,unknown=0,stopped=0;
   host.querySelectorAll('.pq-card').forEach(card=>{
@@ -4216,7 +4216,7 @@ function renderFeedPulse(payload){
   tickFeedPulse();
 }
 function tickFeedPulse(){
-  const host=$('feedPulseGrid');if(!host||!_feedPulsePayload)return;
+  const host=$('feedPulseGrid');if(!host||!_feedPulsePayload||S.curTab!=='overview'||document.hidden)return;
   const sourceAvailable=_feedPulsePayload.feed_available!==false;
   const elapsed=Math.max(0,(performance.now()-_feedPulseReceivedAt)/1000),counts={fresh:0,stale:0,unknown:0,clock_ahead:0};
   host.querySelectorAll('.fp-cell').forEach(cell=>{
