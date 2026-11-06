@@ -6659,6 +6659,8 @@ _wallet_mode_lock = threading.Lock()
 ADMIN_WALLET_CREDENTIALS_FILE = "./secrets/polymarket_admin_credentials.json"
 ADMIN_WALLET_PRIVATE_KEY_FILE = "./secrets/polymarket_admin_private_key.txt"
 _fleet_cache = [0.0, None]  # (built_monotonic, payload)
+_fleet_cache_lock = threading.Lock()
+_fleet_refreshing = False
 _pnl_cache   = [0.0, None]  # (built_monotonic, payload)
 _pnl_cache_lock = threading.Lock()
 _pnl_refreshing = False
@@ -8344,6 +8346,24 @@ def _instance_display_name(inst, names=None):
 
 
 def api_fleet_detail():
+    """Share one expensive fleet build across overlapping clients."""
+    global _fleet_refreshing
+    now = time.monotonic()
+    with _fleet_cache_lock:
+        cached = _fleet_cache[1]
+        if cached and now - _fleet_cache[0] < 3.0:
+            return cached
+        if _fleet_refreshing:
+            return cached or {"fleet": [], "available_configs": []}
+        _fleet_refreshing = True
+    try:
+        return _build_fleet_detail()
+    finally:
+        with _fleet_cache_lock:
+            _fleet_refreshing = False
+
+
+def _build_fleet_detail():
     """Everything the fleet tab needs in one call."""
     now = time.monotonic()
     if _fleet_cache[1] and now - _fleet_cache[0] < 3.0:
@@ -8356,6 +8376,32 @@ def api_fleet_detail():
         for row in _fleet_runtime_snapshot().get("fleet", [])
         if isinstance(row, dict) and isinstance(row.get("instance"), str)
     }
+    strategy_rows = q("""SELECT instance,strategy_id,llm_model,
+                                LEFT(reason,60) AS reason,created_at,
+                                strategies_total,seq
+                           FROM (
+                             SELECT instance,strategy_id,llm_model,reason,created_at,
+                                    COUNT(*) OVER (PARTITION BY instance) AS strategies_total,
+                                    ROW_NUMBER() OVER (
+                                      PARTITION BY instance
+                                      ORDER BY created_at DESC NULLS LAST,strategy_id DESC
+                                    ) AS seq
+                               FROM vp.strategies WHERE instance=ANY(%s)
+                           ) ranked
+                          WHERE seq<=12
+                          ORDER BY instance,seq""", (all_insts,)) if all_insts else []
+    strategy_by_instance = {}
+    for strategy_row in strategy_rows:
+        entry = strategy_by_instance.setdefault(strategy_row["instance"], {
+            "total": int(strategy_row.get("strategies_total") or 0),
+            "last": None, "recent": [],
+        })
+        if int(strategy_row.get("seq") or 0) == 1:
+            entry["last"] = strategy_row
+        entry["recent"].append({
+            "id": strategy_row["strategy_id"],
+            "reason": strategy_row.get("reason") or "",
+        })
     # Available configs: all .toml files that are NOT timestamped backups
     # (backups match polypulse-*-YYYYMMDD*.toml or *-YYYYMMDD_*.toml patterns)
     _backup_re = re.compile(r'-\d{8}')
@@ -8392,13 +8438,8 @@ def api_fleet_detail():
         if not os.path.isfile(config_path):
             continue
         sup_run = _supervisor_running(inst)
-        last = q("""SELECT s.strategy_id, s.llm_model, s.reason, s.created_at
-                    FROM vp.strategies s WHERE s.instance=%s
-                    ORDER BY s.created_at DESC LIMIT 1""", (inst,))
-        nstrat = q("SELECT COUNT(*) AS n FROM vp.strategies WHERE instance=%s", (inst,))
-        recent = q("""SELECT strategy_id, LEFT(reason,60) AS reason
-                      FROM vp.strategies WHERE instance=%s
-                      ORDER BY created_at DESC LIMIT 12""", (inst,))
+        strategy = strategy_by_instance.get(inst, {"total": 0, "last": None, "recent": []})
+        last = strategy["last"]
         out.append({
             "instance": inst,
             "name": _instance_display_name(inst, names),
@@ -8410,10 +8451,10 @@ def api_fleet_detail():
                 "running": sup_run,
                 "model": env.get(inst, {}).get("model"),
                 "extra": env.get(inst, {}).get("extra"),
-                "last_decision": last[0] if last else None,
-                "strategies_total": nstrat[0]["n"] if nstrat else 0,
+                "last_decision": last,
+                "strategies_total": strategy["total"],
             },
-            "recent_strategies": [{"id": r["strategy_id"], "reason": r.get("reason") or ""} for r in recent],
+            "recent_strategies": strategy["recent"],
             "wallet": _wallet_status_for(inst) or {},
             "runtime": runtime,
         })
