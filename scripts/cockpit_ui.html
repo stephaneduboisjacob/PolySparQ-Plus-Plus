@@ -3620,7 +3620,7 @@ async function loadActivity(force=false){
     if(r.warming_up)return;
     _activityFailureCount=0;_activityRetryAt=0;
     S.activity={...r,ts:Date.now()};
-    if(S.curTab==='logs')renderActivityStream(S.activity);
+    if(S.curTab==='logs')renderActivityStream(S.activity,true);
     S.data.orders=r.orders||S.data.orders;
     S.data.settles=r.settles||S.data.settles;
     S.data.orderstats=r.orderstats||S.data.orderstats;
@@ -3641,7 +3641,7 @@ async function loadActivity(force=false){
 }
 
 let _activityStreamSignature='';
-function renderActivityStream(activity){
+function renderActivityStream(activity,fresh=false){
   const host=$('activityStreamRows');if(!host)return;
   const snapshot=activity||{};
   const orders=Array.isArray(snapshot.orders?.orders)?snapshot.orders.orders:[];
@@ -3723,7 +3723,7 @@ function renderActivityStream(activity){
     }
   }
   const updated=$('activityStreamUpdated');
-  if(updated){
+  if(updated&&fresh){
     updated.classList.remove('stale');
     updated.textContent=snapshot.server_ts?`SNAPSHOT ${new Date(Number(snapshot.server_ts)).toLocaleTimeString()}`:'SNAPSHOT TIME UNAVAILABLE';
   }
