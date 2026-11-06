@@ -8267,7 +8267,8 @@ function capturePredictionPulse(board,now=Date.now()){
     if(last&&quoteTs<=last.ts+150)continue;
     points.push({ts:quoteTs,up:midpoint,bid:bidRaw,ask:askRaw,
       bidDepth:depthValue(card.polymarket_up_bid_depth),askDepth:depthValue(card.polymarket_up_ask_depth)});
-    while(points.length&&points[0].ts<now-120000)points.shift();
+    let expired=0;while(expired<points.length&&points[expired].ts<now-120000)expired++;
+    if(expired)points.splice(0,expired);
     if(points.length>120)points.splice(0,points.length-120);
     trail.windowClose=close;captured++;
   }
