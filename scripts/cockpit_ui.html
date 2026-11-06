@@ -2623,6 +2623,7 @@ function updatePredictionReferenceDisplays(prices=S.prices){
   });
   const status=$('predictionReferenceStreamStatus');
   if(status){const age=ageMs(S.lastSseAt);status.textContent=age==null?'COCKPIT SSE CONNECTING':`COCKPIT SSE ${age<1000?`${age}ms`:`${(age/1000).toFixed(1)}s`} AGO · ~500ms PUSH`;status.dataset.state=age==null||age>2500?'stale':'live';}
+  if(S.predictionReferencePaintTimer){clearTimeout(S.predictionReferencePaintTimer);S.predictionReferencePaintTimer=null;}
   renderPredictionReferenceChart();
   if(S.curTab==='manualpred'&&S.predictionBoard)void refreshPredictionReferenceWindow();
 }
