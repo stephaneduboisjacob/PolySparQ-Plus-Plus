@@ -5714,7 +5714,7 @@ function _marketExplorerBookMarkup(m,id){
   const status=entry.loading?'Fetching both outcomes in one CLOB request…':_marketExplorerBookStreamLabel(entry)|| (entry.error?entry.error:cached?`Cached snapshot · retry in about ${retryAfter||1}s`:entry.loadedAt?`Captured ${new Date(entry.loadedAt).toLocaleTimeString([],{hour:'numeric',minute:'2-digit',second:'2-digit'})}`:'Waiting for CLOB snapshot…');
   return `<section class="mkt-explorer-live-book" id="marketExplorerBook-${id}" aria-label="Live bid, ask, depth, and public trade snapshot"><header><div><b>POLYMARKET CLOB · LIVE BOOK</b><span data-market-book-status-id="${id}" role="status" aria-live="polite">${esc(status)}</span></div><div class="mkt-explorer-book-actions"><button type="button" onclick="refreshMarketExplorerBook('${id}')" ${entry.loading?'disabled':''}>↻ REFRESH</button><button type="button" aria-expanded="true" aria-controls="marketExplorerBook-${id}" onclick="toggleMarketExplorerBook('${id}')">HIDE</button></div></header><div class="mkt-explorer-book-outcomes">${rows}</div>${_marketExplorerLiveTapeMarkup(id)}<p>The public CLOB stream updates this market while its Watchlist is visible, or while this detail is open in Search. Top-level imbalance and microprice use best-level shares; the expandable ladder shows up to eight visible levels per side. Quotes and public prints are descriptive, may be incomplete, and do not inform orders.</p></section>`;
 }
-const _marketExplorerBookStream={targetId:'',socket:null,heartbeat:null,retryTimer:null,retryAt:0,attempt:0,generation:0,tokens:[],activeTargets:new Map(),liveTapeTargetId:'',liveTrades:[],liveTradeKeys:new Set()};
+const _marketExplorerBookStream={targetId:'',socket:null,heartbeat:null,retryTimer:null,retryAt:0,attempt:0,generation:0,tokens:[],activeTargets:new Map(),tokenToId:new Map(),liveTapeTargetId:'',liveTrades:[],liveTradeKeys:new Set()};
 function _marketExplorerLiveTapeRows(id){
   const stream=_marketExplorerBookStream;
   if(stream.liveTapeTargetId!==id)
@@ -5807,6 +5807,12 @@ function _marketExplorerDesiredBookStreamTargets(){
   }
   return desired;
 }
+function _marketExplorerSetActiveBookTargets(targets){
+  const stream=_marketExplorerBookStream,tokenToId=new Map();
+  stream.activeTargets=targets;
+  for(const[id,target]of targets)for(const token of target.tokens)tokenToId.set(String(token),id);
+  stream.tokenToId=tokenToId;
+}
 function _marketExplorerBookStreamTargetVisible(id){
   return _marketExplorerDesiredBookStreamTargets().has(id);
 }
@@ -5847,7 +5853,7 @@ function _marketExplorerStopBookStream(resetTarget=false){
   stream.generation++;
   if(stream.heartbeat){clearInterval(stream.heartbeat);stream.heartbeat=null;}
   if(stream.retryTimer){clearTimeout(stream.retryTimer);stream.retryTimer=null;}
-  stream.retryAt=0;stream.socket=null;stream.tokens=[];stream.activeTargets.clear();
+  stream.retryAt=0;stream.socket=null;stream.tokens=[];stream.activeTargets.clear();stream.tokenToId.clear();
   if(old&&old.readyState<2){try{old.close(1000,'market detail inactive');}catch{}}
   if(resetTarget&&previousId){
     const previous=_marketExplorerState.bookCache[previousId];
@@ -5970,6 +5976,7 @@ function _marketExplorerApplyBookStreamMessage(id,message){
   }else if(message.event_type==='price_change'&&Array.isArray(message.price_changes)){
     entry.streamLevels=entry.streamLevels||[null,null];
     entry.streamTimes=entry.streamTimes||[0,0];entry.payloads=entry.payloads||[null,null];
+    const changedIndices=new Set();
     for(const change of message.price_changes){
       const index=tokens.indexOf(String(change?.asset_id||'')),side=String(change?.side||'').toUpperCase();
       if(index<0||!['BUY','SELL'].includes(side)||!entry.streamLevels[index])continue;
@@ -5977,10 +5984,13 @@ function _marketExplorerApplyBookStreamMessage(id,message){
       if(!Number.isFinite(price)||price<=0||price>1||!Number.isFinite(size)||size<0||size>1e12)continue;
       const levels=entry.streamLevels[index][side==='BUY'?'bids':'asks'];
       if(size===0)levels.delete(price);else levels.set(price,size);
+      changedIndices.add(index);
+    }
+    for(const index of changedIndices){
       entry.streamTimes[index]=updatedAt;
       entry.payloads[index]=_marketExplorerSummarizeStreamBook(id,index,entry.streamLevels[index],timestamp);
-      changed=true;
     }
+    changed=changedIndices.size>0;
   }
   if(!changed)return;
   entry.streamStatus='live';entry.streamLastEventAt=updatedAt;entry.streamRetryAt=0;entry.error='';
@@ -5999,7 +6009,7 @@ function _marketExplorerConnectBookStream(generation){
     _marketExplorerStreamStatusForTargets();
     return;
   }
-  stream.activeTargets=desired;
+  _marketExplorerSetActiveBookTargets(desired);
   for(const id of desired.keys()){
     const entry=_marketExplorerEnsureWatchBookCache(id);entry.streamStatus='connecting';_marketExplorerStreamBookStatus(id);
   }
@@ -6009,7 +6019,7 @@ function _marketExplorerConnectBookStream(generation){
   stream.socket=socket;stream.tokens=tokens;_marketExplorerStreamStatusForTargets();
   socket.onopen=()=>{
     if(generation!==stream.generation||socket!==stream.socket){try{socket.close();}catch{}return;}
-    const current=_marketExplorerDesiredBookStreamTargets();stream.activeTargets=current;
+    const current=_marketExplorerDesiredBookStreamTargets();_marketExplorerSetActiveBookTargets(current);
     const currentTokens=[...new Set([...current.values()].flatMap(row=>row.tokens))];stream.tokens=currentTokens;
     if(!currentTokens.length){_marketExplorerStopBookStream(false);return;}
     try{socket.send(JSON.stringify({assets_ids:currentTokens,type:'market'}));}
@@ -6034,9 +6044,8 @@ function _marketExplorerConnectBookStream(generation){
     for(const message of Array.isArray(parsed)?parsed:[parsed]){
       const ids=new Set(),condition=String(message?.market||'').toLowerCase();
       if(stream.activeTargets.has(condition))ids.add(condition);
-      const tokenToId=new Map();for(const [id,target] of stream.activeTargets)for(const token of target.tokens)tokenToId.set(token,id);
-      const asset=tokenToId.get(String(message?.asset_id||''));if(asset)ids.add(asset);
-      for(const change of Array.isArray(message?.price_changes)?message.price_changes:[]){const changed=tokenToId.get(String(change?.asset_id||''));if(changed)ids.add(changed);}
+      const asset=stream.tokenToId.get(String(message?.asset_id||''));if(asset)ids.add(asset);
+      for(const change of Array.isArray(message?.price_changes)?message.price_changes:[]){const changed=stream.tokenToId.get(String(change?.asset_id||''));if(changed)ids.add(changed);}
       for(const id of ids)_marketExplorerApplyBookStreamMessage(id,message);
     }
   };
@@ -6045,7 +6054,7 @@ function _marketExplorerConnectBookStream(generation){
     if(generation!==stream.generation||socket!==stream.socket)return;
     if(stream.heartbeat){clearInterval(stream.heartbeat);stream.heartbeat=null;}
     stream.socket=null;
-    const current=_marketExplorerDesiredBookStreamTargets();stream.activeTargets=current;
+    const current=_marketExplorerDesiredBookStreamTargets();_marketExplorerSetActiveBookTargets(current);
     if(!current.size){for(const id of desired.keys()){const entry=_marketExplorerState.bookCache[id];if(entry){entry.streamStatus='paused';_marketExplorerStreamBookStatus(id);}}_marketExplorerStreamStatusForTargets();return;}
     stream.attempt=Math.min(stream.attempt+1,6);
     const delay=Math.min(30000,500*(2**(stream.attempt-1)));
@@ -6074,7 +6083,7 @@ function _marketExplorerSyncBookStream(){
   for(const id of stream.activeTargets.keys())if(!desired.has(id)){
     const entry=_marketExplorerState.bookCache[id];if(entry){entry.streamStatus='paused';_marketExplorerStreamBookStatus(id);}
   }
-  stream.activeTargets=desired;
+  _marketExplorerSetActiveBookTargets(desired);
   if(stream.socket?.readyState===1){
     try{
       if(removed.length)stream.socket.send(JSON.stringify({operation:'unsubscribe',assets_ids:removed}));
