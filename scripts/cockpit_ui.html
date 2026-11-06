@@ -2261,6 +2261,7 @@ const PREDICTION_REFERENCE_SOURCES=[
 ];
 const PREDICTION_REFERENCE_SERIES=[...PREDICTION_REFERENCE_SOURCES.map(source=>({key:source.key,label:source.key==='oracle'?'CHAINLINK':source.label})),{key:'poly_up',label:'POLY UP'},{key:'poly_down',label:'POLY DOWN'}];
 const PREDICTION_REFERENCE_POLY_LIMIT=12000,PREDICTION_REFERENCE_DIRECT_LIMIT=6000,PREDICTION_REFERENCE_TRIM_BATCH=512;
+const PREDICTION_REFERENCE_PAINT_INTERVAL_MS=100;
 function renderPredictionReferenceSeriesControls(){
   const target=$('predictionReferenceSeriesToggles');if(!target)return;
   const current=target.dataset.ready==='true';
@@ -2321,7 +2322,7 @@ function recordPredictionReferencePolyTick(side,value,sourceTimestamp){
   const state=S.predictionReferencePolySocket;if(state){state.lastQuoteAt=now;state.lastSourceTimestamp=sourceTs;state.status='live';}
   predictionReferencePolyStatus();
   if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset&&!S.predictionReferencePaintTimer){
-    S.predictionReferencePaintTimer=setTimeout(()=>{S.predictionReferencePaintTimer=null;if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();},50);
+    S.predictionReferencePaintTimer=setTimeout(()=>{S.predictionReferencePaintTimer=null;if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();},PREDICTION_REFERENCE_PAINT_INTERVAL_MS);
   }
 }
 function connectPredictionReferencePolySocket(data){
@@ -2604,7 +2605,7 @@ function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
   if(points.length>PREDICTION_REFERENCE_DIRECT_LIMIT+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-PREDICTION_REFERENCE_DIRECT_LIMIT);
   if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset){
     if(now-S.predictionReferenceDirectUiAt>100){S.predictionReferenceDirectUiAt=now;patchPredictionReferenceDirectQuotes(asset);}
-    if(!S.predictionReferencePaintTimer)S.predictionReferencePaintTimer=setTimeout(()=>{S.predictionReferencePaintTimer=null;if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();},70);
+    if(!S.predictionReferencePaintTimer)S.predictionReferencePaintTimer=setTimeout(()=>{S.predictionReferencePaintTimer=null;if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();},PREDICTION_REFERENCE_PAINT_INTERVAL_MS);
   }
 }
 function patchPredictionReferenceDirectQuotes(asset){
