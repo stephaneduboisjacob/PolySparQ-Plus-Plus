@@ -2511,14 +2511,31 @@ function predictionReferenceLivePrices(streamPrices=S.prices){
 }
 function predictionReferenceDirectStatus(){
   const state=S.predictionReferenceSockets,output=$('predictionReferenceDirectStatus');if(!output)return;
-  const labels=[['oracle','CL'],['coinbase','CB'],['binance','BN'],['kraken','KR'],['gemini','GM'],['okx','OKX']].map(([key,label])=>`${label} ${state?.states?.[key]==='live'?'LIVE':state?.states?.[key]==='connecting'?'CONNECTING':state?.states?.[key]==='unsupported'?'N/A':'FALLBACK'}`);
-  output.textContent=`DIRECT ${labels.join(' · ')}`;
-  output.dataset.state=state&&labels.filter(label=>!label.endsWith('N/A')).every(label=>label.endsWith('LIVE'))?'live':state?'partial':'stale';
+  const asset=state?.asset||S.predictionReferenceAsset||'BTC',now=Date.now(),ticks=S.predictionReferenceDirectPrices?.[asset]||{};
+  const shortLabels={oracle:'CL',coinbase:'CB',binance:'BN',kraken:'KR',gemini:'GM',okx:'OKX'};
+  const labels=PREDICTION_REFERENCE_SOURCES.map(source=>{
+    const key=source.key,connection=state?.states?.[key]||'connecting',tick=ticks[key],maxAgeMs=Number(source.maxAge||5)*1000;
+    const sourceAgeMs=tick?now-Number(tick.ts_ms):Infinity,receivedAgeMs=tick?now-Number(tick.received_at_ms):Infinity;
+    const fresh=Number.isFinite(sourceAgeMs)&&Number.isFinite(receivedAgeMs)&&sourceAgeMs>=-5000&&sourceAgeMs<=maxAgeMs&&receivedAgeMs>=0&&receivedAgeMs<=maxAgeMs;
+    let status='RETRY';
+    if(connection==='unsupported')status='N/A';
+    else if(fresh)status='LIVE';
+    else if(connection==='connecting')status='CONNECTING';
+    else if(connection==='connected')status=now-Number(state?.connectedAt?.[key]||now)<=maxAgeMs?'WAIT':'STALE';
+    else if(connection==='fallback'&&tick)status='STALE';
+    else if(connection==='live')status='STALE';
+    return`${shortLabels[key]||key.toUpperCase()} ${status}`;
+  });
+  const active=labels.filter(label=>!label.endsWith('N/A')).length,live=labels.filter(label=>label.endsWith('LIVE')).length;
+  const nextState=!state||!active||!live?'stale':live===active?'live':'partial',nextText=`DIRECT ${labels.join(' · ')}`;
+  if(output.textContent!==nextText)output.textContent=nextText;
+  if(output.dataset.state!==nextState)output.dataset.state=nextState;
 }
 function stopPredictionReferenceSockets(){
   const state=S.predictionReferenceSockets;
   if(state){
     state.closed=true;
+    clearInterval(state.statusTimer);
     Object.values(state.retryTimers||{}).forEach(timer=>clearTimeout(timer));
     Object.values(state.heartbeats||{}).forEach(timer=>clearInterval(timer));
     Object.values(state.sockets||{}).forEach(socket=>{try{socket?.close(1000,'prediction tab inactive');}catch(e){}});
@@ -2533,7 +2550,8 @@ function startPredictionReferenceSockets(){
   if(previous&&!previous.closed&&previous.asset===asset)return;
   stopPredictionReferenceSockets();
   const sourceKeys=['oracle','coinbase','binance','kraken','gemini','okx'];
-  const state=S.predictionReferenceSockets={asset,closed:false,sockets:{},states:Object.fromEntries(sourceKeys.map(key=>[key,'connecting'])),attempts:Object.fromEntries(sourceKeys.map(key=>[key,0])),retryTimers:{},heartbeats:{}};
+  const state=S.predictionReferenceSockets={asset,closed:false,sockets:{},states:Object.fromEntries(sourceKeys.map(key=>[key,'connecting'])),attempts:Object.fromEntries(sourceKeys.map(key=>[key,0])),retryTimers:{},heartbeats:{},connectedAt:{}};
+  state.statusTimer=setInterval(()=>{if(!state.closed&&S.predictionReferenceSockets===state)predictionReferenceDirectStatus();},1000);
   predictionReferenceDirectStatus();
   const symbols={BTC:{kraken:'BTC/USD',okx:'BTC-USDT',binance:'btcusdt',gemini:'btcusd'},ETH:{kraken:'ETH/USD',okx:'ETH-USDT',binance:'ethusdt',gemini:'ethusd'},SOL:{kraken:'SOL/USD',okx:'SOL-USDT',binance:'solusdt',gemini:'solusd'},XRP:{kraken:'XRP/USD',okx:'XRP-USDT',binance:'xrpusdt',gemini:'xrpusd'}}[asset];
   const specs={
@@ -2551,7 +2569,7 @@ function startPredictionReferenceSockets(){
     state.states[source]='connecting';predictionReferenceDirectStatus();
     let socket;
     try{socket=new WebSocket(spec.url);state.sockets[source]=socket;}catch(error){schedule(source);return;}
-    socket.onopen=()=>{if(state.closed)return;state.attempts[source]=0;state.states[source]='live';try{spec.connect(socket);}catch(error){socket.close();}predictionReferenceDirectStatus();};
+    socket.onopen=()=>{if(state.closed)return;state.attempts[source]=0;state.connectedAt[source]=Date.now();state.states[source]='connected';try{spec.connect(socket);}catch(error){socket.close();}predictionReferenceDirectStatus();};
     socket.onmessage=event=>{if(state.closed||typeof event.data!=='string')return;try{
       const message=JSON.parse(event.data);
       if(source==='oracle'){
@@ -2585,7 +2603,7 @@ function startPredictionReferenceSockets(){
       }
     }catch(error){}}
     socket.onerror=()=>{state.states[source]='fallback';predictionReferenceDirectStatus();};
-    socket.onclose=()=>{clearInterval(state.heartbeats[source]);state.heartbeats[source]=null;if(state.closed||S.predictionReferenceSockets!==state)return;state.sockets[source]=null;state.states[source]='fallback';predictionReferenceDirectStatus();schedule(source);};
+    socket.onclose=()=>{clearInterval(state.heartbeats[source]);state.heartbeats[source]=null;if(state.closed||S.predictionReferenceSockets!==state)return;state.sockets[source]=null;state.connectedAt[source]=0;state.states[source]='fallback';predictionReferenceDirectStatus();schedule(source);};
   };
   const schedule=source=>{
     if(state.closed||S.predictionReferenceSockets!==state||state.retryTimers[source])return;
@@ -2596,6 +2614,7 @@ function startPredictionReferenceSockets(){
 }
 function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
   const ts=Number(timestamp),now=Date.now();if(!Number.isFinite(ts)||ts<=0||now-ts>15000||ts-now>5000)return;
+  const socketState=S.predictionReferenceSockets;if(socketState&&!socketState.closed&&socketState.asset===asset&&socketState.states[source]!=='unsupported')socketState.states[source]='live';
   const direct=S.predictionReferenceDirectPrices[asset]||(S.predictionReferenceDirectPrices[asset]={}),previous=direct[source];
   if(previous&&ts<previous.ts_ms)return;
   direct[source]={value,ts_ms:ts,received_at_ms:now};
@@ -2607,6 +2626,7 @@ function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
     if(now-S.predictionReferenceDirectUiAt>100){S.predictionReferenceDirectUiAt=now;patchPredictionReferenceDirectQuotes(asset);}
     if(!S.predictionReferencePaintTimer)S.predictionReferencePaintTimer=setTimeout(()=>{S.predictionReferencePaintTimer=null;if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();},PREDICTION_REFERENCE_PAINT_INTERVAL_MS);
   }
+  predictionReferenceDirectStatus();
 }
 function patchPredictionReferenceDirectQuotes(asset){
   const quote=predictionReferenceLivePrices()[asset]||{},oracle=quote.oracle;
@@ -2623,6 +2643,7 @@ function patchPredictionReferenceDirectQuotes(asset){
 }
 function updatePredictionReferenceDisplays(prices=S.prices){
   startPredictionReferenceSockets();
+  predictionReferenceDirectStatus();
   const livePrices=predictionReferenceLivePrices(prices);
   const topQuotes=$('predictionReferenceQuotes');
   if(topQuotes&&!topQuotes.querySelector('.pred-reference-quotes'))topQuotes.innerHTML=predictionReferenceQuoteHtml(S.predictionReferenceAsset||'BTC');
