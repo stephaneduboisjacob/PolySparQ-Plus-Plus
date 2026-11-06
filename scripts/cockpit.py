@@ -7762,7 +7762,7 @@ def api_execution_maker_pressure(instance=None, mode=None):
                     SELECT order_id, COUNT(*) AS resting_intervals,
                            BOOL_OR(event_count > 12) AS event_history_truncated
                     FROM quote_segments GROUP BY order_id
-                ), pressure AS (
+                ), pressure AS MATERIALIZED (
                     SELECT qs.order_id,
                            SUM(p.at_limit_prints) AS at_limit_prints,
                            SUM(p.through_limit_prints) AS through_limit_prints,
