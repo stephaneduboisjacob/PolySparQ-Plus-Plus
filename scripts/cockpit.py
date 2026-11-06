@@ -10497,6 +10497,9 @@ def api_supervisor_model(inst, model):
 _stream_cache = [0.0, None]
 _stream_cache_lock = threading.Lock()
 _stream_cache_refreshing = False
+_STREAM_POSITION_MARKS_CACHE_TTL_S = 1.0
+_stream_position_marks_cache = [0.0, None, None]
+_stream_position_marks_lock = threading.Lock()
 
 
 def build_stream_payload():
@@ -10591,29 +10594,44 @@ def _build_stream_payload():
                          ORDER BY f.ts DESC LIMIT 10""", (mode, since))
         except Exception:
             pass
-    # Live position marks (cid/side/mark/pnl) so the Positions tab moves at the
-    # stream cadence instead of waiting on the 1s full refresh. Reuses the exact
-    # book→synthetic→last_fill logic in reconstructed_positions (single source of
-    # truth) so SSE patches never disagree with the next full render.
-    pos_marks = []
+    # Position marks use the same book/synthetic valuation as the full view and
+    # rebuild once per second. Source prices and recent fills keep the 500ms SSE
+    # cadence, without replaying every position ledger on every heartbeat.
+    pos_marks = _stream_position_marks(mode, since)
+    payload = {"prices": prices, "recent_fills": fills,
+               "positions_marks": pos_marks, "ts": int(time.time() * 1000)}
+    return payload
+
+
+def _stream_position_marks(mode, since):
+    """Reuse position reconstruction while the faster price stream keeps moving."""
+    cache_key = (str(mode or "paper").lower(), since)
+    now = time.monotonic()
+    with _stream_position_marks_lock:
+        sampled, cached_key, cached_marks = _stream_position_marks_cache
+        if (cached_marks is not None and cached_key == cache_key
+                and now - sampled < _STREAM_POSITION_MARKS_CACHE_TTL_S):
+            return [dict(mark) for mark in cached_marks]
+
+    marks = []
     try:
         for p in (reconstructed_positions(mode, since).get("positions") or []):
-            pos_marks.append({
-                "cid":         p.get("cid"),
-                "side":        p.get("side"),
-                "instance":    p.get("instance"),
-                "mark":        p.get("mark"),
-                "avg":         p.get("avg"),
-                "pnl_usd":     p.get("pnl_usd"),
-                "pnl_pct":     p.get("pnl_pct"),
+            marks.append({
+                "cid": p.get("cid"),
+                "side": p.get("side"),
+                "instance": p.get("instance"),
+                "mark": p.get("mark"),
+                "avg": p.get("avg"),
+                "pnl_usd": p.get("pnl_usd"),
+                "pnl_pct": p.get("pnl_pct"),
                 "mark_source": p.get("mark_source"),
                 "awaiting_settlement": p.get("awaiting_settlement"),
             })
     except Exception:
         pass
-    payload = {"prices": prices, "recent_fills": fills,
-               "positions_marks": pos_marks, "ts": int(time.time() * 1000)}
-    return payload
+    with _stream_position_marks_lock:
+        _stream_position_marks_cache[:] = [time.monotonic(), cache_key, marks]
+    return [dict(mark) for mark in marks]
 
 
 # ── PolyTron Chat ──────────────────────────────────────────────────────────────
