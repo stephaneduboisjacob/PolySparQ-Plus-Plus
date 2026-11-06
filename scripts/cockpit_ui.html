@@ -10477,8 +10477,19 @@ setInterval(()=>{if(!document.hidden&&!S.paused&&S.curTab==='execution')loadExec
 // ── PolyTron Chat ──────────────────────────────────────────────────────────
 // Per-bot: PT.hists keyed by instance ('cb', 'scalp', '' = all)
 const PT={hists:{},knobs:{},instance:'',open:false,busy:false};
+const PT_MAX_HISTORY_MESSAGES=40,PT_MAX_RENDERED_NODES=80;
 
 function _ptHist(){return PT.hists[PT.instance]||(PT.hists[PT.instance]=[]);}
+function _ptRemember(role,content){
+  const history=_ptHist();history.push({role,content});
+  if(history.length>PT_MAX_HISTORY_MESSAGES){
+    history.splice(0,history.length-PT_MAX_HISTORY_MESSAGES);
+    while(history.length&&history[0].role!=='user')history.shift();
+  }
+}
+function _ptTrimRendered(box=$('ptMsgs')){
+  while(box&&box.children.length>PT_MAX_RENDERED_NODES)box.firstElementChild?.remove();
+}
 function _ptGreeting(inst){
   const lbl=inst?inst.toUpperCase():'ALL BOTS';
   return `Hey! I'm **PolyTron** — your AI trading advisor for **${lbl}**. I've got a live view of positions, P&L, and every config knob.\n\nAsk me why the bot did something, what a setting does, or just roast my trade decisions. 🤖`;
@@ -10497,6 +10508,7 @@ function ptOpen(inst){
       if(m.role==='assistant'){_ptRenderAssistant(m.content);}
       else{_ptRenderBubble('user',m.content);}
     }
+    _ptTrimRendered(box);
     if(h.length===0){ptAddMsg('bot',_ptGreeting(PT.instance));}
   }
   PT.open=true;
@@ -10531,6 +10543,7 @@ function _ptRenderBubble(role,content){
   b.innerHTML=ptMd(content);
   wrap.appendChild(b);
   box.appendChild(wrap);
+  _ptTrimRendered(box);
   box.scrollTop=box.scrollHeight;
 }
 
@@ -10595,12 +10608,13 @@ function _ptRenderApplyCard(updates){
   };
   noBtn.onclick=()=>card.remove();
   box.appendChild(card);
+  _ptTrimRendered(box);
   box.scrollTop=box.scrollHeight;
 }
 
 function ptAddMsg(role,content){
   if(role!=='_think'){
-    _ptHist().push({role:role==='bot'?'assistant':'user',content});
+    _ptRemember(role==='bot'?'assistant':'user',content);
   }
   const box=$('ptMsgs');
   const wrap=document.createElement('div');
@@ -10615,6 +10629,7 @@ function ptAddMsg(role,content){
     wrap.appendChild(b);
   }
   box.appendChild(wrap);
+  _ptTrimRendered(box);
   box.scrollTop=box.scrollHeight;
 }
 
@@ -10643,7 +10658,7 @@ async function ptSend(){
       headers:{'Content-Type':'application/json',..._demoHeaders()},
       body:JSON.stringify({
         instance:PT.instance,
-        messages:hist.filter(m=>m.role!=='assistant'||hist.indexOf(m)>hist.length-12)
+        messages:hist.filter((m,index)=>m.role!=='assistant'||index>hist.length-12)
       }),
     });
     const d=await r.json();
@@ -10653,7 +10668,7 @@ async function ptSend(){
     if(d.reply){
       // Keep the full reply (prose + any apply block) in history so it matches
       // the server-side session; render strips the block into an Apply card.
-      _ptHist().push({role:'assistant',content:d.reply});
+      _ptRemember('assistant',d.reply);
       _ptRenderAssistant(d.reply);
     }else{
       ptAddMsg('bot',`⚠ ${d.error||'Unknown error'}`);
