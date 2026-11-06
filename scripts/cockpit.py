@@ -1022,8 +1022,8 @@ def bot_status_detail():
         cached = _bot_status_cache[1]
         if cached is not None and now - _bot_status_cache[0] < 5.0:
             return cached
-        if _bot_status_refreshing:
-            return cached or {"running": False, "pid": None, "launcher": "refreshing"}
+        if _bot_status_refreshing and cached is not None:
+            return cached
         _bot_status_refreshing = True
     try:
         status = _bot_status_detail_uncached()
@@ -7116,13 +7116,8 @@ def api_execution(instance=None):
         hit = _execution_cache.get(key)
         if hit and now - hit[0] < 1.0:
             return hit[1]
-        if key in _execution_refreshing:
-            return hit[1] if hit else {
-                "mode": mode, "instance": instance or "", "policy": {},
-                "open_orders": [], "stats": [], "recent_rejections": [],
-                "maker_pressure": {"available": False, "quotes": []},
-                "server_ts": int(time.time() * 1000),
-            }
+        if key in _execution_refreshing and hit:
+            return hit[1]
         _execution_refreshing.add(key)
     try:
         result = _build_api_execution(instance, mode)
