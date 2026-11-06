@@ -3258,17 +3258,19 @@ function updateCbStrip(prices){
 function renderInstTabs(insts){
   const tabs=$('instTabs');
   const list=$('instMoreList')||tabs;
-  const existing=[...tabs.querySelectorAll('.inst-tab:not([data-inst=""])')].map(t=>t.dataset.inst);
+  const existing=new Set([...tabs.querySelectorAll('.inst-tab:not([data-inst=""])')].map(t=>t.dataset.inst));
+  const activeInstances=new Set(insts.map(x=>x.instance).filter(Boolean));
   insts.forEach(x=>{
     if(!x.instance)return;
     if(x.name)S.instNames[x.instance]=x.name;
-    if(!existing.includes(x.instance)){
+    if(!existing.has(x.instance)){
       const btn=document.createElement('button');
       btn.className='inst-tab';btn.dataset.inst=x.instance;
       const col=BOT_COLORS[x.instance]||'var(--text2)';
       btn.innerHTML=`<span class="tab-name" style="color:${col}" title="Bot instance">${esc(x.name||x.instance)}</span><span class="tab-pnl" id="tab-pnl-${x.instance}" style="color:${col}" title="Current/last session realized net after fees; unavailable if reconciliation or freshness checks fail"></span>`;
       btn.onclick=()=>selectInstance(x.instance);
       list.appendChild(btn);
+      existing.add(x.instance);
     }
     const pEl=$(`tab-pnl-${x.instance}`);
     if(pEl){
@@ -3281,7 +3283,7 @@ function renderInstTabs(insts){
   });
   // Remove tabs for stopped bots no longer in list
   [...tabs.querySelectorAll('.inst-tab:not([data-inst=""])')].forEach(t=>{
-    if(!insts.find(x=>x.instance===t.dataset.inst))t.remove();
+    if(!activeInstances.has(t.dataset.inst))t.remove();
   });
   const count=$('instMoreCount');if(count&&count.textContent!==String(insts.length))count.textContent=String(insts.length);
   const label=$('instMoreLabel');if(label){
@@ -3931,9 +3933,11 @@ function renderOperatorRadar(d,paint=true){
     .sort((a,b)=>(priority[a.level]??9)-(priority[b.level]??9)):[];
   host.dataset.radarAlertCount=complete?String(alerts.length):'';
   host.dataset.radarAlertLevel=complete?(alerts.some(a=>a.level==='critical')?'critical':alerts.some(a=>a.level==='warn')?'warn':alerts.length?'info':'clear'):'';
-  host.dataset.radarAlertsJson=complete?JSON.stringify(alerts):'[]';
+  const alertsJson=complete?JSON.stringify(alerts):'[]';
+  host._radarAlerts=alerts;
+  host.dataset.radarAlertsJson=alertsJson;
   host.dataset.radarStaleEmpty='false';
-  const renderKey=complete?JSON.stringify(alerts):'incomplete';
+  const renderKey=complete?alertsJson:'incomplete';
   if(!paint){updateOperatorRadarFreshness(now);return;}
   if(host.dataset.radarMarkupKey===renderKey){updateOperatorRadarFreshness(now);return;}
   host.dataset.radarMarkupKey=renderKey;
@@ -3979,14 +3983,14 @@ function updateMobileRadarIndicator(state,count=0,level='info'){
     `${n} operator alert${n===1?'':'s'}, ${severityLabel} ${level}, snapshot ${state}`;
   trigger.setAttribute('aria-label',`More cockpit sections; ${description}.`);
 }
-function updateMobileRadarDigest(state,alerts=[],ageSeconds=null){
+function updateMobileRadarDigest(state,alerts=[],ageSeconds=null,alertsJson=null){
   const panel=$('mobileRadarDigest'),title=$('mobileRadarDigestTitle'),message=$('mobileRadarDigestMessage'),ageLabel=$('mobileRadarDigestAge'),items=$('mobileRadarDigestItems');
   if(!panel||!title||!message||!ageLabel||!items)return;
   alerts=Array.isArray(alerts)?alerts.filter(a=>a&&typeof a==='object'):[];
   const age=Number.isFinite(ageSeconds)?Math.max(0,Math.floor(ageSeconds)):null;
   ageLabel.hidden=age===null||state==='unknown';
   ageLabel.textContent=ageLabel.hidden?'':`${state==='stale'?'SNAPSHOT STALE':'SNAPSHOT AGE'} · ${age}s`;
-  const key=state+':'+JSON.stringify(alerts);
+  const key=state+':'+(typeof alertsJson==='string'?alertsJson:JSON.stringify(alerts));
   if(panel.dataset.digestKey===key)return;
   panel.dataset.digestKey=key;
   panel.className=`mobile-radar-digest ${state}`;
@@ -4034,13 +4038,15 @@ function updateOperatorRadarFreshness(now=Date.now()){
     return;
   }
   const count=Number(host.dataset.radarAlertCount)||0,level=host.dataset.radarAlertLevel||'info';
-  let alerts=[];try{alerts=JSON.parse(host.dataset.radarAlertsJson||'[]');}catch{}
+  let alerts=host._radarAlerts;
+  if(!Array.isArray(alerts)){try{alerts=JSON.parse(host.dataset.radarAlertsJson||'[]');}catch{alerts=[];}host._radarAlerts=alerts;}
+  const alertsJson=host.dataset.radarAlertsJson||'[]';
   const ageMs=now-serverTs;
   if(ageMs>OPERATOR_RADAR_SNAPSHOT_STALE_MS){
     const ageLabel=`ALERT SNAPSHOT STALE · ${Math.floor(ageMs/1000)}s OLD`;
     if(badge.textContent!==ageLabel||!badge.classList.contains('stale')){badge.className='radar-freshness stale';badge.textContent=ageLabel;}
     updateMobileRadarIndicator('stale',count,level);
-    updateMobileRadarDigest('stale',alerts,ageMs/1000);
+    updateMobileRadarDigest('stale',alerts,ageMs/1000,alertsJson);
     if(host.dataset.radarAlertCount==='0'&&host.dataset.radarStaleEmpty!=='true'){
       host.innerHTML='<div class="radar-item warn"><div class="radar-level">UNKNOWN</div><div class="radar-main"><div class="radar-title">Last snapshot was clear</div><div class="radar-detail">That result is stale; the current operator alert state is unknown.</div></div><button class="radar-action" onclick="refresh(true)">RETRY</button></div>';
       host.dataset.radarStaleEmpty='true';
@@ -4051,7 +4057,7 @@ function updateOperatorRadarFreshness(now=Date.now()){
   const age=(Math.max(0,ageMs)/1000).toFixed(1),text=`ALERTS CURRENT · ${age}s`;
   if(badge.textContent!==text||!badge.classList.contains('current')){badge.className='radar-freshness current';badge.textContent=text;}
   updateMobileRadarIndicator('current',count,level);
-  updateMobileRadarDigest('current',alerts,Math.max(0,ageMs)/1000);
+  updateMobileRadarDigest('current',alerts,Math.max(0,ageMs)/1000,alertsJson);
 }
 
 const _cockpitRenderedHtml=new WeakMap();
