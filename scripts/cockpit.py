@@ -13055,7 +13055,7 @@ class Handler(BaseHTTPRequestHandler):
         return result
 
     def _api_pnl_by_instance_for_user(self):
-        result = api_pnl_by_instance()
+        result = api_pnl_by_instance(stale_while_refresh=True)
         if self._is_admin():
             return result
         own = self._user_instances()
