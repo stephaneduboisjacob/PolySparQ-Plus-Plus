@@ -2750,9 +2750,9 @@ async function refreshPredictionReferenceWindow(force=false,board=S.predictionBo
     if(S.predictionReferenceWindow?.key===key){updatePredictionReferenceWindowStatus();renderPredictionReferenceChart();}
   }
 }
-function predictionReferenceDecimate(points,limit=1400){
+function predictionReferenceDecimate(points,limit=1400,output=null){
   if(points.length<=limit)return points;
-  const bucketSize=Math.max(1,Math.ceil(points.length/(limit/4))),reduced=[];
+  const bucketSize=Math.max(1,Math.ceil(points.length/(limit/4))),reduced=output||[];reduced.length=0;
   for(let start=0;start<points.length;start+=bucketSize){
     const end=Math.min(points.length,start+bucketSize),first=points[start],last=points[end-1];
     if(end-start<=4){for(let index=start;index<end;index++)reduced.push(points[index]);continue;}
@@ -2774,11 +2774,21 @@ function predictionReferenceRangeBounds(points,start,end){
   };
   return[lowerBound(start,false),lowerBound(end,true)];
 }
-function predictionReferenceTimeRange(points,start,end){
-  const [from,to]=predictionReferenceRangeBounds(points,start,end);return points.slice(from,to);
+function predictionReferenceTimeRange(points,start,end,output=null){
+  const [from,to]=predictionReferenceRangeBounds(points,start,end);
+  if(!output)return points.slice(from,to);
+  output.length=0;for(let index=from;index<to;index++)output.push(points[index]);return output;
 }
 function predictionReferenceFirstInRange(points,start,end){
   const [from,to]=predictionReferenceRangeBounds(points,start,end);return from<to?points[from]:null;
+}
+const _predictionReferenceBuffersByAsset=Object.create(null),_predictionReferenceEmptyPoints=[];
+function predictionReferenceChartBuffers(asset){
+  let buffers=_predictionReferenceBuffersByAsset[asset];if(buffers)return buffers;
+  const raw=Object.create(null),decimated=Object.create(null),shares={up:[],down:[]};
+  for(const source of PREDICTION_REFERENCE_SOURCES){raw[source.key]=[];decimated[source.key]=[];}
+  for(const side of ['up','down'])decimated[`poly_${side}`]=[];
+  buffers={raw,decimated,shares};_predictionReferenceBuffersByAsset[asset]=buffers;return buffers;
 }
 let _predictionReferenceForecastHtml=null,_predictionReferenceStatsContext='',_predictionReferenceStatsPaintAt=0;
 function setPredictionReferenceChartStatsMessage(message){
@@ -2820,10 +2830,14 @@ function renderPredictionReferenceChart(){
   document.querySelectorAll('[data-ref-range]').forEach(button=>{const pressed=String(Number(button.dataset.refRange)===rangeMs);if(button.getAttribute('aria-pressed')!==pressed)button.setAttribute('aria-pressed',pressed);});
   if(windowEnd<start){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">This window has not opened yet. Live venue prices are shown above.</div>';setPredictionReferenceChartStatsMessage('Window has not opened yet.');return;}
   const sourceSeries=S.predictionReferenceSamples[asset]||{},openRef=S.predictionReferenceTimeline?.open_reference,closeRef=S.predictionReferenceTimeline?.close_reference;
-  const visible=S.predictionReferenceSeriesVisibility;
+  const visible=S.predictionReferenceSeriesVisibility,buffers=predictionReferenceChartBuffers(asset),rawBySource={};
   // Feed producers keep each series time-ordered; use binary range bounds so
   // zoomed views do not scan and re-sort every retained tick on every redraw.
-  const rawBySource=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,visible[source.key]!==false?predictionReferenceTimeRange(sourceSeries[source.key]||[],viewportStart,viewEnd):[]]));
+  // Reuse viewport buffers because the chart repaints frequently as quotes arrive.
+  for(const source of PREDICTION_REFERENCE_SOURCES){
+    const key=source.key,points=sourceSeries[key]||[];
+    rawBySource[key]=visible[key]!==false?predictionReferenceTimeRange(points,viewportStart,viewEnd,buffers.raw[key]):_predictionReferenceEmptyPoints;
+  }
   const explicitOpen=Number(openRef?.price),hasExplicitOpen=Number.isFinite(explicitOpen)&&explicitOpen>0;
   let firstSpot=null;
   if(!hasExplicitOpen){
@@ -2853,7 +2867,8 @@ function renderPredictionReferenceChart(){
     if(!hasMoves){low=high=closeMove;hasMoves=true;}
     else{low=Math.min(low,closeMove);high=Math.max(high,closeMove);}
   }
-  const visibleShares=Object.fromEntries(['up','down'].map(side=>[side,visible[`poly_${side}`]!==false?predictionReferenceTimeRange(sourceSeries[`poly_${side}`]||[],viewportStart,viewEnd):[]]));
+  const visibleShares={};
+  for(const side of ['up','down'])visibleShares[side]=visible[`poly_${side}`]!==false?predictionReferenceTimeRange(sourceSeries[`poly_${side}`]||[],viewportStart,viewEnd,buffers.shares[side]):_predictionReferenceEmptyPoints;
   const openingShares=Object.fromEntries(['up','down'].map(side=>[side,predictionReferenceFirstInRange(sourceSeries[`poly_${side}`]||[],start,windowEnd)]));
   const shareMode=S.predictionReferenceShareMode||'delta';
   const shareYValue=(value,side)=>shareMode==='delta'&&openingShares[side]?(Number(value)-Number(openingShares[side].value))*100:Number(value)*100;
@@ -2899,8 +2914,8 @@ function renderPredictionReferenceChart(){
     const ts=start+fraction*(close-start);if(ts<viewportStart||ts>viewEnd)return'';
     const xx=x(ts);return`<line class="pred-reference-stage" x1="${xx.toFixed(1)}" y1="${priceTop}" x2="${xx.toFixed(1)}" y2="${shareBottom}"/><text class="pred-reference-stage-label" x="${xx.toFixed(1)}" y="${priceTop-12}" text-anchor="${fraction===0?'start':fraction===1?'end':'middle'}">${label}</text>`;
   }).join('');
-  const linePath=(points,valueFn)=>{
-    const reduced=predictionReferenceDecimate(points),intervals=[],stride=Math.max(1,Math.ceil((reduced.length-1)/64));
+  const linePath=(points,valueFn,output)=>{
+    const reduced=predictionReferenceDecimate(points,1400,output),intervals=[],stride=Math.max(1,Math.ceil((reduced.length-1)/64));
     for(let index=stride;index<reduced.length;index+=stride){
       const previous=Math.max(0,index-stride),steps=index-previous,interval=(reduced[index].t-reduced[previous].t)/steps;
       if(interval>0)intervals.push(interval);
@@ -2915,11 +2930,11 @@ function renderPredictionReferenceChart(){
   const spotLines=PREDICTION_REFERENCE_SOURCES.map(source=>{
     if(visible[source.key]===false||!sourceMoveStats[source.key].count)return'';
     const allPoints=samplesBySource[source.key],points=sourceMoveStats[source.key].count===allPoints.length?allPoints:allPoints.filter(point=>Number.isFinite(point.move_pct));
-    const path=linePath(points,point=>yMove(point.move_pct)),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
+    const path=linePath(points,point=>yMove(point.move_pct),buffers.decimated[source.key]),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
     return path?`<path class="pred-reference-line ${source.key}" d="${path}" data-fresh="${fresh}"/>${last?`<circle class="pred-reference-dot ${source.key}" cx="${x(last.t).toFixed(1)}" cy="${yMove(last.move_pct).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
   }).join('');
   const shareLines=['up','down'].map(side=>{
-    const points=visibleShares[side],path=linePath(points,point=>yShare(point.value,side)),last=points.at(-1);
+    const points=visibleShares[side],path=linePath(points,point=>yShare(point.value,side),buffers.decimated[`poly_${side}`]),last=points.at(-1);
     return path?`<path class="pred-reference-share-line ${side}" d="${path}"/>${last?`<circle class="pred-reference-share-dot ${side}" cx="${x(last.t).toFixed(1)}" cy="${yShare(last.value,side).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
   }).join('');
   const shareOpenLines=['up','down'].map(side=>{
