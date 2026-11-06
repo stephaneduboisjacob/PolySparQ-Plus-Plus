@@ -2752,7 +2752,7 @@ function predictionReferenceDecimate(points,limit=1400){
   const bucketSize=Math.max(1,Math.ceil(points.length/(limit/4))),reduced=[];
   for(let start=0;start<points.length;start+=bucketSize){
     const end=Math.min(points.length,start+bucketSize),first=points[start],last=points[end-1];
-    if(end-start<=4){for(let index=start;index<end;index++){const point=points[index];if(reduced.at(-1)?.t!==point.t)reduced.push(point);}continue;}
+    if(end-start<=4){for(let index=start;index<end;index++)reduced.push(points[index]);continue;}
     let low=first,high=first;
     for(let index=start+1;index<end;index++){const point=points[index];if(point.value<low.value)low=point;if(point.value>high.value)high=point;}
     const middleFirst=low.t<=high.t?low:high,middleLast=low.t<=high.t?high:low;
