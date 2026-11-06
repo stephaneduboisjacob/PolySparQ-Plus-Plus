@@ -1256,7 +1256,8 @@ def scoped_fill_ledger(mode, since=None, instance=None, session_id=None):
     return result
 
 
-def reconstructed_positions(mode=None, since=None, instance=None, session_id=None):
+def reconstructed_positions(mode=None, since=None, instance=None, session_id=None,
+                            _include_ledger=False):
     mode = mode or current_mode(instance)
     if mode.lower() == 'paper' and since is None:
         since = accounting_since(instance, mode)

@@ -6815,6 +6815,7 @@ async function loadFleet(){
 }
 
 let _scalperDeskBusy=false;
+let _lastScalperDeskServerTs=0;
 function _sdUsd(v){const n=Number(v)||0;return`${n<0?'−':n>0?'+':''}$${Math.abs(n).toFixed(2)}`;}
 function _sdHorizon(v){return Number(v)===300?'5M':Number(v)===900?'15M':`${Math.round(Number(v)/60)}M`;}
 function _sdAge(ts){if(!ts)return'—';const d=new Date(ts);return Number.isNaN(d.getTime())?'—':d.toISOString().slice(11,19)+'Z';}
@@ -6945,7 +6946,15 @@ async function loadScalperDesk(force=false){
   _scalperDeskBusy=true;
   try{
     const r=await apiFetch('/api/window_bots');
-    if(r){renderScalperDesk(r);const t=r.server_ts?new Date(r.server_ts).toISOString().slice(11,19)+'Z':'—';$('scalperDeskUpdated').textContent=`UPDATED ${t} · AUTO ${Math.round((r.refresh_ms||1500)/1000*10)/10}s`;}
+    if(r){
+      const serverTs=Number(r.server_ts)||0;
+      if(force||!serverTs||serverTs!==_lastScalperDeskServerTs){
+        renderScalperDesk(r);
+        if(serverTs)_lastScalperDeskServerTs=serverTs;
+        const t=serverTs?new Date(serverTs).toISOString().slice(11,19)+'Z':'—';
+        $('scalperDeskUpdated').textContent=`UPDATED ${t} · AUTO ${Math.round((r.refresh_ms||1500)/1000*10)/10}s`;
+      }
+    }
   }finally{_scalperDeskBusy=false;}
 }
 
