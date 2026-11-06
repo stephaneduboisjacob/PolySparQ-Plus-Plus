@@ -6688,6 +6688,8 @@ _activity_tape_cache = {}
 _activity_cache_lock = threading.Lock()
 _activity_refreshing = set()
 _exit_performance_cache = {}
+_exit_performance_cache_lock = threading.Lock()
+_exit_performance_key_locks = tuple(threading.Lock() for _ in range(64))
 _execution_maker_pressure_cache = {}
 _execution_cache = {}
 _execution_cache_lock = threading.Lock()
@@ -6896,23 +6898,48 @@ def _build_api_live_lite(instance=None):
     return out
 
 
-def api_exit_performance(instance=None, hours=24):
-    """Cache matched exit-ledger P&L by bot, exit reason and execution route."""
-    mode = current_mode(instance)
-    cache_key = (instance or "", mode, int(hours))
-    now = time.monotonic()
-    hit = _exit_performance_cache.get(cache_key)
-    if hit and now - hit[0] < 30.0:
-        return hit[1]
+def api_exit_performance(instance=None, hours=24, mode=None):
+    """Cache matched exit-ledger P&L and coalesce overlapping rebuilds."""
+    mode = str(mode if mode is not None else current_mode(instance)).lower()
+    hours = int(hours)
+    cache_key = (instance or "", mode, hours)
+    with _exit_performance_cache_lock:
+        hit = _exit_performance_cache.get(cache_key)
+        if hit and time.monotonic() - hit[0] < 30.0:
+            return hit[1]
+    build_lock = _exit_performance_key_locks[hash(cache_key) % len(_exit_performance_key_locks)]
 
+    # The query walks and replays a bounded exit ledger. Multiple cockpit tabs
+    # can expire the same cache key together; serialize just that key and check
+    # the cache again after the other request finishes.
+    with build_lock:
+        with _exit_performance_cache_lock:
+            hit = _exit_performance_cache.get(cache_key)
+            if hit and time.monotonic() - hit[0] < 30.0:
+                return hit[1]
+            stale_result = hit[1] if hit else None
+        result = _build_api_exit_performance(instance, hours, mode)
+        if result.get("error") and stale_result is not None:
+            return stale_result
+        with _exit_performance_cache_lock:
+            if len(_exit_performance_cache) >= 128 and cache_key not in _exit_performance_cache:
+                oldest = min(_exit_performance_cache,
+                             key=lambda item: _exit_performance_cache[item][0])
+                _exit_performance_cache.pop(oldest, None)
+            _exit_performance_cache[cache_key] = (time.monotonic(), result)
+        return result
+
+
+def _build_api_exit_performance(instance, hours, mode):
     params = {
         "mode": mode,
-        "from_ms": str(int((time.time() - int(hours) * 3600) * 1000)),
+        "from_ms": str(int((time.time() - hours * 3600) * 1000)),
         "limit": "100",
     }
     groups = {}
     instance_groups = {}
     incomplete = 0
+    incomplete_by_instance = {}
     scanned = 0
     truncated = False
     try:
@@ -6922,6 +6949,10 @@ def api_exit_performance(instance=None, hours=24):
             for row in page.get("rows") or []:
                 if not row.get("accounting_complete") or row.get("realized_pnl") is None:
                     incomplete += 1
+                    incomplete_instance = str(row.get("instance") or "unknown")
+                    incomplete_by_instance[incomplete_instance] = (
+                        incomplete_by_instance.get(incomplete_instance, 0) + 1
+                    )
                     continue
                 source = str(row.get("source") or "unknown")
                 if source.lower() == "settle":
@@ -6973,8 +7004,8 @@ def api_exit_performance(instance=None, hours=24):
     except Exception:
         result = {"mode": mode, "hours": int(hours), "groups": [],
                   "incomplete": incomplete, "truncated": truncated,
+                  "incomplete_by_instance": incomplete_by_instance,
                   "error": "Exit ledger temporarily unavailable"}
-        _exit_performance_cache[cache_key] = (now, result)
         return result
 
     def finalize(agg):
@@ -7000,10 +7031,11 @@ def api_exit_performance(instance=None, hours=24):
     result = {"mode": mode, "hours": int(hours), "groups": summary,
               "by_instance": by_instance,
               "exits": sum(x["count"] for x in summary),
-              "incomplete": incomplete, "scanned": scanned,
+              "incomplete": incomplete,
+              "incomplete_by_instance": incomplete_by_instance,
+              "scanned": scanned,
               "truncated": truncated,
               "as_of": datetime.now(timezone.utc).isoformat()}
-    _exit_performance_cache[cache_key] = (now, result)
     return result
 
 
@@ -8648,13 +8680,30 @@ def _build_window_bot_desk(scope, cache_key):
     fleet_rows = {x["instance"]: x for x in api_fleet_detail().get("fleet", [])}
     names = sorted((_WINDOW_BOT_IDS & set(fleet_rows)) if scope is None
                    else (_WINDOW_BOT_IDS & set(fleet_rows) & set(scope)))
-    bots = []
+    bot_configs = {}
     for inst in names:
         path = _instance_config_file(inst)
         try:
             with open(path, "rb") as stream:
-                cfg = tomllib.load(stream)
+                bot_configs[inst] = tomllib.load(stream)
         except Exception:
+            continue
+
+    # Window profiles default to PAPER and their 24h exit review is common to
+    # every card. Build that ledger once for the mode, then select each bot's
+    # row. If the shared result reaches its scan cap, fall back to per-bot
+    # queries so a busy fleet never reports silently partial card totals.
+    shared_exit_review = {}
+    if any(str(cfg.get("runtime", {}).get("mode", "unknown")).lower() == "paper"
+           for cfg in bot_configs.values()):
+        paper_review = api_exit_performance(None, 24, mode="paper")
+        if not paper_review.get("error") and not paper_review.get("truncated"):
+            shared_exit_review["paper"] = paper_review
+
+    bots = []
+    for inst in names:
+        cfg = bot_configs.get(inst)
+        if cfg is None:
             continue
         hot = cfg.get("strategy", {}).get("hot", {})
         blocked_assets = {str(asset).upper() for asset in hot.get("blocked_assets", [])}
@@ -8668,7 +8717,9 @@ def _build_window_bot_desk(scope, cache_key):
         positions = reconstructed_positions(mode, since, inst)
         accounting = ledger_accounting(mode, positions, since, inst)
         execution = api_execution(inst)
-        exit_review = api_exit_performance(inst, 24)
+        exit_review = shared_exit_review.get(mode)
+        if exit_review is None:
+            exit_review = api_exit_performance(inst, 24, mode=mode)
         exit_total = next((x for x in (exit_review.get("by_instance") or [])
                            if x.get("instance") == inst), None)
         exit_24h = {
@@ -8683,7 +8734,7 @@ def _build_window_bot_desk(scope, cache_key):
                          if exit_total and exit_total.get("avg_loss") is not None else None),
             "breakeven_win_pct": (float(exit_total["breakeven_win_pct"])
                                   if exit_total and exit_total.get("breakeven_win_pct") is not None else None),
-            "incomplete": int(exit_review.get("incomplete") or 0),
+            "incomplete": int((exit_review.get("incomplete_by_instance") or {}).get(inst) or 0),
             "available": not bool(exit_review.get("error")),
         }
         recent = api_orders(12, inst, all_modes=True).get("orders", [])
