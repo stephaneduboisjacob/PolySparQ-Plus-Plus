@@ -3625,12 +3625,22 @@ async function loadActivity(force=false){
     if(S.curInstance)params.set('instance',S.curInstance);
     if(force)params.set('force','1');
     const qs=params.toString();
+    const requestStartedAt=performance.now();
     const r=await apiFetch(`/api/activity${qs?`?${qs}`:''}`);
     if(!r){noteActivityRequestFailure();return;}
     if(r.warming_up)return;
-    _activityFailureCount=0;_activityRetryAt=0;
+    const requestMs=performance.now()-requestStartedAt;
+    _activityFailureCount=0;
+    const slowCooldownMs=requestMs>=2500?Math.min(12000,Math.max(4000,Math.round(requestMs*2))):0;
+    _activityRetryAt=Date.now()+slowCooldownMs;
     S.activity={...r,ts:Date.now()};
-    if(S.curTab==='logs')renderActivityStream(S.activity,true);
+    if(S.curTab==='logs'){
+      renderActivityStream(S.activity,true);
+      if(slowCooldownMs){
+        const updated=$('activityStreamUpdated');
+        if(updated){updated.classList.add('slow');updated.textContent=`SLOW SNAPSHOT · ${(requestMs/1000).toFixed(1)}s · NEXT SYNC IN ≥${Math.ceil(slowCooldownMs/1000)}s`;}
+      }
+    }
     S.data.orders=r.orders||S.data.orders;
     S.data.settles=r.settles||S.data.settles;
     S.data.orderstats=r.orderstats||S.data.orderstats;
@@ -3734,7 +3744,7 @@ function renderActivityStream(activity,fresh=false){
   }
   const updated=$('activityStreamUpdated');
   if(updated&&fresh){
-    updated.classList.remove('stale');
+    updated.classList.remove('stale','slow');
     updated.textContent=snapshot.server_ts?`SNAPSHOT ${new Date(Number(snapshot.server_ts)).toLocaleTimeString()}`:'SNAPSHOT TIME UNAVAILABLE';
   }
   const summary=$('activityStreamSummary');
@@ -12004,7 +12014,7 @@ select{border-radius:0!important;background:#0a0a0a!important;color:var(--text)!
 .activity-stream-controls select,.activity-stream-controls input{width:100%;min-width:0;height:40px;padding:0 10px;border:1px solid var(--border);border-radius:7px;background:var(--bg1);color:var(--text);font:11px Inter,system-ui,sans-serif;letter-spacing:0}
 .activity-stream-controls input::placeholder{color:var(--text3)}.activity-stream-controls :focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
 .activity-stream-updated{display:flex;min-height:40px;align-items:center;justify-content:flex-end;color:var(--cyan);font:8px var(--mono);white-space:nowrap}
-.activity-stream-updated.stale{color:var(--gold)}
+.activity-stream-updated.stale,.activity-stream-updated.slow{color:var(--gold)}
 .activity-stream-summary{margin:10px 0 8px;color:var(--text3);font:8px var(--mono);letter-spacing:.5px}
 .activity-stream-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;min-width:0}
 .activity-stream-empty{grid-column:1/-1;padding:16px;border:1px dashed var(--border2);border-radius:8px;color:var(--text2);font-size:11px;line-height:1.5}
