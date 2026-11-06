@@ -2268,7 +2268,7 @@ def _settlement_row(candidate, exit_record):
     }
 
 
-def api_settlement_history(instance=None, params=None):
+def api_settlement_history(instance=None, params=None, instances=None):
     """Filterable, cursor-paginated exit history costed by the durable fill ledger."""
     from accounting import replay_fills
 
@@ -2287,6 +2287,14 @@ def api_settlement_history(instance=None, params=None):
         raise ValueError("Invalid result filter")
     search = str(params.get("search") or "").strip()[:100]
     source = str(params.get("source") or "")[:100]
+    allowed_instances = None
+    if instances is not None:
+        if isinstance(instances, str) or not isinstance(instances, (list, tuple, set)):
+            raise ValueError("Invalid bot scope")
+        allowed_instances = sorted({str(value) for value in instances})
+        if len(allowed_instances) > 128 or any(
+                not re.fullmatch(r"[\w-]+", value) for value in allowed_instances):
+            raise ValueError("Invalid bot scope")
     try:
         horizon = int(params.get("horizon") or 0)
     except (TypeError, ValueError, OverflowError):
@@ -2317,7 +2325,12 @@ def api_settlement_history(instance=None, params=None):
 
     filters = ["o.direction='sell'", "EXISTS (SELECT 1 FROM vp.fills f WHERE f.client_order_id=o.client_order_id)"]
     args = []
-    if instance:
+    if allowed_instances is not None:
+        if instance:
+            allowed_instances = [value for value in allowed_instances if value == instance]
+        filters.append("o.instance=ANY(%s::text[])")
+        args.append(allowed_instances)
+    elif instance:
         filters.append("o.instance=%s")
         args.append(instance)
     if mode:
@@ -2381,7 +2394,12 @@ def api_settlement_history(instance=None, params=None):
     # Bot/source choices are scoped to this request's authorized instance.
     option_filters = ["o.direction='sell'", "EXISTS (SELECT 1 FROM vp.fills f WHERE f.client_order_id=o.client_order_id)"]
     option_args = []
-    if instance:
+    if allowed_instances is not None:
+        if instance:
+            allowed_instances = [value for value in allowed_instances if value == instance]
+        option_filters.append("o.instance=ANY(%s::text[])")
+        option_args.append(allowed_instances)
+    elif instance:
         option_filters.append("o.instance=%s")
         option_args.append(instance)
     options = q(f"""SELECT DISTINCT o.instance, o.source
@@ -7058,11 +7076,13 @@ def _build_api_live_lite(instance=None):
     return out
 
 
-def api_exit_performance(instance=None, hours=24, mode=None):
+def api_exit_performance(instance=None, hours=24, mode=None, instances=None):
     """Cache matched exit-ledger P&L and coalesce overlapping rebuilds."""
     mode = str(mode if mode is not None else current_mode(instance)).lower()
     hours = int(hours)
-    cache_key = (instance or "", mode, hours)
+    scoped_instances = (tuple(sorted({str(value) for value in instances}))
+                        if instances is not None else None)
+    cache_key = (instance or "", mode, hours, scoped_instances)
     with _exit_performance_cache_lock:
         hit = _exit_performance_cache.get(cache_key)
         if hit and time.monotonic() - hit[0] < 30.0:
@@ -7078,7 +7098,7 @@ def api_exit_performance(instance=None, hours=24, mode=None):
             if hit and time.monotonic() - hit[0] < 30.0:
                 return hit[1]
             stale_result = hit[1] if hit else None
-        result = _build_api_exit_performance(instance, hours, mode)
+        result = _build_api_exit_performance(instance, hours, mode, scoped_instances)
         if result.get("error") and stale_result is not None:
             return stale_result
         with _exit_performance_cache_lock:
@@ -7090,7 +7110,7 @@ def api_exit_performance(instance=None, hours=24, mode=None):
         return result
 
 
-def _build_api_exit_performance(instance, hours, mode):
+def _build_api_exit_performance(instance, hours, mode, instances=None):
     params = {
         "mode": mode,
         "from_ms": str(int((time.time() - hours * 3600) * 1000)),
@@ -7104,7 +7124,7 @@ def _build_api_exit_performance(instance, hours, mode):
     truncated = False
     try:
         for _ in range(12):
-            page = api_settlement_history(instance, params)
+            page = api_settlement_history(instance, params, instances=instances)
             scanned += int(page.get("scanned") or 0)
             for row in page.get("rows") or []:
                 if not row.get("accounting_complete") or row.get("realized_pnl") is None:
@@ -9104,7 +9124,10 @@ def _build_window_bot_desk(scope, cache_key):
     shared_exit_review = {}
     if any(str(cfg.get("runtime", {}).get("mode", "unknown")).lower() == "paper"
            for cfg in bot_configs.values()):
-        paper_review = api_exit_performance(None, 24, mode="paper")
+        scoped_instances = tuple(sorted(bot_configs)) if scope is not None else None
+        paper_review = api_exit_performance(
+            None, 24, mode="paper", instances=scoped_instances
+        )
         if not paper_review.get("error") and not paper_review.get("truncated"):
             shared_exit_review["paper"] = paper_review
 
