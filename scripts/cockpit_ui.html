@@ -2240,12 +2240,13 @@ function updateSseIndicator(){
   const label={reconnecting:'RECONNECTING',connecting:'CONNECTING',live:'LIVE',delayed:'DELAYED',stale:'STALE'}[state];
   const ageText=age==null?'—':`${(Math.round(age/100)/10).toFixed(1)}s`;
   const detail=age==null?'No valid event received':`last valid event ${ageText} ago`;
-  health.dataset.state=state;
-  health.setAttribute('aria-label',`Cockpit event stream ${label.toLowerCase()}, ${detail}`);
-  health.title=`Cockpit event stream: ${label} · ${detail}`;
-  const status=$('streamStatusLabel');if(status)status.textContent=label;
-  const ageNode=$('streamStatusAge');if(ageNode)ageNode.textContent=ageText;
-  const dot=$('connDot');if(dot)dot.className=state;
+  const ariaLabel=`Cockpit event stream ${label.toLowerCase()}, ${detail}`,title=`Cockpit event stream: ${label} · ${detail}`;
+  if(health.dataset.state!==state)health.dataset.state=state;
+  if(health.getAttribute('aria-label')!==ariaLabel)health.setAttribute('aria-label',ariaLabel);
+  if(health.title!==title)health.title=title;
+  const status=$('streamStatusLabel');if(status&&status.textContent!==label)status.textContent=label;
+  const ageNode=$('streamStatusAge');if(ageNode&&ageNode.textContent!==ageText)ageNode.textContent=ageText;
+  const dot=$('connDot');if(dot&&dot.className!==state)dot.className=state;
 }
 const PREDICTION_REFERENCE_SOURCES=[
   {key:'oracle',label:'CHAINLINK',color:'#74e1b1',maxAge:5},
