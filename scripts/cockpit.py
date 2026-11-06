@@ -6854,6 +6854,7 @@ def api_live_lite(instance=None):
                 "status": {}, "positions": {"positions": []}, "markets": {"markets": []},
                 "health": {}, "tournament": {"instances": []}, "radar": [],
                 "instance": instance or "", "server_ts": int(time.time() * 1000),
+                "warming_up": True,
             }
         _live_lite_refreshing.add(key)
     try:
@@ -12381,6 +12382,8 @@ class Handler(BaseHTTPRequestHandler):
     def _api_live_lite_for_user(self, instance=None):
         """Add redacted queue counters without mutating the shared live-lite cache."""
         base = api_live_lite(instance)
+        if base.get("warming_up"):
+            return base
         if self._is_admin():
             allowed = {instance} if instance else None
         elif self._is_demo():

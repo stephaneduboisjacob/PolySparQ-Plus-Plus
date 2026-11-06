@@ -3521,7 +3521,7 @@ async function refresh(force=false){
     const qs=S.curInstance?`?instance=${S.curInstance}`:'';
     d=await apiFetch(`/api/live_lite${qs}`,{timeoutMs:5000});
   }finally{S.refreshing=false;}
-  if(!d)return;
+  if(!d||d.warming_up)return;
   const paint0=performance.now();
   S.fetchMs=Math.round(performance.now()-t0);
   S.lastLoopAt=Date.now();
