@@ -3589,10 +3589,25 @@ async function refresh(force=false){
   if(force)loadActivity(true);
 }
 
+let _activityRetryAt=0,_activityFailureCount=0;
+function noteActivityRequestFailure(){
+  _activityFailureCount=Math.min(5,_activityFailureCount+1);
+  const retrySeconds=Math.min(30,2**_activityFailureCount);
+  _activityRetryAt=Date.now()+retrySeconds*1000;
+  const updated=$('activityStreamUpdated');
+  if(updated&&S.curTab==='logs'){
+    const age=S.activity.ts?Math.floor((Date.now()-S.activity.ts)/1000):null;
+    updated.classList.add('stale');
+    updated.textContent=age==null
+      ?`UNAVAILABLE · RETRY IN ${retrySeconds}s`
+      :`STALE ${age}s · RETRY IN ${retrySeconds}s`;
+  }
+}
 async function loadActivity(force=false){
   if(!activitySnapshotWorkspace())return;
   if(S.activityRefreshing)return;
   const now=Date.now();
+  if(!force&&now<_activityRetryAt)return;
   if(!force&&S.activity.ts&&now-S.activity.ts<1800)return;
   S.activityRefreshing=true;
   try{
@@ -3601,7 +3616,9 @@ async function loadActivity(force=false){
     if(force)params.set('force','1');
     const qs=params.toString();
     const r=await apiFetch(`/api/activity${qs?`?${qs}`:''}`);
-    if(!r||r.warming_up)return;
+    if(!r){noteActivityRequestFailure();return;}
+    if(r.warming_up)return;
+    _activityFailureCount=0;_activityRetryAt=0;
     S.activity={...r,ts:Date.now()};
     if(S.curTab==='logs')renderActivityStream(S.activity);
     S.data.orders=r.orders||S.data.orders;
@@ -3706,7 +3723,10 @@ function renderActivityStream(activity){
     }
   }
   const updated=$('activityStreamUpdated');
-  if(updated)updated.textContent=snapshot.server_ts?`SNAPSHOT ${new Date(Number(snapshot.server_ts)).toLocaleTimeString()}`:'SNAPSHOT TIME UNAVAILABLE';
+  if(updated){
+    updated.classList.remove('stale');
+    updated.textContent=snapshot.server_ts?`SNAPSHOT ${new Date(Number(snapshot.server_ts)).toLocaleTimeString()}`:'SNAPSHOT TIME UNAVAILABLE';
+  }
   const summary=$('activityStreamSummary');
   const fillCount=snapshot.fill_events_available===false?'FILL EVENTS UNAVAILABLE':`${fills.length} LOADED FILLS`;
   if(summary)summary.textContent=`${filtered.length} MATCHING · ${mode==='all'?'ALL MODES':mode.toUpperCase()} · ${orders.length} ORDER STATES · ${fillCount} · ${exits.length} REALIZED EXITS · SHOWING ${Math.min(24,filtered.length)} OF ${filtered.length}`;
@@ -11974,6 +11994,7 @@ select{border-radius:0!important;background:#0a0a0a!important;color:var(--text)!
 .activity-stream-controls select,.activity-stream-controls input{width:100%;min-width:0;height:40px;padding:0 10px;border:1px solid var(--border);border-radius:7px;background:var(--bg1);color:var(--text);font:11px Inter,system-ui,sans-serif;letter-spacing:0}
 .activity-stream-controls input::placeholder{color:var(--text3)}.activity-stream-controls :focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
 .activity-stream-updated{display:flex;min-height:40px;align-items:center;justify-content:flex-end;color:var(--cyan);font:8px var(--mono);white-space:nowrap}
+.activity-stream-updated.stale{color:var(--gold)}
 .activity-stream-summary{margin:10px 0 8px;color:var(--text3);font:8px var(--mono);letter-spacing:.5px}
 .activity-stream-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;min-width:0}
 .activity-stream-empty{grid-column:1/-1;padding:16px;border:1px dashed var(--border2);border-radius:8px;color:var(--text2);font-size:11px;line-height:1.5}
