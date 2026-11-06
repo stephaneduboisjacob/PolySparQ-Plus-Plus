@@ -2991,8 +2991,9 @@ function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,
   const nearest=(points,time)=>{
     if(!points?.length)return null;
     let lo=0,hi=points.length;while(lo<hi){const mid=(lo+hi)>>1;if(points[mid].t<time)lo=mid+1;else hi=mid;}
-    const candidates=[points[lo-1],points[lo]].filter(Boolean).sort((a,b)=>Math.abs(a.t-time)-Math.abs(b.t-time));
-    const point=candidates[0];return point&&Math.abs(point.t-time)<=tolerance?point:null;
+    const before=lo>0?points[lo-1]:null,after=lo<points.length?points[lo]:null;
+    const point=!before?after:!after?before:Math.abs(before.t-time)<=Math.abs(after.t-time)?before:after;
+    return point&&Math.abs(point.t-time)<=tolerance?point:null;
   };
   const inspect=event=>{
     const local=localPoint(event);if(!local)return;
