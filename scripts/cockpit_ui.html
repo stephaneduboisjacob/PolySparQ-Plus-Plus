@@ -4054,6 +4054,31 @@ function updateOperatorRadarFreshness(now=Date.now()){
   updateMobileRadarDigest('current',alerts,Math.max(0,ageMs)/1000);
 }
 
+const _cockpitRenderedHtml=new WeakMap();
+function commitCockpitHtml(host,html){
+  if(!host||_cockpitRenderedHtml.get(host)===html)return;
+  host.innerHTML=html;_cockpitRenderedHtml.set(host,html);
+}
+function createPositionTriageRow(){
+  const row=document.createElement('div');row.className='triage-row';
+  row.innerHTML='<div class="triage-asset"></div><div class="triage-side"></div><div><div class="triage-bar"><div class="triage-fill"></div></div><div class="triage-time" style="font-size:9px;color:var(--text3);margin-top:3px"></div></div><div class="triage-pnl"></div>';
+  row._triageNodes={asset:row.querySelector('.triage-asset'),side:row.querySelector('.triage-side'),fill:row.querySelector('.triage-fill'),time:row.querySelector('.triage-time'),pnl:row.querySelector('.triage-pnl')};
+  row.onclick=()=>{const p=row._triagePosition;if(!p)return;openPosChart(p.cid||'',p.side||'UP',p.asset||'',p.instance||'',+(p.avg||0),+(p.target_price||1),p.question||'',+(p.shares||0),+(p.cost_basis||0));};
+  return row;
+}
+function updatePositionTriageRow(row,p){
+  row._triagePosition=p;
+  const side=p.side||'?',sideKey=(p.side||'UP').toLowerCase(),left=p.seconds_left==null?0:Math.max(0,p.seconds_left),pnl=p.pnl_usd;
+  const pct=p.horizon_seconds?Math.max(3,Math.min(100,left/p.horizon_seconds*100)):50;
+  const {asset:assetNode,side:sideNode,fill,time,pnl:pnlNode}=row._triageNodes;
+  const asset=p.asset||'?';if(assetNode.textContent!==asset)assetNode.textContent=asset;
+  const sideClass=`triage-side ${sideKey==='up'?'up':'down'}`;if(sideNode.className!==sideClass)sideNode.className=sideClass;if(sideNode.textContent!==side)sideNode.textContent=side;
+  const width=`${pct}%`,color=left<45?'var(--red)':left<120?'var(--gold)':'var(--cyan)';
+  if(fill.style.width!==width)fill.style.width=width;if(fill.style.background!==color)fill.style.background=color;
+  const timeText=p.awaiting_settlement?'settlement':fmtSecs(left);if(time.textContent!==timeText)time.textContent=timeText;
+  const pnlClassName=`triage-pnl ${pnlClass(pnl)}`;if(pnlNode.className!==pnlClassName)pnlNode.className=pnlClassName;
+  const pnlText=pnl!=null?`${pnlSign(pnl)}$${fmt(Math.abs(pnl))}`:'—';if(pnlNode.textContent!==pnlText)pnlNode.textContent=pnlText;
+}
 function renderPositionTriage(d){
   const host=$('positionTriage');if(!host)return;
   const pos=((d.positions||{}).positions||[]).slice().sort((a,b)=>{
@@ -4061,19 +4086,17 @@ function renderPositionTriage(d){
     const bs=b.awaiting_settlement?999999:(b.seconds_left??999999);
     return as-bs;
   }).slice(0,6);
-  if(!pos.length){host.innerHTML='<div class="empty-state" style="padding:18px"><div>No open positions</div></div>';return;}
-  host.innerHTML=pos.map(p=>{
-    const side=(p.side||'UP').toLowerCase();
-    const left=p.seconds_left==null?0:Math.max(0,p.seconds_left);
-    const pct=p.horizon_seconds?Math.max(3,Math.min(100,left/p.horizon_seconds*100)):50;
-    const pnl=p.pnl_usd;
-    return`<div class="triage-row" onclick="openPosChart(${jsStr(p.cid||'')},${jsStr(p.side||'UP')},${jsStr(p.asset||'')},${jsStr(p.instance||'')},${+(p.avg||0)},${+(p.target_price||1)},${jsStr(p.question||'')},${+(p.shares||0)},${+(p.cost_basis||0)})">
-      <div class="triage-asset">${esc(p.asset||'?')}</div>
-      <div class="triage-side ${side==='up'?'up':'down'}">${esc(p.side||'?')}</div>
-      <div><div class="triage-bar"><div class="triage-fill" style="width:${pct}%;background:${left<45?'var(--red)':left<120?'var(--gold)':'var(--cyan)'}"></div></div><div style="font-size:9px;color:var(--text3);margin-top:3px">${p.awaiting_settlement?'settlement':fmtSecs(left)}</div></div>
-      <div class="triage-pnl ${pnlClass(pnl)}">${pnl!=null?`${pnlSign(pnl)}$${fmt(Math.abs(pnl))}`:'—'}</div>
-    </div>`;
-  }).join('');
+  if(!pos.length){commitCockpitHtml(host,'<div class="empty-state" style="padding:18px"><div>No open positions</div></div>');return;}
+  if(_cockpitRenderedHtml.has(host)){_cockpitRenderedHtml.delete(host);}
+  const rows=new Map(Array.from(host.querySelectorAll('.triage-row'),row=>[row.dataset.triageKey,row]));
+  for(const child of Array.from(host.children))if(!child.classList.contains('triage-row'))child.remove();
+  pos.forEach((p,index)=>{
+    const key=String(p.cid||`${p.instance||''}|${p.asset||''}|${p.side||''}|${p.question||''}|${index}`);
+    let row=rows.get(key);if(row)rows.delete(key);else{row=createPositionTriageRow();row.dataset.triageKey=key;}
+    updatePositionTriageRow(row,p);
+    const current=host.children[index];if(current!==row)host.insertBefore(row,current||null);
+  });
+  rows.forEach(row=>row.remove());
 }
 
 function updateStrategyFeedFreshness(now=Date.now()){
@@ -4414,7 +4437,7 @@ function renderEquityGrid(st){
   const eq=st.equity_usd,pnl=st.net_pnl,real=st.realized_pnl,unreal=st.unrealized_pnl;
   const pnlText=v=>v==null?'—':`${pnlSign(v)}$${fmt(Math.abs(v))}`;
   const pnlTone=v=>v==null?'neutral':pnlClass(v);
-  $('equityGrid').innerHTML=`
+  commitCockpitHtml($('equityGrid'),`
     <div class="stat-box"><div class="stat-label">EQUITY</div><div class="stat-val neutral">$${fmt(eq)}</div><div class="stat-sub">${st.accounting_source||''}</div></div>
     <div class="stat-box"><div class="stat-label">NET P&L</div><div class="stat-val ${pnlTone(pnl)}">${pnlText(pnl)}</div><div class="stat-sub">${pnl==null?esc(st.net_pnl_quality||'reconciliation unavailable'):'session · after fees'}</div></div>
     <div class="stat-box"><div class="stat-label">REALIZED</div><div class="stat-val ${pnlTone(real)}">${pnlText(real)}</div><div class="stat-sub">${real==null?'ledger incomplete':'settled · after fees'}</div></div>
@@ -4422,24 +4445,24 @@ function renderEquityGrid(st){
     <div class="stat-box"><div class="stat-label">DEPLOYED</div><div class="stat-val neutral">$${fmt(st.deployed_usd)}</div><div class="stat-sub">in positions</div></div>
     <div class="stat-box"><div class="stat-label">WIN RATE</div><div class="stat-val ${(st.win_pct||0)>=50?'pos':'neg'}">${st.win_pct!=null?fmt(st.win_pct,1)+'%':'—'}</div><div class="stat-sub">${st.wins||0}W ${st.losses||0}L</div></div>
     <div class="stat-box"><div class="stat-label">FEES</div><div class="stat-val neg">$${fmt(st.fees_usd)}</div><div class="stat-sub">total burn</div></div>
-    <div class="stat-box"><div class="stat-label">OPEN POS</div><div class="stat-val neutral">${st.open_positions||0}</div><div class="stat-sub">positions</div></div>`;
+    <div class="stat-box"><div class="stat-label">OPEN POS</div><div class="stat-val neutral">${st.open_positions||0}</div><div class="stat-sub">positions</div></div>`);
 }
 
 function renderSourcePnl(d){
   const srcs=(d.source_pnl||{sources:[]}).sources||[];
-  if(!srcs.length){$('sourcePnl').innerHTML='<div class="empty-state" style="padding:16px"><div>No source P&L yet</div></div>';return;}
+  if(!srcs.length){commitCockpitHtml($('sourcePnl'),'<div class="empty-state" style="padding:16px"><div>No source P&L yet</div></div>');return;}
   const maxAbs=Math.max(1,...srcs.map(s=>Math.abs(s.net)));
-  $('sourcePnl').innerHTML=srcs.map(s=>`<div class="src-row"><div class="src-name">${esc(s.source)}</div><div class="src-bar-wrap"><div class="src-bar" style="width:${Math.abs(s.net)/maxAbs*100}%;background:${s.net>=0?'var(--green)':'var(--red)'}"></div></div><div class="src-val ${s.net>=0?'pos':'neg'}">${pnlSign(s.net)}$${fmt(Math.abs(s.net))}</div></div>`).join('');
+  commitCockpitHtml($('sourcePnl'),srcs.map(s=>`<div class="src-row"><div class="src-name">${esc(s.source)}</div><div class="src-bar-wrap"><div class="src-bar" style="width:${Math.abs(s.net)/maxAbs*100}%;background:${s.net>=0?'var(--green)':'var(--red)'}"></div></div><div class="src-val ${s.net>=0?'pos':'neg'}">${pnlSign(s.net)}$${fmt(Math.abs(s.net))}</div></div>`).join(''));
 }
 
 function renderExitPerformance(r){
   const host=$('exitPerformance');if(!host)return;
-  if(!r){host.innerHTML='<div class="empty-state" style="padding:16px"><div>Waiting for exit ledger…</div></div>';return;}
-  if(r.error){host.innerHTML=`<div class="empty-state" style="padding:16px"><div>${esc(r.error)}</div></div>`;return;}
+  if(!r){commitCockpitHtml(host,'<div class="empty-state" style="padding:16px"><div>Waiting for exit ledger…</div></div>');return;}
+  if(r.error){commitCockpitHtml(host,`<div class="empty-state" style="padding:16px"><div>${esc(r.error)}</div></div>`);return;}
   const groups=r.groups||[];
   const total=groups.reduce((n,x)=>n+(Number(x.count)||0),0);
   const head=`<div class="exit-summary">LAST ${Number(r.hours)||24}H · ${total} MATCHED EXITS${r.truncated?' · PARTIAL':''}</div>`;
-  if(!groups.length){host.innerHTML=head+'<div class="empty-state" style="padding:14px">No completed exits in this window.</div>';return;}
+  if(!groups.length){commitCockpitHtml(host,head+'<div class="empty-state" style="padding:14px">No completed exits in this window.</div>');return;}
   const instanceRows=(r.by_instance||[]).map(x=>{
     const net=Number(x.net)||0,fees=Number(x.fees)||0;
     const wins=Number(x.wins)||0,losses=Number(x.losses)||0,flats=Number(x.flats)||0,count=Number(x.count)||0;
@@ -4472,12 +4495,12 @@ function renderExitPerformance(r){
     </div>`;
   }).join('');
   const foot=r.incomplete?`<div class="exit-summary">${Number(r.incomplete)} unmatched exits excluded</div>`:'';
-  host.innerHTML=head+(instanceRows?`<div class="exit-summary">BOT TOTALS · ALL EXIT ROUTES</div>${instanceRows}<div class="exit-summary">BY EXIT REASON / ROUTE</div>`:'')+rows+foot;
+  commitCockpitHtml(host,head+(instanceRows?`<div class="exit-summary">BOT TOTALS · ALL EXIT ROUTES</div>${instanceRows}<div class="exit-summary">BY EXIT REASON / ROUTE</div>`:'')+rows+foot);
 }
 
 function renderTournamentMini(insts){
-  if(!insts.length){$('tournamentMini').innerHTML='<div class="empty-state"><div class="empty-icon">🏆</div><div>No tournament bots</div></div>';return;}
-  $('tournamentMini').innerHTML=insts.map((x,i)=>{
+  if(!insts.length){commitCockpitHtml($('tournamentMini'),'<div class="empty-state"><div class="empty-icon">🏆</div><div>No tournament bots</div></div>');return;}
+  commitCockpitHtml($('tournamentMini'),insts.map((x,i)=>{
     const col=BOT_COLORS[x.instance]||'var(--text2)',available=x.pnl_available&&x.net_pnl!=null,pnl=available?Number(x.net_pnl):null;
     return`<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
       <span style="color:var(--text3);font-size:10px;min-width:14px">#${i+1}</span>
@@ -4487,16 +4510,16 @@ function renderTournamentMini(insts){
       <span style="font-size:10px;color:var(--text3)">${x.wins||0}W/${x.losses||0}L</span>
       <div style="width:7px;height:7px;border-radius:50%;background:${x.running?'var(--green)':'var(--text3)'}"></div>
     </div>`;
-  }).join('');
+  }).join(''));
 }
 
 function renderOrderStats(os){
   const rows=(os.by_source||[]).slice(0,8);
-  if(!rows.length){$('orderStats').innerHTML='<div class="empty-state" style="padding:16px"><div>No order stats yet</div></div>';return;}
-  $('orderStats').innerHTML=rows.map(r=>{
+  if(!rows.length){commitCockpitHtml($('orderStats'),'<div class="empty-state" style="padding:16px"><div>No order stats yet</div></div>');return;}
+  commitCockpitHtml($('orderStats'),rows.map(r=>{
     const c=r.status==='filled'?'var(--green)':r.status==='rejected'?'var(--red)':'var(--text3)';
     return`<div class="os-row"><div class="os-dot" style="background:${c}"></div><div style="flex:1;font-size:10px">${r.source}·${r.direction}·${r.status}</div><div style="min-width:25px;text-align:right;color:var(--text2)">${r.n}</div><div style="min-width:60px;text-align:right;font-variant-numeric:tabular-nums">$${fmt(r.notional)}</div></div>`;
-  }).join('');
+  }).join(''));
 }
 
 async function loadPerfStats(){
