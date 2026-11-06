@@ -702,7 +702,8 @@ def invalidate_runtime_caches():
         cache = globals().get(name)
         if isinstance(cache, dict):
             cache.clear()
-    for name in ("_fleet_cache", "_pnl_cache", "_stream_cache", "_bot_status_cache"):
+    for name in ("_fleet_cache", "_pnl_cache", "_stream_cache",
+                 "_tournament_cache", "_bot_status_cache"):
         val = globals().get(name)
         if isinstance(val, list) and val:
             val[0] = 0.0
@@ -6556,12 +6557,53 @@ def _admin_wallet_instances():
             and not inst.startswith("demo-")]
 
 
+_tournament_cache = [0.0, None]
+_tournament_lock = threading.Lock()
+_tournament_refreshing = False
+
+
 def api_tournament():
+    """Serve the lightweight instance leaderboard without stacking refreshes."""
+    global _tournament_refreshing
+    now = time.monotonic()
+    with _tournament_lock:
+        cached = _tournament_cache[1]
+        if cached and now - _tournament_cache[0] < 2.0:
+            return cached
+        if _tournament_refreshing:
+            return cached or {"instances": []}
+        _tournament_refreshing = True
+    try:
+        result = _build_tournament_payload()
+    except Exception:
+        with _tournament_lock:
+            _tournament_refreshing = False
+            if _tournament_cache[1] is not None:
+                return _tournament_cache[1]
+        raise
+    with _tournament_lock:
+        _tournament_cache[0], _tournament_cache[1] = time.monotonic(), result
+        _tournament_refreshing = False
+        return result
+
+
+def _build_tournament_payload():
     """Leaderboard: per instance — active strategy, model, live PnL, status."""
     out = []
     names = instance_names()
+    instances = fleet_instances()
     pnl_rows = api_pnl_by_instance().get("instances", {})
-    for inst in fleet_instances():
+    latest_runs = {}
+    if instances:
+        run_rows = q("""SELECT DISTINCT ON (r.instance)
+                             r.instance,s.strategy_id,s.llm_model,s.reason,r.started_at
+                        FROM vp.strategy_runs r
+                        JOIN vp.strategies s USING (strategy_id)
+                       WHERE r.instance=ANY(%s)
+                       ORDER BY r.instance,r.started_at DESC NULLS LAST,r.session_id DESC""",
+                      (instances,))
+        latest_runs = {r["instance"]: r for r in run_rows}
+    for inst in instances:
         mode = current_mode(inst)
         pnl = pnl_rows.get(inst, {})
         row = {"instance": inst, "name": names.get(inst, inst),
@@ -6572,14 +6614,12 @@ def api_tournament():
                "pnl_scope": pnl.get("pnl_scope"),
                "pnl_available": pnl.get("pnl_available", False),
                "accounting_status": pnl.get("accounting_status")}
-        srow = q("""SELECT s.strategy_id, s.llm_model, s.reason, r.started_at
-                    FROM vp.strategy_runs r JOIN vp.strategies s USING (strategy_id)
-                    WHERE r.instance=%s ORDER BY r.started_at DESC LIMIT 1""", (inst,))
+        srow = latest_runs.get(inst)
         if srow:
-            row.update({"strategy_id": srow[0]["strategy_id"],
-                        "model": srow[0]["llm_model"],
-                        "reason": srow[0]["reason"],
-                        "run_started": srow[0]["started_at"]})
+            row.update({"strategy_id": srow["strategy_id"],
+                        "model": srow["llm_model"],
+                        "reason": srow["reason"],
+                        "run_started": srow["started_at"]})
         row.update({k: pnl.get(k) for k in (
             "fills", "wins", "losses", "net_pnl", "realized_pnl",
             "fees_usd", "open_positions", "accounting_errors")})
