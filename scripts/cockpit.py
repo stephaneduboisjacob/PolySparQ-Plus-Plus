@@ -8579,6 +8579,7 @@ def _build_pnl_by_instance():
         result = {"instances": {}, "rows": [], "pnl_scope": "realized_session_after_fees"}
         _pnl_cache[0], _pnl_cache[1] = time.monotonic(), result
         return result
+    _cached_systemd_bot_status_many(all_insts)
 
     # strategy_runs is keyed by bot process session and persists its net
     # realized P&L. It avoids rebuilding a fake "profit" from a time window of
