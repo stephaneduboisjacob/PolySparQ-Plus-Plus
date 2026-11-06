@@ -698,7 +698,8 @@ def toml_scalar(value):
 
 def invalidate_runtime_caches():
     _since_cache.clear()
-    for name in ("_live_cache", "_live_lite_cache", "_activity_cache"):
+    for name in ("_live_cache", "_live_lite_cache", "_activity_cache",
+                 "_execution_cache"):
         cache = globals().get(name)
         if isinstance(cache, dict):
             cache.clear()
@@ -6655,6 +6656,9 @@ _live_lite_cache = {}
 _activity_cache = {}
 _exit_performance_cache = {}
 _execution_maker_pressure_cache = {}
+_execution_cache = {}
+_execution_cache_lock = threading.Lock()
+_execution_refreshing = set()
 _wallet_mode_lock = threading.Lock()
 ADMIN_WALLET_CREDENTIALS_FILE = "./secrets/polymarket_admin_credentials.json"
 ADMIN_WALLET_PRIVATE_KEY_FILE = "./secrets/polymarket_admin_private_key.txt"
@@ -7058,8 +7062,42 @@ def api_activity(instance=None, tape_only=False, force=False):
 
 
 def api_execution(instance=None):
-    """Maker/taker control-plane snapshot for the execution console."""
+    """Serve one shared execution snapshot per bot while refreshes overlap."""
     mode = current_mode(instance)
+    key = (instance or "", mode)
+    now = time.monotonic()
+    with _execution_cache_lock:
+        hit = _execution_cache.get(key)
+        if hit and now - hit[0] < 1.0:
+            return hit[1]
+        if key in _execution_refreshing:
+            return hit[1] if hit else {
+                "mode": mode, "instance": instance or "", "policy": {},
+                "open_orders": [], "stats": [], "recent_rejections": [],
+                "maker_pressure": {"available": False, "quotes": []},
+                "server_ts": int(time.time() * 1000),
+            }
+        _execution_refreshing.add(key)
+    try:
+        result = _build_api_execution(instance, mode)
+    except Exception:
+        with _execution_cache_lock:
+            _execution_refreshing.discard(key)
+            cached = _execution_cache.get(key)
+        if cached:
+            return cached[1]
+        raise
+    with _execution_cache_lock:
+        if len(_execution_cache) >= 64 and key not in _execution_cache:
+            oldest = min(_execution_cache, key=lambda cache_key: _execution_cache[cache_key][0])
+            _execution_cache.pop(oldest, None)
+        _execution_cache[key] = (time.monotonic(), result)
+        _execution_refreshing.discard(key)
+        return result
+
+
+def _build_api_execution(instance, mode):
+    """Maker/taker control-plane snapshot for the execution console."""
     inst_clause = "AND o.instance=%s" if instance else ""
     args = [mode] + ([instance] if instance else [])
     open_orders = q(f"""
@@ -8717,7 +8755,7 @@ def _build_window_bot_desk(scope, cache_key):
                 if state_match:
                     market_feed_state = state_match.group(1)
                     break
-        open_orders = execution.get("open_orders", [])
+        open_orders = [dict(order) for order in execution.get("open_orders", [])]
         if scope is not None:
             for order in open_orders:
                 order.pop("exchange_order_id", None)
