@@ -2030,7 +2030,7 @@ function setText(id,text,cls){
     const frame=requestAnimationFrame(()=>{if(_valueFlashFrames.get(el)!==frame)return;_valueFlashFrames.delete(el);el.classList.add('val-flash');});
     _valueFlashFrames.set(el,frame);
   }
-  if(cls!=null)el.className=cls;
+  if(cls!=null&&el.className!==cls)el.className=cls;
 }
 function ageMs(ts){return ts?Math.max(0,Date.now()-ts):null;}
 function speedClass(ms){return ms==null?'warn':ms<250?'good':ms<900?'warn':'bad';}
@@ -3234,18 +3234,20 @@ function renderInstTabs(insts){
     const pEl=$(`tab-pnl-${x.instance}`);
     if(pEl){
       const available=x.pnl_available&&x.net_pnl!=null;
-      pEl.textContent=available?`${x.net_pnl>=0?'+':''}$${fmt(x.net_pnl)}`:'—';
-      pEl.title=`${x.accounting_status||'P&L unavailable'} · current/last session realized net after fees`;
+      const value=available?`${x.net_pnl>=0?'+':''}$${fmt(x.net_pnl)}`:'—';
+      const title=`${x.accounting_status||'P&L unavailable'} · current/last session realized net after fees`;
+      if(pEl.textContent!==value)pEl.textContent=value;
+      if(pEl.title!==title)pEl.title=title;
     }
   });
   // Remove tabs for stopped bots no longer in list
   [...tabs.querySelectorAll('.inst-tab:not([data-inst=""])')].forEach(t=>{
     if(!insts.find(x=>x.instance===t.dataset.inst))t.remove();
   });
-  const count=$('instMoreCount');if(count)count.textContent=String(insts.length);
+  const count=$('instMoreCount');if(count&&count.textContent!==String(insts.length))count.textContent=String(insts.length);
   const label=$('instMoreLabel');if(label){
     const selected=insts.find(x=>x.instance===S.curInstance);
-    label.textContent=selected?(selected.name||selected.instance):'BOT FILTER';
+    const text=selected?(selected.name||selected.instance):'BOT FILTER';if(label.textContent!==text)label.textContent=text;
   }
 }
 
@@ -3823,7 +3825,7 @@ function updateStatsBar(st,h){
   setText('sbDeployed',`$${fmt(st.deployed_usd||0)}`,'sb-val neutral');
   setText('sbFees',`$${fmt(st.fees_usd||0)}`,'sb-val neg');
   const src=h.oracle_source||'chainlink';
-  setText('sbOracle',src,'sb-val neutral');$('oracleDot').className=`sb-oracle-dot ${src==='chainlink'?'chainlink':'failover'}`;
+  setText('sbOracle',src,'sb-val neutral');const oracleClass=`sb-oracle-dot ${src==='chainlink'?'chainlink':'failover'}`,oracleDot=$('oracleDot');if(oracleDot&&oracleDot.className!==oracleClass)oracleDot.className=oracleClass;
   if(h.health_fresh!=null)setText('sbBooks',`${h.health_fresh}/${h.health_total} fresh`,'sb-val neutral');
   setText('sbLoop',S.fetchMs!=null?`${S.fetchMs}ms`:'—',`sb-val ${speedClass(S.fetchMs)}`);
   const sseAge=ageMs(S.lastSseAt);
@@ -3831,7 +3833,8 @@ function updateStatsBar(st,h){
   setText('sbTs',new Date().toLocaleTimeString(),'sb-val neutral');
   const cnt=((S.data.positions||{}).positions||[]).length;
   const badge=$('posCount');
-  if(cnt>0){badge.textContent=cnt;badge.style.display='';}else{badge.style.display='none';}
+  if(cnt>0){if(badge.textContent!==String(cnt))badge.textContent=String(cnt);if(badge.style.display!=='')badge.style.display='';}
+  else if(badge.style.display!=='none')badge.style.display='none';
 }
 
 function persistenceQueueRadarAlerts(rows,sampledMs,now=Date.now(),available=true){
