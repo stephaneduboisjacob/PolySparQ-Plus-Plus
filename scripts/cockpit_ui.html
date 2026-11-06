@@ -3551,16 +3551,71 @@ async function apiPost(url,body,{timeoutMs=30000}={}){
   finally{clearTimeout(timer);}
 }
 
+// Share the lightweight live snapshot between same-account cockpit windows.
+// Demo windows are deliberately isolated because their session tokens are
+// tab-scoped and may represent different paper sessions.
+let _cockpitSyncChannel=null,_cockpitTabId=`${Date.now()}-${Math.random().toString(36).slice(2)}`;
+let _lastSharedLiveLiteAt=0,_lastSharedLiveLiteScope='';
+function initCockpitSyncChannel(){
+  if(_demoToken||!('BroadcastChannel'in window))return;
+  try{
+    _cockpitSyncChannel=new BroadcastChannel('polysparq-cockpit-sync-v1');
+    _cockpitSyncChannel.onmessage=e=>{
+      const msg=e.data;
+      if(!msg||msg.source===_cockpitTabId||msg.type!=='live_lite')return;
+      const scope=String(S.curInstance||'');
+      if(msg.scope!==scope||!msg.payload||msg.payload.warming_up)return;
+      const serverTs=Number(msg.payload.server_ts);
+      if(!Number.isFinite(serverTs)||serverTs<=0)return;
+      const receivedAt=Date.now(),snapshotAge=Math.max(0,receivedAt-serverTs);
+      _lastSharedLiveLiteAt=receivedAt-snapshotAge;
+      _lastSharedLiveLiteScope=scope;
+      applyLiveLiteSnapshot(msg.payload,false,true);
+    };
+  }catch(_){_cockpitSyncChannel=null;}
+}
+function broadcastLiveLiteSnapshot(scope,payload){
+  if(!_cockpitSyncChannel||!payload||payload.warming_up)return;
+  try{_cockpitSyncChannel.postMessage({type:'live_lite',source:_cockpitTabId,scope,payload});}catch(_){}
+}
+function hasFreshSharedLiveLite(scope){
+  return !!_cockpitSyncChannel&&_lastSharedLiveLiteScope===scope&&Date.now()-_lastSharedLiveLiteAt<1800;
+}
+async function fetchLiveLiteSnapshot(url,scope,force){
+  if(!_cockpitSyncChannel)return{payload:await apiFetch(url,{timeoutMs:5000})};
+  if(!force&&hasFreshSharedLiveLite(scope))return{shared:true};
+  if(!force&&navigator.locks?.request){
+    try{
+      let result={shared:true};
+      await navigator.locks.request(`polysparq-live-lite:${scope||'all'}`,{mode:'exclusive',ifAvailable:true},async lock=>{
+        if(!lock)return;
+        if(hasFreshSharedLiveLite(scope))return;
+        const payload=await apiFetch(url,{timeoutMs:5000});
+        result={payload};
+        broadcastLiveLiteSnapshot(scope,payload);
+      });
+      return result;
+    }catch(_){/* Fall back to a direct request if Web Locks are unavailable. */}
+  }
+  const payload=await apiFetch(url,{timeoutMs:5000});
+  broadcastLiveLiteSnapshot(scope,payload);
+  return{payload};
+}
+
 // ── Main refresh ──────────────────────────────────────────────────────────
 let _lastLiveLitePaintTs=0,_liveLiteRetryAt=0,_liveLiteFailureCount=0;
 async function refresh(force=false){
   if((S.paused&&!force)||S.refreshing)return;
   if(!force&&Date.now()<_liveLiteRetryAt)return;
+  const scope=String(S.curInstance||'');
+  if(!force&&hasFreshSharedLiveLite(scope))return;
   S.refreshing=true;
   let d,t0=performance.now();
   try{
-    const qs=S.curInstance?`?instance=${S.curInstance}`:'';
-    d=await apiFetch(`/api/live_lite${qs}`,{timeoutMs:5000});
+    const qs=scope?`?instance=${encodeURIComponent(scope)}`:'';
+    const result=await fetchLiveLiteSnapshot(`/api/live_lite${qs}`,scope,force);
+    d=result?.payload||null;
+    if(result?.shared){S.refreshing=false;return;}
   }finally{S.refreshing=false;}
   if(!d){
     _liveLiteFailureCount=Math.min(4,_liveLiteFailureCount+1);
@@ -3572,10 +3627,20 @@ async function refresh(force=false){
   }
   if(d.warming_up)return;
   _liveLiteFailureCount=0;_liveLiteRetryAt=0;
-  const paint0=performance.now();
-  S.fetchMs=Math.round(performance.now()-t0);
-  S.lastLoopAt=Date.now();
+  applyLiveLiteSnapshot(d,force,false,t0);
+}
+function applyLiveLiteSnapshot(d,force=false,shared=false,requestStartedAt=performance.now()){
+  if(!d||d.warming_up)return;
   const serverTs=Number(d.server_ts)||0;
+  if(serverTs&&_lastLiveLitePaintTs&&serverTs<_lastLiveLitePaintTs){
+    S.fetchMs=shared?0:Math.round(performance.now()-requestStartedAt);
+    S.lastLoopAt=Date.now();
+    updateSpeedPanel();
+    return;
+  }
+  const paint0=performance.now();
+  S.fetchMs=shared?0:Math.round(performance.now()-requestStartedAt);
+  S.lastLoopAt=Date.now();
   if(!force&&serverTs&&serverTs===_lastLiveLitePaintTs){
     S.lastServerTs=serverTs;
     S.paintMs=Math.round(performance.now()-paint0);
@@ -10653,6 +10718,7 @@ try{
 // Mirror saved prediction filters into both phone selectors before the first
 // network response; the controls must agree even while the feed is unavailable.
 syncPredictionFilters();
+initCockpitSyncChannel();
 connectSSE();
 refresh(true);
 loadActivity(true);
