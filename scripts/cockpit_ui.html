@@ -5361,6 +5361,27 @@ function _readMarketExplorerWatchlist(){
   }catch(e){return[];}
 }
 const _marketExplorerState={query:'',offset:0,markets:[],hasMore:false,loading:false,view:'search',sort:'volume',trailWindowSeconds:_readMarketExplorerTrailWindow(),printNotionalFloorUsd:_readMarketExplorerPrintFloor(),saved:_readMarketExplorerWatchlist(),savedMarkets:[],savedLoading:false,savedBooksLoading:false,savedRefreshFinishedAt:0,autoRefresh:_readMarketExplorerAutoRefresh(),storageWarning:false,bookCache:Object.create(null),tradeCache:Object.create(null)};
+const _marketExplorerCacheLimits={bookCache:96,tradeCache:64};
+function _marketExplorerPruneCache(cacheName,keepId=''){
+  const cache=_marketExplorerState[cacheName],limit=_marketExplorerCacheLimits[cacheName];
+  if(!cache||!limit)return;
+  const keys=Object.keys(cache);if(keys.length<=limit)return;
+  const savedIds=new Set(_marketExplorerState.saved.map(row=>row.id));
+  const liveBookId=cacheName==='bookCache'?_marketExplorerBookStream.targetId:'';
+  const nodePrefix=cacheName==='bookCache'?'marketExplorerBook-':'marketExplorerTrades-';
+  const candidates=keys.filter(id=>{
+    const entry=cache[id]||{};
+    if(id===keepId||savedIds.has(id)||id===liveBookId||entry.loading||entry.loadingMore)return false;
+    return !document.getElementById(nodePrefix+id);
+  }).sort((a,b)=>(Number(cache[a]?.cacheTouchedAt)||Number(cache[a]?.loadedAt)||0)-(Number(cache[b]?.cacheTouchedAt)||Number(cache[b]?.loadedAt)||0));
+  let excess=keys.length-limit;
+  for(const id of candidates){if(excess<=0)break;delete cache[id];excess--;}
+}
+function _marketExplorerCachePut(cacheName,id,entry){
+  entry.cacheTouchedAt=Date.now();_marketExplorerState[cacheName][id]=entry;
+  _marketExplorerPruneCache(cacheName,id);
+  return entry;
+}
 function _persistMarketExplorerWatchlist(){
   try{localStorage.setItem(_marketExplorerWatchKey,JSON.stringify(_marketExplorerState.saved));_marketExplorerState.storageWarning=false;return true;}
   catch(e){_marketExplorerState.storageWarning=true;return false;}
@@ -5706,7 +5727,9 @@ function _marketExplorerValidStreamTokens(market,id){
 }
 function _marketExplorerEnsureWatchBookCache(id){
   const cache=_marketExplorerState.bookCache;
-  const entry=cache[id]||(cache[id]={open:false,loading:false,payloads:[null,null],loadedAt:0,error:''});
+  let entry=cache[id];
+  if(!entry)entry=_marketExplorerCachePut('bookCache',id,{open:false,loading:false,payloads:[null,null],loadedAt:0,error:''});
+  else entry.cacheTouchedAt=Date.now();
   if(!Array.isArray(entry.payloads))entry.payloads=[null,null];
   if(!Array.isArray(entry.quoteTrail))entry.quoteTrail=[[],[]];
   if(!Array.isArray(entry.quoteTrail[0]))entry.quoteTrail[0]=[];
@@ -6044,7 +6067,7 @@ function toggleMarketExplorerBook(conditionId){
   if(!market)return;
   const entry=_marketExplorerState.bookCache[id]||{open:false,loading:false,payloads:null,loadedAt:0,error:''};
   entry.open=!entry.open;
-  _marketExplorerState.bookCache[id]=entry;
+  _marketExplorerCachePut('bookCache',id,entry);
   if(entry.open){
     if(_marketExplorerBookStream.targetId!==id){
       _marketExplorerBookStream.targetId=id;_marketExplorerBookStream.liveTapeTargetId=id;
@@ -6065,7 +6088,7 @@ async function refreshMarketExplorerBook(conditionId){
   const market=_marketExplorerMarketById(id);
   if(_marketExplorerState.savedBooksLoading||!/^0x[0-9a-f]{64}$/.test(id)||!market||!Array.isArray(market.outcomes)||market.outcomes.length!==2)return;
   const entry=_marketExplorerState.bookCache[id]||{open:true,loading:false,payloads:null,loadedAt:0,error:''};
-  entry.open=true;entry.loading=true;entry.error='';_marketExplorerState.bookCache[id]=entry;
+  entry.open=true;entry.loading=true;entry.error='';_marketExplorerCachePut('bookCache',id,entry);
   const requestStartedAt=Date.now();
   renderMarketExplorer();
   const query=new URLSearchParams({condition_id:id}),result=await _fetchMarketExplorerJson(`/api/mobile/books?${query.toString()}`),payload=result.payload;
@@ -6136,14 +6159,14 @@ function _marketExplorerTradesError(result,older=false){
 function toggleMarketExplorerTrades(conditionId){
   const id=String(conditionId||'').toLowerCase();if(!/^0x[0-9a-f]{64}$/.test(id)||!_marketExplorerMarketById(id))return;
   const entry=_marketExplorerState.tradeCache[id]||{open:false,loading:false,loadingMore:false,payload:null,loadedAt:0,error:'',hasMore:false,nextCursor:null,seenCursors:new Set()};
-  entry.open=!entry.open;_marketExplorerState.tradeCache[id]=entry;renderMarketExplorer();
+  entry.open=!entry.open;_marketExplorerCachePut('tradeCache',id,entry);renderMarketExplorer();
   if(entry.open&&!entry.payload&&!entry.loading)refreshMarketExplorerTrades(id);
 }
 async function refreshMarketExplorerTrades(conditionId){
   const id=String(conditionId||'').toLowerCase();if(!/^0x[0-9a-f]{64}$/.test(id)||!_marketExplorerMarketById(id))return;
   const entry=_marketExplorerState.tradeCache[id]||{open:true,loading:false,loadingMore:false,payload:null,loadedAt:0,error:'',hasMore:false,nextCursor:null,seenCursors:new Set()};
   if(entry.loading||entry.loadingMore)return;
-  entry.open=true;entry.loading=true;entry.error='';_marketExplorerState.tradeCache[id]=entry;renderMarketExplorer();
+  entry.open=true;entry.loading=true;entry.error='';_marketExplorerCachePut('tradeCache',id,entry);renderMarketExplorer();
   const query=new URLSearchParams({condition_id:id,limit:'20'}),result=await _fetchMarketExplorerTrades(query),payload=result.payload;
   entry.loading=false;entry.loadedAt=Date.now();
   if(payload&&payload.condition_id===id&&Array.isArray(payload.trades)){
@@ -6155,7 +6178,7 @@ async function refreshMarketExplorerTrades(conditionId){
 async function loadOlderMarketExplorerTrades(conditionId){
   const id=String(conditionId||'').toLowerCase(),entry=_marketExplorerState.tradeCache[id];
   if(!/^0x[0-9a-f]{64}$/.test(id)||!_marketExplorerMarketById(id)||!entry?.payload||!entry.hasMore||!entry.nextCursor||entry.loading||entry.loadingMore)return;
-  const cursor=entry.nextCursor;entry.loadingMore=true;entry.error='';renderMarketExplorer();
+  const cursor=entry.nextCursor;entry.loadingMore=true;entry.error='';_marketExplorerCachePut('tradeCache',id,entry);renderMarketExplorer();
   const query=new URLSearchParams({condition_id:id,limit:'20',cursor}),result=await _fetchMarketExplorerTrades(query),payload=result.payload;
   entry.loadingMore=false;entry.loadedAt=Date.now();
   if(payload&&payload.condition_id===id&&Array.isArray(payload.trades)){
@@ -6447,7 +6470,7 @@ async function refreshMarketExplorerWatchlistBooks(){
   if(status)status.textContent=`Fetching paired CLOB books for ${ids.length} saved markets in one request…`;
     for(const id of ids){
       const entry=_marketExplorerState.bookCache[id]||{open:false,loading:false,payloads:null,loadedAt:0,error:''};
-    entry.loading=true;entry.error='';_marketExplorerState.bookCache[id]=entry;
+    entry.loading=true;entry.error='';_marketExplorerCachePut('bookCache',id,entry);
   }
   renderMarketExplorer();
   const requestStartedAt=Date.now(),params=new URLSearchParams({condition_ids:ids.join(',')}),result=await _fetchMarketExplorerJson(`/api/mobile/books/watchlist?${params.toString()}`),payload=result.payload;
@@ -6464,7 +6487,7 @@ async function refreshMarketExplorerWatchlistBooks(){
         const present=entry.payloads.filter(Boolean),allFresh=entry.payloads.length===2&&entry.payloads.every(book=>book?.fresh===true);
         if(allFresh)fresh++;else if(row.stale||present.some(book=>book?.stale)||present.length)stale++;else unavailable++;
       }else{entry.error=_marketExplorerBookError(result);unavailable++;}
-      _marketExplorerState.bookCache[id]=entry;
+      _marketExplorerCachePut('bookCache',id,entry);
     }
     if(status)status.textContent=`Saved CLOB books updated: ${fresh} fresh · ${stale} stale or partial · ${unavailable} unavailable. Manual snapshots; quotes can move.`;
   }else{
