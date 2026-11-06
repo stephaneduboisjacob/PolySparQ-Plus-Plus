@@ -1983,7 +1983,7 @@ const S={paused:false,refreshing:false,activityRefreshing:false,curInstance:'',c
   data:{},activity:{},prices:{},prevFillTs:0,token:null,configRaw:'',configEdits:{},curConfig:'',configFingerprint:'',configRuntimeStatus:{state:'checking'},
   instNames:{},chartObj:null,candleSeries:null,pnlChartObj:null,pnlSeries:{},
   execution:{},executionRefreshing:false,fetchMs:null,paintMs:null,lastLoopAt:0,lastSseAt:0,lastServerTs:0,sseReconnecting:false,
-  predictionTrails:{},predictionPulseTrails:{},predictionReferenceSamples:{},predictionReferenceDirectPrices:{},predictionReferenceSockets:null,predictionReferencePolySocket:null,predictionReferenceRangeMs:0,predictionReferenceViewEndMs:null,predictionReferenceShareMode:'delta',predictionReferenceSeriesVisibility:{oracle:true,coinbase:true,binance:true,kraken:true,gemini:true,okx:true,poly_up:true,poly_down:true},predictionReferenceGesture:null,predictionReferencePaintTimer:null,predictionReferenceResizeTimer:null,predictionReferenceDirectUiAt:0,predictionReferenceAsset:'BTC',predictionReferenceHorizon:300,predictionReferenceWindow:null,predictionReferenceTimeline:null,predictionReferenceFetchAt:0,predictionReferenceRequest:null,predictionReferenceApiUnavailable:false,predictionPulseHorizon:300,predictionPulseLookback:60,predictionPulseThreshold:2,predictionPulseSort:'asset',
+  predictionTrails:{},predictionPulseTrails:{},predictionReferenceSamples:{},predictionReferenceDirectPrices:{},predictionReferenceSockets:null,predictionReferencePolySocket:null,predictionReferenceRangeMs:0,predictionReferenceViewEndMs:null,predictionReferenceShareMode:'delta',predictionReferenceSeriesVisibility:{oracle:true,coinbase:true,binance:true,kraken:true,gemini:true,okx:true,poly_up:true,poly_down:true},predictionReferenceGesture:null,predictionReferencePaintTimer:null,predictionReferenceDirectStatusTimer:null,predictionReferenceResizeTimer:null,predictionReferenceDirectUiAt:0,predictionReferenceAsset:'BTC',predictionReferenceHorizon:300,predictionReferenceWindow:null,predictionReferenceTimeline:null,predictionReferenceFetchAt:0,predictionReferenceRequest:null,predictionReferenceApiUnavailable:false,predictionPulseHorizon:300,predictionPulseLookback:60,predictionPulseThreshold:2,predictionPulseSort:'asset',
   predAsset:'BTC',predWindows:new Set(['300:CURRENT','300:NEXT','900:CURRENT','900:NEXT']),
   predRequestController:null,predForceQueued:false,predRequestForced:false,predDisplayHidden:false,
   predRetryMs:0,predBoardReceivedAt:0,predSnapshotAgeAtReceive:0,manualPredLoading:false};
@@ -2536,6 +2536,14 @@ function predictionReferenceDirectStatus(){
   if(output.textContent!==nextText)output.textContent=nextText;
   if(output.dataset.state!==nextState)output.dataset.state=nextState;
 }
+function schedulePredictionReferenceDirectStatus(){
+  if(S.predictionReferenceDirectStatusTimer)return;
+  // Keep the six-feed health line responsive without rescanning it per quote tick.
+  S.predictionReferenceDirectStatusTimer=setTimeout(()=>{
+    S.predictionReferenceDirectStatusTimer=null;
+    predictionReferenceDirectStatus();
+  },PREDICTION_REFERENCE_PAINT_INTERVAL_MS);
+}
 function stopPredictionReferenceSockets(){
   const state=S.predictionReferenceSockets;
   if(state){
@@ -2631,7 +2639,7 @@ function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
     if(now-S.predictionReferenceDirectUiAt>100){S.predictionReferenceDirectUiAt=now;patchPredictionReferenceDirectQuotes(asset);}
     schedulePredictionReferenceChartPaint();
   }
-  predictionReferenceDirectStatus();
+  schedulePredictionReferenceDirectStatus();
 }
 function patchPredictionReferenceDirectQuotes(asset){
   const quote=predictionReferenceLivePrices()[asset]||{},oracle=quote.oracle;
