@@ -3165,9 +3165,13 @@ function updatePriceTicker(prices){
   ['BTC','ETH','SOL','XRP'].forEach(a=>{
     const p=prices[a];if(!p)return;
     const px=p.oracle||p.coinbase;if(!px)return;
-    const pxEl=$(`tpx-${a}`);if(pxEl)pxEl.textContent=fmtPx(px);
+    const pxEl=$(`tpx-${a}`);if(pxEl){const value=fmtPx(px);if(pxEl.textContent!==value)pxEl.textContent=value;}
     const chEl=$(`tch-${a}`);
-    if(chEl&&p.delta_pct!=null){chEl.textContent=`${p.delta_pct>0?'+':''}${fmt(p.delta_pct,3)}%`;chEl.className=`chg ${p.delta_pct>0?'up':p.delta_pct<0?'dn':''}`;}
+    if(chEl&&p.delta_pct!=null){
+      const value=`${p.delta_pct>0?'+':''}${fmt(p.delta_pct,3)}%`,className=`chg ${p.delta_pct>0?'up':p.delta_pct<0?'dn':''}`;
+      if(chEl.textContent!==value)chEl.textContent=value;
+      if(chEl.className!==className)chEl.className=className;
+    }
     const ta=$(`tick-${a}`);
     if(ta&&prevPx[a]&&Math.abs(px-prevPx[a])>.0001){ta.classList.add(px>prevPx[a]?'flash-up':'flash-dn');setTimeout(()=>ta.classList.remove('flash-up','flash-dn'),450);}
     prevPx[a]=px;
@@ -3182,18 +3186,20 @@ function updateCbStrip(prices){
   ['BTC','ETH','SOL','XRP'].forEach(a=>{
     const p=prices[a];if(!p)return;
     const el=$(`cba-${a}`);
-    if($(`cb-cb-${a}`))$(`cb-cb-${a}`).textContent=fmtPx(p.coinbase);
-    if($(`cb-orc-${a}`))$(`cb-orc-${a}`).textContent=fmtPx(p.oracle);
+    const cbEl=$(`cb-cb-${a}`),oracleEl=$(`cb-orc-${a}`);
+    if(cbEl){const value=fmtPx(p.coinbase);if(cbEl.textContent!==value)cbEl.textContent=value;}
+    if(oracleEl){const value=fmtPx(p.oracle);if(oracleEl.textContent!==value)oracleEl.textContent=value;}
     const dEl=$(`cb-d-${a}`),barEl=$(`cb-bar-${a}`),d=p.delta_pct;
     if(dEl&&d!=null){
-      dEl.textContent=`${d>0?'+':''}${fmt(d,4)}%`;
+      const deltaText=`${d>0?'+':''}${fmt(d,4)}%`,deltaClass=`cba-delta ${d>0?'pos':d<0?'neg':'zero'}`;
+      if(dEl.textContent!==deltaText)dEl.textContent=deltaText;
       const thresh=CB_THRESH[a]||.08,pct=Math.min(100,Math.abs(d)/thresh*100);
-      dEl.className=`cba-delta ${d>0?'pos':d<0?'neg':'zero'}`;
-      if(barEl){barEl.style.width=`${pct}%`;barEl.className=`cba-bar-fill ${d>0?'pos':d<0?'neg':''}`;}
+      if(dEl.className!==deltaClass)dEl.className=deltaClass;
+      if(barEl){const width=`${pct}%`,className=`cba-bar-fill ${d>0?'pos':d<0?'neg':''}`;if(barEl.style.width!==width)barEl.style.width=width;if(barEl.className!==className)barEl.className=className;}
       const sig=Math.abs(d)>=thresh;
-      el.className=`cb-asset ${sig?'signal-strong':''}`;
+      const assetClass=`cb-asset ${sig?'signal-strong':''}`;if(el.className!==assetClass)el.className=assetClass;
       let badge=el.querySelector('.signal-badge');
-      if(sig){if(!badge){badge=document.createElement('div');badge.className='signal-badge';el.appendChild(badge);}badge.textContent='SIGNAL';}
+      if(sig){if(!badge){badge=document.createElement('div');badge.className='signal-badge';el.appendChild(badge);}if(badge.textContent!=='SIGNAL')badge.textContent='SIGNAL';}
       else if(badge)badge.remove();
     }
   });
