@@ -17,6 +17,7 @@ straight from the public exchange websockets, so the server stays light.
 import argparse
 import base64
 from collections import deque
+from copy import deepcopy
 import hashlib
 import hmac
 import json
@@ -699,7 +700,7 @@ def toml_scalar(value):
 
 def invalidate_runtime_caches():
     _since_cache.clear()
-    for name in ("_live_cache", "_live_lite_cache", "_live_lite_retry_after",
+    for name in ("_config_cache", "_live_cache", "_live_lite_cache", "_live_lite_retry_after",
                  "_live_lite_failures", "_window_bot_desk_retry_after",
                  "_window_bot_desk_failures", "_activity_cache", "_activity_tape_cache",
                  "_execution_cache"):
@@ -878,16 +879,37 @@ def load_config(instance=None):
     if instance and not os.path.exists(path):
         path = CFG_FILE
     try:
+        info = os.stat(path)
+        signature = (info.st_dev, info.st_ino, info.st_size,
+                     info.st_mtime_ns, info.st_ctime_ns)
+    except OSError:
+        signature = None
+    if signature is not None:
+        with _config_cache_lock:
+            cached = _config_cache.get(path)
+            if cached and cached[0] == signature:
+                return deepcopy(cached[1])
+    try:
         with open(path, "rb") as f:
             t = tomllib.load(f)
     except Exception as e:
         return {"error": str(e)}
     # Whitelist non-secret sections only (NEVER expose [wallet]/[postgres]).
-    return {
+    result = {
         "mode": t.get("runtime", {}).get("mode", "?"),
         "strategy": t.get("strategy", {}).get("hot", {}),
         "risk": t.get("risk", {}),
     }
+    if signature is not None:
+        with _config_cache_lock:
+            if len(_config_cache) >= 256 and path not in _config_cache:
+                _config_cache.clear()
+            _config_cache[path] = (signature, result)
+    return deepcopy(result)
+
+
+_config_cache = {}
+_config_cache_lock = threading.Lock()
 
 
 def _config_stake(path):
