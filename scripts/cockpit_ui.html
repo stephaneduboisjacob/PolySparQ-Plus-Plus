@@ -2980,15 +2980,17 @@ function renderPredictionReferenceChart(){
   bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,{L,plotRight,priceTop,priceBottom,shareTop,shareBottom,W,H,asset,samplesBySource,visibleShares,visible,anchorPrice,x,yMove,yShare,shareMode,openingShares,windowStart:start,windowClose:close,windowEnd,viewEnd,span});
 }
 function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,chart){
-  const inspector=$('predictionReferenceInspector');if(!target.querySelector('svg')||!inspector)return;
-  const names=Object.fromEntries(PREDICTION_REFERENCE_SOURCES.map(source=>[source.key,source.label]));
+  const inspector=$('predictionReferenceInspector');if(!inspector)return;
+  target._predictionReferenceInspectorState={viewportStart,viewEnd,duration,chart,inspector};
+  if(!target.querySelector('svg')||target._predictionReferenceInspectorBound)return;
+  target._predictionReferenceInspectorBound=true;
+  const current=()=>target._predictionReferenceInspectorState;
   const clockText=ts=>new Date(ts).toLocaleTimeString([],{timeZone:'UTC',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+' UTC';
-  const tolerance=Math.max(1000,Math.min(2500,duration*.004));
   const localPoint=event=>{
     const svg=target.querySelector('svg'),matrix=svg?.getScreenCTM();if(!matrix)return null;
     const screen=svg.createSVGPoint();screen.x=event.clientX;screen.y=event.clientY;return screen.matrixTransform(matrix.inverse());
   };
-  const nearest=(points,time)=>{
+  const nearest=(points,time,tolerance)=>{
     if(!points?.length)return null;
     let lo=0,hi=points.length;while(lo<hi){const mid=(lo+hi)>>1;if(points[mid].t<time)lo=mid+1;else hi=mid;}
     const before=lo>0?points[lo-1]:null,after=lo<points.length?points[lo]:null;
@@ -2996,18 +2998,22 @@ function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,
     return point&&Math.abs(point.t-time)<=tolerance?point:null;
   };
   const inspect=event=>{
+    const state=current();if(!state)return;
+    const {chart,viewportStart,duration,inspector}=state,tolerance=Math.max(1000,Math.min(2500,duration*.004));
     const local=localPoint(event);if(!local)return;
     if(local.x<chart.L||local.x>chart.plotRight||local.y<chart.priceTop||local.y>chart.shareBottom)return;
     const fraction=(local.x-chart.L)/(chart.plotRight-chart.L),time=viewportStart+fraction*duration,cursor=$('predictionReferenceCursor'),line=$('predictionReferenceCursorLine');
     if(cursor)cursor.setAttribute('visibility','visible');if(line){line.setAttribute('x1',local.x.toFixed(1));line.setAttribute('x2',local.x.toFixed(1));}
-    const rows=PREDICTION_REFERENCE_SOURCES.filter(source=>chart.visible[source.key]!==false).map(source=>{
-      const point=nearest(chart.samplesBySource[source.key],time),dot=$(`predictionReferenceCursor${source.key[0].toUpperCase()+source.key.slice(1)}`);
+    const rows=[];
+    for(const source of PREDICTION_REFERENCE_SOURCES){
+      if(chart.visible[source.key]===false)continue;
+      const point=nearest(chart.samplesBySource[source.key],time,tolerance),dot=$(`predictionReferenceCursor${source.key[0].toUpperCase()+source.key.slice(1)}`);
       if(dot){if(point){dot.setAttribute('visibility','visible');dot.setAttribute('cx',chart.x(point.t).toFixed(1));dot.setAttribute('cy',chart.yMove(point.move_pct).toFixed(1));}else dot.setAttribute('visibility','hidden');}
       const move=point&&chart.anchorPrice?(point.value/chart.anchorPrice-1)*100:null;
-      return`<span class="${source.key}"><b>${names[source.key]}</b> ${point?predictionReferencePrice(point.value,chart.asset):'NO TICK'}<small>${point?`${move>0?'+':''}${move.toFixed(3)}% · ${clockText(point.t)}`:'outside venue cadence'}</small></span>`;
-    });
+      rows.push(`<span class="${source.key}"><b>${source.label}</b> ${point?predictionReferencePrice(point.value,chart.asset):'NO TICK'}<small>${point?`${move>0?'+':''}${move.toFixed(3)}% · ${clockText(point.t)}`:'outside venue cadence'}</small></span>`);
+    }
     for(const side of ['up','down'])if(chart.visible[`poly_${side}`]!==false){
-      const point=nearest(chart.visibleShares[side],time),dot=$(`predictionReferenceCursor${side[0].toUpperCase()+side.slice(1)}`),opened=chart.openingShares[side];
+      const point=nearest(chart.visibleShares[side],time,tolerance),dot=$(`predictionReferenceCursor${side[0].toUpperCase()+side.slice(1)}`),opened=chart.openingShares[side];
       if(dot){if(point){dot.setAttribute('visibility','visible');dot.setAttribute('cx',chart.x(point.t).toFixed(1));dot.setAttribute('cy',chart.yShare(point.value,side).toFixed(1));}else dot.setAttribute('visibility','hidden');}
       const delta=point&&opened?(point.value-opened.value)*100:null;
       rows.push(`<span class="share ${side}"><b>POLY ${side.toUpperCase()}</b> ${point?`${(point.value*100).toFixed(1)}¢`:'NO BOOK'}<small>${point?`${delta==null?'OPEN —':`Δ ${delta>0?'+':''}${delta.toFixed(2)}¢`} · ${clockText(point.t)}`:'outside BBO cadence'}</small></span>`);
@@ -3015,12 +3021,16 @@ function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,
     inspector.innerHTML=rows.join('');
   };
   target.onpointerdown=event=>{
+    const state=current();if(!state)return;
+    const {chart,viewEnd,duration}=state;
     if(event.button!==0)return;
     const point=localPoint(event);if(!point||point.x<chart.L||point.x>chart.plotRight||point.y<chart.priceTop||point.y>chart.shareBottom)return;
     S.predictionReferenceGesture={pointerId:event.pointerId,startX:event.clientX,baseEnd:viewEnd,span:duration,windowStart:chart.windowStart,windowEnd:chart.windowEnd,moved:false};
     try{target.setPointerCapture(event.pointerId);}catch(e){}
   };
   target.onpointermove=event=>{
+    const state=current();if(!state)return;
+    const {chart}=state;
     const gesture=S.predictionReferenceGesture;
     if(gesture&&gesture.pointerId===event.pointerId){
       const dx=event.clientX-gesture.startX;if(Math.abs(dx)<3)return;gesture.moved=true;
@@ -3043,6 +3053,8 @@ function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,
     inspector.textContent='Move over the chart to inspect source prices and timestamps.';
   };
   target.onwheel=event=>{
+    const state=current();if(!state)return;
+    const {chart,viewportStart,duration}=state;
     const local=localPoint(event);if(!local||local.x<chart.L||local.x>chart.plotRight||local.y<chart.priceTop||local.y>chart.shareBottom)return;
     event.preventDefault();const fraction=(local.x-chart.L)/(chart.plotRight-chart.L),anchor=viewportStart+fraction*duration;
     const nextSpan=Math.max(5000,Math.min(chart.windowClose-chart.windowStart,duration*Math.exp(event.deltaY*.001)));
