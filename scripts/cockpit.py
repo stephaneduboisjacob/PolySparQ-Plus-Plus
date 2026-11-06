@@ -699,8 +699,9 @@ def toml_scalar(value):
 
 def invalidate_runtime_caches():
     _since_cache.clear()
-    for name in ("_live_cache", "_live_lite_cache", "_activity_cache",
-                 "_activity_tape_cache", "_execution_cache"):
+    for name in ("_live_cache", "_live_lite_cache", "_live_lite_retry_after",
+                 "_live_lite_failures", "_activity_cache", "_activity_tape_cache",
+                 "_execution_cache"):
         cache = globals().get(name)
         if isinstance(cache, dict):
             cache.clear()
@@ -1056,7 +1057,8 @@ def _cached_systemd_bot_status_many(extra_instances=()):
         if set(requested) <= set(covered) and now - sampled < 2.0:
             return statuses
         if _systemd_instance_status_refreshing:
-            return statuses if set(requested) <= set(covered) else {}
+            return (statuses if set(requested) <= set(covered) and now - sampled < 2.0
+                    else {})
         _systemd_instance_status_refreshing = True
 
     try:
@@ -1069,7 +1071,7 @@ def _cached_systemd_bot_status_many(extra_instances=()):
             _systemd_instance_status_cache[:] = [time.monotonic(), requested, result]
             return result
         sampled, covered, statuses = _systemd_instance_status_cache
-        if set(requested) <= set(covered) and time.monotonic() - sampled < 15.0:
+        if set(requested) <= set(covered) and time.monotonic() - sampled < 2.0:
             return statuses
         return {}
 
@@ -6977,6 +6979,8 @@ _live_cache = {}   # instance-key -> (built_monotonic, payload)
 _live_lite_cache = {}
 _live_lite_cache_lock = threading.Lock()
 _live_lite_refreshing = set()
+_live_lite_retry_after = {}
+_live_lite_failures = {}
 _activity_cache = {}
 _activity_tape_cache = {}
 _activity_cache_lock = threading.Lock()
@@ -7138,10 +7142,36 @@ def build_operator_radar(status, positions_payload, markets_payload, health):
     return sorted(alerts, key=lambda a: order.get(a.get("level"), 9))[:12]
 
 
+def _refresh_live_lite_cache(key, instance):
+    try:
+        result = _build_api_live_lite(instance)
+    except Exception:
+        with _live_lite_cache_lock:
+            _live_lite_refreshing.discard(key)
+            failures = min(6, _live_lite_failures.get(key, 0) + 1)
+            _live_lite_failures[key] = failures
+            _live_lite_retry_after[key] = time.monotonic() + min(
+                30.0, 0.5 * (2 ** (failures - 1))
+            )
+        return
+    with _live_lite_cache_lock:
+        if len(_live_lite_cache) >= 128 and key not in _live_lite_cache:
+            oldest = min(_live_lite_cache,
+                         key=lambda cache_key: _live_lite_cache[cache_key][0])
+            _live_lite_cache.pop(oldest, None)
+            _live_lite_retry_after.pop(oldest, None)
+            _live_lite_failures.pop(oldest, None)
+        _live_lite_cache[key] = (time.monotonic(), result)
+        _live_lite_retry_after.pop(key, None)
+        _live_lite_failures.pop(key, None)
+        _live_lite_refreshing.discard(key)
+
+
 def api_live_lite(instance=None):
-    """Share a short-lived accounting snapshot across simultaneous clients."""
+    """Share fresh snapshots and return stale data while one refresh runs."""
     key = instance or ""
     now = time.monotonic()
+    stale = None
     with _live_lite_cache_lock:
         hit = _live_lite_cache.get(key)
         if hit and now - hit[0] < 1.5:
@@ -7153,7 +7183,23 @@ def api_live_lite(instance=None):
                 "instance": instance or "", "server_ts": int(time.time() * 1000),
                 "warming_up": True,
             }
+        if hit:
+            stale = hit[1]
+            if now < _live_lite_retry_after.get(key, 0.0):
+                return stale
         _live_lite_refreshing.add(key)
+    if stale is not None:
+        try:
+            threading.Thread(
+                target=_refresh_live_lite_cache,
+                args=(key, instance),
+                name="cockpit-live-lite-refresh",
+                daemon=True,
+            ).start()
+            return stale
+        except Exception:
+            with _live_lite_cache_lock:
+                _live_lite_refreshing.discard(key)
     try:
         result = _build_api_live_lite(instance)
     except Exception:
@@ -7168,7 +7214,11 @@ def api_live_lite(instance=None):
             oldest = min(_live_lite_cache,
                          key=lambda cache_key: _live_lite_cache[cache_key][0])
             _live_lite_cache.pop(oldest, None)
+            _live_lite_retry_after.pop(oldest, None)
+            _live_lite_failures.pop(oldest, None)
         _live_lite_cache[key] = (time.monotonic(), result)
+        _live_lite_retry_after.pop(key, None)
+        _live_lite_failures.pop(key, None)
         _live_lite_refreshing.discard(key)
         return result
 
