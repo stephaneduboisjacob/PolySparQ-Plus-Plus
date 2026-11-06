@@ -1332,12 +1332,15 @@ def reconstructed_positions(mode=None, since=None, instance=None, session_id=Non
             'mark_is_live':live,'valuation_estimated':not live,
             'pnl_usd':value-cost,'pnl_pct':100*(value/cost-1) if cost else None,
             'seconds_left':secs,'awaiting_settlement':pending,'last_ts':p.get('last_ts')})
-    return {'positions':positions,'ts':now_ms,
-            'total_unrealized':sum(p['pnl_usd'] for p in positions),
-            'deployed_usd':sum(p['cost_basis'] for p in positions),
-            'market_value':sum(p['market_value'] for p in positions),
-            'source':'fills_replay','accounting_errors':ledger['errors'],
-            'accounting_complete':ledger.get('accounting_complete', not ledger['errors'])}
+    result = {'positions':positions,'ts':now_ms,
+              'total_unrealized':sum(p['pnl_usd'] for p in positions),
+              'deployed_usd':sum(p['cost_basis'] for p in positions),
+              'market_value':sum(p['market_value'] for p in positions),
+              'source':'fills_replay','accounting_errors':ledger['errors'],
+              'accounting_complete':ledger.get('accounting_complete', not ledger['errors'])}
+    if _include_ledger:
+        result['_ledger'] = ledger
+    return result
 
 
 def ledger_accounting(mode=None, position_snapshot=None, since=None, instance=None,
@@ -1860,6 +1863,161 @@ def api_orders(limit=60, instance=None, all_modes=False):
         if row.get("reject_reason"):
             row["reject_reason"] = _polytron_redact(str(row["reject_reason"]))
     return {"orders": rows}
+
+
+def api_window_bot_recent_orders(instances, limit=12):
+    """Fetch the recent orders for every visible window bot in one query."""
+    instances = list(dict.fromkeys(str(inst) for inst in (instances or []) if inst))[:128]
+    if not instances:
+        return {}
+    limit = max(1, min(int(limit), 50))
+    rows = q("""
+        WITH recent_order_ids AS (
+            SELECT requested.instance,o.client_order_id,o.ts_created
+              FROM unnest(%s::text[]) AS requested(instance)
+              CROSS JOIN LATERAL (
+                  SELECT o.client_order_id,o.ts_created
+                    FROM vp.orders o
+                   WHERE o.instance=requested.instance
+                   ORDER BY o.ts_created DESC
+                   LIMIT %s
+              ) o
+        )
+        SELECT o.client_order_id::text AS client_order_id,
+               o.ts_created,o.source,o.direction,
+               COALESCE(NULLIF(to_jsonb(o)->>'outcome_label',''),o.side_label::text) AS side_label,
+               COALESCE(NULLIF(to_jsonb(o)->>'manual_market_question',''),m.question) AS question,
+               o.price,o.size_shares,
+               COALESCE(f.filled_shares,0) AS filled_shares,
+               CASE WHEN o.status IN ('filled','partial','cancelled')
+                    THEN COALESCE(f.fill_notional,o.notional_usd)
+                    ELSE o.notional_usd END AS notional_usd,
+               COALESCE(f.fee_usd,0) AS fee_usd,
+               o.status,o.reject_reason,o.condition_id,o.instance,
+               m.asset,m.horizon_seconds,o.execution_mode,o.post_only,
+               o.exchange_order_id,o.mode
+          FROM recent_order_ids recent
+          JOIN vp.orders o USING(client_order_id)
+          LEFT JOIN LATERAL (
+              SELECT SUM(f.size_shares) AS filled_shares,
+                     SUM(f.price*f.size_shares) AS fill_notional,
+                     SUM(f.fee_usd) AS fee_usd
+                FROM vp.fills f
+               WHERE f.client_order_id=o.client_order_id
+          ) f ON TRUE
+          LEFT JOIN vp.pm_markets m ON m.condition_id=o.condition_id
+         ORDER BY recent.instance,recent.ts_created DESC
+    """, (instances, limit))
+    grouped = {instance: [] for instance in instances}
+    for row in rows:
+        if row.get("reject_reason"):
+            row["reject_reason"] = _polytron_redact(str(row["reject_reason"]))
+        grouped.setdefault(row.get("instance") or "", []).append(row)
+    return grouped
+
+
+def api_window_bot_execution_modes(instance_modes):
+    """Load per-bot quotes and 24h order stats with two fleet-wide queries."""
+    instances = list(dict.fromkeys(str(inst) for inst in (instance_modes or {}) if inst))[:128]
+    if not instances:
+        return {}
+    modes = [str(instance_modes[inst]) for inst in instances]
+    open_rows = q("""
+        WITH requested AS (
+            SELECT * FROM unnest(%s::text[],%s::text[]) AS x(instance,mode)
+        ), recent_open AS (
+            SELECT requested.instance,recent.client_order_id,recent.ts_submitted
+              FROM requested
+              CROSS JOIN LATERAL (
+                  SELECT o.client_order_id,o.ts_submitted
+                    FROM vp.orders o
+                   WHERE o.instance=requested.instance AND o.mode::text=requested.mode
+                     AND o.status::text IN ('submitted','acked','partial','uncertain')
+                     AND (requested.mode <> 'paper' OR EXISTS (
+                         SELECT 1 FROM vp.strategy_runs r
+                          WHERE r.instance IS NOT DISTINCT FROM o.instance
+                            AND r.session_id IS NOT DISTINCT FROM o.session_id
+                            AND r.ended_at IS NULL
+                     ))
+                   ORDER BY o.ts_submitted DESC LIMIT 100
+              ) recent
+        )
+        SELECT o.client_order_id::text,o.exchange_order_id,o.ts_submitted,
+               o.instance,o.execution_mode,o.post_only,o.status,o.source,
+               o.condition_id,o.token_id,o.side_label,o.direction,
+               o.price,o.size_shares,
+               COALESCE(SUM(f.size_shares),0) AS matched_shares,
+               COALESCE(m.asset,'') AS asset,
+               COALESCE(m.horizon_seconds,0) AS horizon_seconds,
+               COALESCE(EXTRACT(EPOCH FROM m.window_close)*1000,0)::bigint AS window_close
+          FROM recent_open recent
+          JOIN vp.orders o USING(client_order_id)
+          LEFT JOIN vp.fills f ON f.client_order_id=o.client_order_id
+          LEFT JOIN vp.pm_markets m ON m.condition_id=o.condition_id
+         GROUP BY recent.instance,recent.ts_submitted,o.client_order_id,
+                  m.asset,m.horizon_seconds,m.window_close
+         ORDER BY recent.instance,recent.ts_submitted DESC
+    """, (instances, modes))
+    stats_rows = q("""
+        WITH requested AS (
+            SELECT * FROM unnest(%s::text[],%s::text[]) AS x(instance,mode)
+        )
+        SELECT o.instance,o.execution_mode,
+               COUNT(*) AS orders,
+               COUNT(*) FILTER (WHERE o.status::text='filled') AS filled,
+               COUNT(*) FILTER (WHERE o.status::text='partial') AS partial,
+               COUNT(*) FILTER (WHERE o.status::text='cancelled') AS cancelled,
+               COUNT(*) FILTER (WHERE o.status::text='rejected') AS rejected,
+               COUNT(*) FILTER (WHERE COALESCE(fill_state.has_any_fill,FALSE))
+                   AS orders_with_fill_rows,
+               COUNT(*) FILTER (WHERE o.post_only IS TRUE
+                                 AND o.status::text IN ('submitted','acked','partial',
+                                                        'filled','cancelled','uncertain'))
+                   AS post_only_attempts,
+               COUNT(*) FILTER (WHERE o.post_only IS TRUE
+                                 AND o.status::text IN ('submitted','acked','partial',
+                                                        'filled','cancelled','uncertain')
+                                 AND COALESCE(fill_state.has_any_fill,FALSE))
+                   AS post_only_with_fill_rows,
+               COUNT(*) FILTER (WHERE o.post_only IS TRUE
+                                 AND o.status::text IN ('filled','cancelled')
+                                 AND o.ts_submitted IS NOT NULL
+                                 AND o.ts_terminal IS NOT NULL
+                                 AND o.ts_terminal >= o.ts_submitted)
+                   AS post_only_lifetime_samples,
+               COALESCE(SUM(o.notional_usd) FILTER (WHERE o.status::text='filled'),0) AS filled_usd,
+               COALESCE(AVG(EXTRACT(EPOCH FROM
+                         (COALESCE(o.ts_terminal,now())-o.ts_submitted))*1000)
+                        FILTER (WHERE o.status::text IN ('filled','cancelled','rejected')),0)
+                   AS avg_lifetime_ms,
+               COALESCE(AVG(EXTRACT(EPOCH FROM
+                         (o.ts_terminal-o.ts_submitted))*1000)
+                        FILTER (WHERE o.post_only IS TRUE
+                                  AND o.status::text IN ('filled','cancelled')
+                                  AND o.ts_submitted IS NOT NULL
+                                  AND o.ts_terminal IS NOT NULL
+                                  AND o.ts_terminal >= o.ts_submitted),0)
+                   AS avg_post_only_lifetime_ms
+          FROM requested
+          JOIN vp.orders o ON o.instance=requested.instance
+                          AND o.mode::text=requested.mode
+          LEFT JOIN LATERAL (
+              SELECT BOOL_OR(f.size_shares > 0) AS has_any_fill
+                FROM vp.fills f WHERE f.client_order_id=o.client_order_id
+          ) fill_state ON TRUE
+         WHERE o.ts_created>now()-interval '24 hours'
+         GROUP BY o.instance,o.execution_mode
+         ORDER BY o.instance,o.execution_mode
+    """, (instances, modes))
+    grouped = {instance: {"open_orders": [], "stats": []} for instance in instances}
+    for row in open_rows:
+        grouped.setdefault(row.get("instance") or "", {"open_orders": [], "stats": []})[
+            "open_orders"
+        ].append(row)
+    for row in stats_rows:
+        instance = row.pop("instance", "") or ""
+        grouped.setdefault(instance, {"open_orders": [], "stats": []})["stats"].append(row)
+    return grouped
 
 
 def _queue_cancel_order(instance, client_order_id, exchange_order_id):
@@ -8670,6 +8828,175 @@ def api_window_bot_desk(allowed_instances=None):
             _window_bot_desk_refreshing.discard(cache_key)
 
 
+_WINDOW_LOG_TIMESTAMP_RE = re.compile(
+    r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\]"
+)
+_WINDOW_LOG_PAUSE_RE = re.compile(
+    r"autopilot paused after (\d+) consecutive loss\(es\) until (\d+)"
+)
+_WINDOW_LOG_ENGINE_RE = re.compile(
+    r"WINDOW_BOT asset=(BTC|ETH|SOL|XRP) horizon=(300|900) "
+    r"state=([a-z_]+) source=([^ ]+) reason=([a-z0-9_.]+)(?: t=(\d+)s)?"
+)
+_WINDOW_LOG_GATE_RE = re.compile(
+    r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\].*?"
+    r"WINDOW_BOT asset=(BTC|ETH|SOL|XRP) horizon=(300|900) "
+    r"state=([a-z_]+) source=([^ ]+) reason=([a-z0-9_.]+)(?: t=(\d+)s)?"
+)
+_WINDOW_LOG_ENGINE_STATE_RE = re.compile(r"WINDOW_BOT .*state=([^ ]+)")
+_WINDOW_LOG_FRAMES_RE = re.compile(r"pm-md frames: total=(\d+).*connected=(true|false)")
+_WINDOW_LOG_MARKETS_RE = re.compile(r"gamma discovered (\d+) up-down markets")
+_WINDOW_LOG_WS_STATE_RE = re.compile(r"pm-md ws state: (connected|disconnected)")
+
+
+def _window_bot_log_diagnostics(log_lines, hot, horizons):
+    """Parse a bot's retained log tail once and extract its cockpit signals."""
+    def timestamp(line):
+        match = _WINDOW_LOG_TIMESTAMP_RE.match(line)
+        if not match:
+            return None
+        try:
+            return datetime.strptime(
+                f"{match.group(1)} {match.group(2)}", "%Y-%m-%d %H:%M:%S.%f"
+            )
+        except ValueError:
+            return None
+
+    process_started_at = None
+    startup_found = False
+    pause_candidates = []
+    engine_candidates = []
+    gate_candidates = []
+    market_feed_state = "unknown"
+    market_feed_frames = None
+    discovered_markets = None
+    fallback_feed_state = None
+
+    for line in reversed(log_lines):
+        if not startup_found and "tui: headless run loop active" in line:
+            startup_found = True
+            process_started_at = timestamp(line)
+
+        if "autopilot paused after " in line:
+            pause_match = _WINDOW_LOG_PAUSE_RE.search(line)
+            if pause_match:
+                pause_candidates.append((timestamp(line), pause_match))
+
+        if "WINDOW_BOT " in line and " state=" in line:
+            engine_candidates.append((timestamp(line), line))
+
+        if "WINDOW_BOT asset=" in line:
+            gate_match = _WINDOW_LOG_GATE_RE.search(line)
+            if gate_match:
+                try:
+                    gate_ts = datetime.strptime(
+                        f"{gate_match.group(1)} {gate_match.group(2)}",
+                        "%Y-%m-%d %H:%M:%S.%f",
+                    )
+                except ValueError:
+                    gate_ts = None
+                if gate_ts is not None:
+                    gate_candidates.append((gate_ts, gate_match))
+
+        if market_feed_frames is None and "pm-md frames:" in line:
+            frames_match = _WINDOW_LOG_FRAMES_RE.search(line)
+            if frames_match:
+                market_feed_frames = int(frames_match.group(1))
+                market_feed_state = (
+                    "connected" if frames_match.group(2) == "true" else "disconnected"
+                )
+        if discovered_markets is None and "gamma discovered " in line:
+            markets_match = _WINDOW_LOG_MARKETS_RE.search(line)
+            if markets_match:
+                discovered_markets = int(markets_match.group(1))
+        if fallback_feed_state is None and "pm-md ws state:" in line:
+            state_match = _WINDOW_LOG_WS_STATE_RE.search(line)
+            if state_match:
+                fallback_feed_state = state_match.group(1)
+
+    if market_feed_state == "unknown" and fallback_feed_state:
+        market_feed_state = fallback_feed_state
+
+    entry_pause = None
+    for pause_ts, pause_match in pause_candidates:
+        if process_started_at is not None and (
+                pause_ts is None or pause_ts < process_started_at):
+            continue
+        pause_until_ms = int(pause_match.group(2))
+        pause_now_ms = int(time.time() * 1000)
+        remaining_s = max(0, (pause_until_ms - pause_now_ms + 999) // 1000)
+        entry_pause = {
+            "active": pause_until_ms > pause_now_ms,
+            "consecutive_losses": int(pause_match.group(1)),
+            "until_ms": pause_until_ms,
+            "remaining_s": remaining_s,
+            "age_s": (round(max(0.0, (datetime.now(timezone.utc).replace(tzinfo=None)
+                                     - pause_ts).total_seconds()), 1)
+                      if pause_ts is not None else None),
+        }
+        break
+
+    engine_line = next((line for line_ts, line in engine_candidates
+                        if process_started_at is None or
+                        (line_ts is not None and line_ts >= process_started_at)), "")
+    engine_match = _WINDOW_LOG_ENGINE_RE.search(engine_line)
+    state_match = _WINDOW_LOG_ENGINE_STATE_RE.search(engine_line)
+    engine_state = state_match.group(1) if state_match else None
+
+    configured_horizon = int(hot.get("lead_lag_scalp_horizon_s") or 0) \
+        if hot.get("lead_lag_scalp_enabled") else 0
+    gate_horizons = {configured_horizon} if configured_horizon else {
+        int(value) for value in horizons if str(value).isdigit()
+    }
+    gate_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    gate_checks = []
+    latest_gate_by_asset = {}
+    for gate_ts, gate_match in gate_candidates:
+        if process_started_at is not None and gate_ts < process_started_at:
+            continue
+        horizon_s = int(gate_match.group(4))
+        if gate_horizons and horizon_s not in gate_horizons:
+            continue
+        age_s = max(0.0, (gate_now - gate_ts).total_seconds())
+        gate = {
+            "asset": gate_match.group(3), "horizon_seconds": horizon_s,
+            "state": gate_match.group(5), "source": gate_match.group(6),
+            "reason": gate_match.group(7),
+            "seconds_left": int(gate_match.group(8)) if gate_match.group(8) else None,
+            "age_s": round(age_s, 1),
+        }
+        if age_s <= 60.0:
+            gate_checks.append(gate)
+        if gate["asset"] not in latest_gate_by_asset:
+            latest_gate_by_asset[gate["asset"]] = gate
+
+    gate_reason_counts = {}
+    for gate in gate_checks:
+        if gate["state"] == "no_entry":
+            gate_reason_counts[gate["reason"]] = gate_reason_counts.get(gate["reason"], 0) + 1
+    top_gate_blockers = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(gate_reason_counts.items(),
+                                    key=lambda item: (-item[1], item[0]))[:3]
+    ]
+    entry_gate = {
+        "checks_60s": len(gate_checks),
+        "no_entry_60s": sum(gate["state"] == "no_entry" for gate in gate_checks),
+        "top_blockers": top_gate_blockers,
+        "latest_by_asset": list(latest_gate_by_asset.values()),
+        "age_s": min((gate["age_s"] for gate in latest_gate_by_asset.values()), default=None),
+    }
+    return {
+        "entry_pause": entry_pause,
+        "engine_state": engine_state,
+        "engine_match": engine_match,
+        "entry_gate": entry_gate,
+        "market_feed_state": market_feed_state,
+        "market_feed_frames": market_feed_frames,
+        "discovered_markets": discovered_markets,
+    }
+
+
 def _build_window_bot_desk(scope, cache_key):
     """Live operational view for the window-bot profiles and PAPER challengers."""
     now = time.monotonic()
@@ -8688,6 +9015,11 @@ def _build_window_bot_desk(scope, cache_key):
                 bot_configs[inst] = tomllib.load(stream)
         except Exception:
             continue
+    recent_orders_by_instance = api_window_bot_recent_orders(bot_configs, 12)
+    execution_by_instance = api_window_bot_execution_modes({
+        inst: cfg.get("runtime", {}).get("mode", "?")
+        for inst, cfg in bot_configs.items()
+    })
 
     # Window profiles default to PAPER and their 24h exit review is common to
     # every card. Build that ledger once for the mode, then select each bot's
@@ -8714,9 +9046,11 @@ def _build_window_bot_desk(scope, cache_key):
         horizons = cfg.get("polymarket", {}).get("universe_horizons_seconds", [])
         fleet_row = fleet_rows[inst]
         since = accounting_since(inst, mode)
-        positions = reconstructed_positions(mode, since, inst)
+        positions = reconstructed_positions(mode, since, inst, _include_ledger=True)
         accounting = ledger_accounting(mode, positions, since, inst)
-        execution = api_execution(inst)
+        execution = execution_by_instance.get(
+            inst, {"open_orders": [], "stats": []}
+        )
         exit_review = shared_exit_review.get(mode)
         if exit_review is None:
             exit_review = api_exit_performance(inst, 24, mode=mode)
@@ -8737,155 +9071,21 @@ def _build_window_bot_desk(scope, cache_key):
             "incomplete": int((exit_review.get("incomplete_by_instance") or {}).get(inst) or 0),
             "available": not bool(exit_review.get("error")),
         }
-        recent = api_orders(12, inst, all_modes=True).get("orders", [])
+        recent = recent_orders_by_instance.get(inst, [])
         if scope is not None:
             for order in recent:
                 order.pop("exchange_order_id", None)
         # Keep enough history to retain a loss-pause event for the duration of
         # the configured cooldown, even while per-market scan logs are busy.
         log_lines = tail(instance_log(inst), 6000)
-        # A restarted bot can leave less than a minute of old gate messages in
-        # the same log tail. Anchor diagnostics to this process run so the
-        # cockpit never mixes yesterday's/current-session filters together.
-        def log_timestamp(line):
-            match = re.match(
-                r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\]", line
-            )
-            if not match:
-                return None
-            try:
-                return datetime.strptime(
-                    f"{match.group(1)} {match.group(2)}", "%Y-%m-%d %H:%M:%S.%f"
-                )
-            except ValueError:
-                return None
-
-        process_started_at = None
-        for line in reversed(log_lines):
-            if "tui: headless run loop active" not in line:
-                continue
-            process_started_at = log_timestamp(line)
-            break
-        # Loss-streak cooldowns are intentionally silent in the scan loop.
-        # Surface the current process's last pause event so operators can tell
-        # a deliberate entry pause from a stalled strategy/feed.
-        entry_pause = None
-        pause_now_ms = int(time.time() * 1000)
-        for line in reversed(log_lines):
-            if "autopilot paused after " not in line:
-                continue
-            pause_ts = log_timestamp(line)
-            if process_started_at is not None and (
-                    pause_ts is None or pause_ts < process_started_at):
-                continue
-            pause_match = re.search(
-                r"autopilot paused after (\d+) consecutive loss\(es\) until (\d+)",
-                line,
-            )
-            if not pause_match:
-                continue
-            pause_until_ms = int(pause_match.group(2))
-            remaining_s = max(0, (pause_until_ms - pause_now_ms + 999) // 1000)
-            entry_pause = {
-                "active": pause_until_ms > pause_now_ms,
-                "consecutive_losses": int(pause_match.group(1)),
-                "until_ms": pause_until_ms,
-                "remaining_s": remaining_s,
-                "age_s": (round(max(0.0, (datetime.now(timezone.utc).replace(tzinfo=None)
-                                         - pause_ts).total_seconds()), 1)
-                          if pause_ts is not None else None),
-            }
-            break
-        # Each scalper writes a second WINDOW_BOT startup line for impulse
-        # shadow mode. Prefer the newest state-bearing line so that auxiliary
-        # telemetry cannot hide the bot's actual monitoring/entry state.
-        engine_line = next((line for line in reversed(log_lines)
-                            if "WINDOW_BOT " in line and " state=" in line
-                            and (process_started_at is None or
-                                 (log_timestamp(line) is not None and
-                                  log_timestamp(line) >= process_started_at))), "")
-        engine_state = None
-        engine_match = re.search(
-            r"WINDOW_BOT asset=(BTC|ETH|SOL|XRP) horizon=(300|900) "
-            r"state=([a-z_]+) source=([^ ]+) reason=([a-z0-9_.]+)(?: t=(\d+)s)?",
-            engine_line,
-        )
-        match = re.search(r"WINDOW_BOT .*state=([^ ]+)", engine_line)
-        if match:
-            engine_state = match.group(1)
-        configured_horizon = int(hot.get("lead_lag_scalp_horizon_s") or 0) \
-            if hot.get("lead_lag_scalp_enabled") else 0
-        gate_horizons = {configured_horizon} if configured_horizon else {
-            int(value) for value in horizons if str(value).isdigit()
-        }
-        gate_now = datetime.now(timezone.utc).replace(tzinfo=None)
-        gate_checks = []
-        latest_gate_by_asset = {}
-        for line in reversed(log_lines):
-            gate_match = re.search(
-                r"^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}\.\d{3})\].*?"
-                r"WINDOW_BOT asset=(BTC|ETH|SOL|XRP) horizon=(300|900) "
-                r"state=([a-z_]+) source=([^ ]+) reason=([a-z0-9_.]+)(?: t=(\d+)s)?",
-                line,
-            )
-            if not gate_match:
-                continue
-            gate_ts = log_timestamp(line)
-            if gate_ts is None:
-                continue
-            if process_started_at is not None and gate_ts < process_started_at:
-                continue
-            horizon_s = int(gate_match.group(4))
-            if gate_horizons and horizon_s not in gate_horizons:
-                continue
-            age_s = max(0.0, (gate_now - gate_ts).total_seconds())
-            gate = {
-                "asset": gate_match.group(3), "horizon_seconds": horizon_s,
-                "state": gate_match.group(5), "source": gate_match.group(6),
-                "reason": gate_match.group(7),
-                "seconds_left": int(gate_match.group(8)) if gate_match.group(8) else None,
-                "age_s": round(age_s, 1),
-            }
-            if age_s <= 60.0:
-                gate_checks.append(gate)
-            if gate["asset"] not in latest_gate_by_asset:
-                latest_gate_by_asset[gate["asset"]] = gate
-        gate_reason_counts = {}
-        for gate in gate_checks:
-            if gate["state"] == "no_entry":
-                gate_reason_counts[gate["reason"]] = gate_reason_counts.get(gate["reason"], 0) + 1
-        top_gate_blockers = [
-            {"reason": reason, "count": count}
-            for reason, count in sorted(gate_reason_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
-        ]
-        entry_gate = {
-            "checks_60s": len(gate_checks),
-            "no_entry_60s": sum(gate["state"] == "no_entry" for gate in gate_checks),
-            "top_blockers": top_gate_blockers,
-            "latest_by_asset": list(latest_gate_by_asset.values()),
-            "age_s": min((gate["age_s"] for gate in latest_gate_by_asset.values()), default=None),
-        }
-        market_feed_state = "unknown"
-        market_feed_frames = None
-        discovered_markets = None
-        for line in reversed(log_lines):
-            if market_feed_frames is None and "pm-md frames:" in line:
-                frames_match = re.search(r"pm-md frames: total=(\d+).*connected=(true|false)", line)
-                if frames_match:
-                    market_feed_frames = int(frames_match.group(1))
-                    market_feed_state = "connected" if frames_match.group(2) == "true" else "disconnected"
-            if discovered_markets is None and "gamma discovered " in line:
-                markets_match = re.search(r"gamma discovered (\d+) up-down markets", line)
-                if markets_match:
-                    discovered_markets = int(markets_match.group(1))
-            if market_feed_frames is not None and discovered_markets is not None:
-                break
-        if market_feed_state == "unknown":
-            for line in reversed(log_lines):
-                state_match = re.search(r"pm-md ws state: (connected|disconnected)", line)
-                if state_match:
-                    market_feed_state = state_match.group(1)
-                    break
+        log_diagnostics = _window_bot_log_diagnostics(log_lines, hot, horizons)
+        entry_pause = log_diagnostics["entry_pause"]
+        engine_state = log_diagnostics["engine_state"]
+        engine_match = log_diagnostics["engine_match"]
+        entry_gate = log_diagnostics["entry_gate"]
+        market_feed_state = log_diagnostics["market_feed_state"]
+        market_feed_frames = log_diagnostics["market_feed_frames"]
+        discovered_markets = log_diagnostics["discovered_markets"]
         open_orders = [dict(order) for order in execution.get("open_orders", [])]
         if scope is not None:
             for order in open_orders:
