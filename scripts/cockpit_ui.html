@@ -3202,7 +3202,12 @@ function connectSSE(){
         capturePredictionReferenceSample(S.prices,Date.now());
         updatePredictionReferenceDisplays(S.prices);
       }
-      if(!S.paused)checkNewFills(d.recent_fills||[]);
+      const streamFills=d.recent_fills||[];
+      if(!S.paused)checkNewFills(streamFills);
+      // The stream already carries the latest fills. Reuse it for the ticker on
+      // workspaces that do not load the full activity snapshot; this avoids a
+      // separate activity request every two seconds on Strategy and other tabs.
+      if(!activitySnapshotWorkspace())renderStreamFillTape(streamFills);
       // Patch position card oracle/cb prices at SSE rate (~0.8s) without full re-render
       if(S.curTab==='positions'){
         ((S.data.positions||{}).positions||[]).forEach(p=>{
@@ -3585,7 +3590,7 @@ async function refresh(force=false){
 }
 
 async function loadActivity(force=false){
-  if(!activitySnapshotWorkspace())return loadFillTape();
+  if(!activitySnapshotWorkspace())return;
   if(S.activityRefreshing)return;
   const now=Date.now();
   if(!force&&S.activity.ts&&now-S.activity.ts<1800)return;
@@ -3874,10 +3879,43 @@ async function cancelOpenOrders(){
 }
 
 // ── Live fill ticker tape ─────────────────────────────────────────────────
-let _tapeSig='';
-function renderFillTape(d){
+let _tapeSig='',_tapeRows=[];
+function _fillTapeKey(o){
+  return String(o.client_order_id||[o.instance,o.asset,o.ts_created,o.source,o.direction,o.side_label,o.price,o.notional_usd].join(':'));
+}
+function _fillTapeTime(o){
+  const raw=o.ts_created;
+  const n=typeof raw==='number'?(raw<1e12?raw*1000:raw):Date.parse(raw||'');
+  return Number.isFinite(n)?n:0;
+}
+function renderStreamFillTape(fills){
+  if(!Array.isArray(fills)||!fills.length)return;
+  const rows=fills.map(f=>{
+    const rawTs=f.ts;
+    const tsMs=typeof rawTs==='number'?(rawTs<1e12?rawTs*1000:rawTs):Date.parse(rawTs||'');
+    if(!Number.isFinite(tsMs))return null;
+    const tsCreated=new Date(tsMs).toISOString();
+    const price=+f.price||0,size=+f.size_shares||0;
+    return{
+      status:'filled',
+      client_order_id:['stream',f.instance,f.asset,tsMs,f.direction,f.source,f.side_label,price,size].join(':'),
+      ts_created:tsCreated,source:f.source,direction:f.direction,side_label:f.side_label,
+      price,notional_usd:price*size,instance:f.instance,asset:f.asset
+    };
+  }).filter(Boolean);
+  if(rows.length)renderFillTape(rows,true);
+}
+function renderFillTape(d,merge=false){
   const source=Array.isArray(d)?d:((d.orders||{}).orders||[]);
-  const orders=source.filter(o=>o.status==='filled').slice(0,30);
+  const incoming=source.filter(o=>o.status==='filled');
+  if(merge){
+    const byKey=new Map(_tapeRows.map(o=>[_fillTapeKey(o),o]));
+    incoming.forEach(o=>byKey.set(_fillTapeKey(o),o));
+    _tapeRows=[...byKey.values()].sort((a,b)=>_fillTapeTime(b)-_fillTapeTime(a)).slice(0,60);
+  }else _tapeRows=incoming;
+  const orders=_tapeRows
+    .filter(o=>!S.curInstance||o.instance===S.curInstance)
+    .sort((a,b)=>_fillTapeTime(b)-_fillTapeTime(a)).slice(0,30);
   const sig=orders.map(o=>[o.client_order_id,o.ts_created,o.source,o.direction,o.side_label,o.price,o.notional_usd,o.instance,o.asset].join(':')).join('|');
   if(sig===_tapeSig)return;
   _tapeSig=sig;
@@ -3903,17 +3941,6 @@ function renderFillTape(d){
 }
 
 function activitySnapshotWorkspace(){return ['overview','positions','logs'].includes(S.curTab);}
-let _fillTapeRefreshing=false;
-async function loadFillTape(){
-  if(_fillTapeRefreshing||document.hidden)return;
-  _fillTapeRefreshing=true;
-  try{
-    const params=new URLSearchParams({tape:'1'});
-    if(S.curInstance)params.set('instance',S.curInstance);
-    const r=await apiFetch(`/api/activity?${params}`,{timeoutMs:4000});
-    if(r&&!r.warming_up&&Array.isArray(r.orders))renderFillTape(r.orders);
-  }finally{_fillTapeRefreshing=false;}
-}
 
 // ── Stats bar ─────────────────────────────────────────────────────────────
 function updateStatsBar(st,h){
