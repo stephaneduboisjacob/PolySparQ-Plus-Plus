@@ -2261,7 +2261,14 @@ const PREDICTION_REFERENCE_SOURCES=[
 ];
 const PREDICTION_REFERENCE_SERIES=[...PREDICTION_REFERENCE_SOURCES.map(source=>({key:source.key,label:source.key==='oracle'?'CHAINLINK':source.label})),{key:'poly_up',label:'POLY UP'},{key:'poly_down',label:'POLY DOWN'}];
 const PREDICTION_REFERENCE_POLY_LIMIT=12000,PREDICTION_REFERENCE_DIRECT_LIMIT=6000,PREDICTION_REFERENCE_TRIM_BATCH=512;
-const PREDICTION_REFERENCE_PAINT_INTERVAL_MS=100;
+const PREDICTION_REFERENCE_PAINT_INTERVAL_MS=200;
+function schedulePredictionReferenceChartPaint(){
+  if(S.predictionReferencePaintTimer)return;
+  S.predictionReferencePaintTimer=setTimeout(()=>{
+    S.predictionReferencePaintTimer=null;
+    if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();
+  },PREDICTION_REFERENCE_PAINT_INTERVAL_MS);
+}
 function renderPredictionReferenceSeriesControls(){
   const target=$('predictionReferenceSeriesToggles');if(!target)return;
   const current=target.dataset.ready==='true';
@@ -2321,9 +2328,7 @@ function recordPredictionReferencePolyTick(side,value,sourceTimestamp){
   if(points.length>PREDICTION_REFERENCE_POLY_LIMIT+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-PREDICTION_REFERENCE_POLY_LIMIT);
   const state=S.predictionReferencePolySocket;if(state){state.lastQuoteAt=now;state.lastSourceTimestamp=sourceTs;state.status='live';}
   predictionReferencePolyStatus();
-  if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset&&!S.predictionReferencePaintTimer){
-    S.predictionReferencePaintTimer=setTimeout(()=>{S.predictionReferencePaintTimer=null;if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();},PREDICTION_REFERENCE_PAINT_INTERVAL_MS);
-  }
+  if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset)schedulePredictionReferenceChartPaint();
 }
 function connectPredictionReferencePolySocket(data){
   const tokens=data?.share_tokens||{},up=String(tokens.up||''),down=String(tokens.down||''),key=`${S.predictionReferenceWindow?.key||''}:${up}:${down}`;
@@ -2624,7 +2629,7 @@ function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
   if(points.length>PREDICTION_REFERENCE_DIRECT_LIMIT+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-PREDICTION_REFERENCE_DIRECT_LIMIT);
   if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset){
     if(now-S.predictionReferenceDirectUiAt>100){S.predictionReferenceDirectUiAt=now;patchPredictionReferenceDirectQuotes(asset);}
-    if(!S.predictionReferencePaintTimer)S.predictionReferencePaintTimer=setTimeout(()=>{S.predictionReferencePaintTimer=null;if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();},PREDICTION_REFERENCE_PAINT_INTERVAL_MS);
+    schedulePredictionReferenceChartPaint();
   }
   predictionReferenceDirectStatus();
 }
@@ -2669,8 +2674,7 @@ function updatePredictionReferenceDisplays(prices=S.prices){
   });
   const status=$('predictionReferenceStreamStatus');
   if(status){const age=ageMs(S.lastSseAt);status.textContent=age==null?'COCKPIT SSE CONNECTING':`COCKPIT SSE ${age<1000?`${age}ms`:`${(age/1000).toFixed(1)}s`} AGO · ~500ms PUSH`;status.dataset.state=age==null||age>2500?'stale':'live';}
-  if(S.predictionReferencePaintTimer){clearTimeout(S.predictionReferencePaintTimer);S.predictionReferencePaintTimer=null;}
-  renderPredictionReferenceChart();
+  schedulePredictionReferenceChartPaint();
   if(S.curTab==='manualpred'&&S.predictionBoard)void refreshPredictionReferenceWindow();
 }
 function setPredictionReferenceAsset(asset){
