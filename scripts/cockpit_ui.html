@@ -4052,6 +4052,7 @@ function updateStrategyFeedFreshness(now=Date.now()){
 function updateSpeedPanel(){
   updateOperatorRadarFreshness();
   updateStrategyFeedFreshness();
+  if(document.hidden||S.curTab!=='overview')return;
   const host=$('speedPanel');if(!host)return;
   if(host.dataset.speedCellsBuilt){
     const sseAge=ageMs(S.lastSseAt),serverLag=S.lastServerTs?Date.now()-S.lastServerTs:null;
