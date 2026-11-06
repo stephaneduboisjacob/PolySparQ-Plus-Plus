@@ -2255,7 +2255,7 @@ const PREDICTION_REFERENCE_SOURCES=[
   {key:'coinbase',label:'COINBASE',color:'#81baff',maxAge:5},
   {key:'binance',label:'BINANCE',color:'#f2bd72',maxAge:5},
   {key:'kraken',label:'KRAKEN',color:'#b69aff',maxAge:5},
-  {key:'gemini',label:'GEMINI',color:'#ff92c7',maxAge:5,assets:['BTC']},
+  {key:'gemini',label:'GEMINI',color:'#ff92c7',maxAge:5},
   {key:'okx',label:'OKX',color:'#f28876',maxAge:5},
 ];
 const PREDICTION_REFERENCE_SERIES=[...PREDICTION_REFERENCE_SOURCES.map(source=>({key:source.key,label:source.key==='oracle'?'CHAINLINK':source.label})),{key:'poly_up',label:'POLY UP'},{key:'poly_down',label:'POLY DOWN'}];
@@ -2510,13 +2510,13 @@ function startPredictionReferenceSockets(){
   const sourceKeys=['oracle','coinbase','binance','kraken','gemini','okx'];
   const state=S.predictionReferenceSockets={asset,closed:false,sockets:{},states:Object.fromEntries(sourceKeys.map(key=>[key,'connecting'])),attempts:Object.fromEntries(sourceKeys.map(key=>[key,0])),retryTimers:{},heartbeats:{}};
   predictionReferenceDirectStatus();
-  const symbols={BTC:{kraken:'BTC/USD',okx:'BTC-USDT',binance:'btcusdt'},ETH:{kraken:'ETH/USD',okx:'ETH-USDT',binance:'ethusdt'},SOL:{kraken:'SOL/USD',okx:'SOL-USDT',binance:'solusdt'},XRP:{kraken:'XRP/USD',okx:'XRP-USDT',binance:'xrpusdt'}}[asset];
+  const symbols={BTC:{kraken:'BTC/USD',okx:'BTC-USDT',binance:'btcusdt',gemini:'btcusd'},ETH:{kraken:'ETH/USD',okx:'ETH-USDT',binance:'ethusdt',gemini:'ethusd'},SOL:{kraken:'SOL/USD',okx:'SOL-USDT',binance:'solusdt',gemini:'solusd'},XRP:{kraken:'XRP/USD',okx:'XRP-USDT',binance:'xrpusdt',gemini:'xrpusd'}}[asset];
   const specs={
     oracle:{url:'wss://ws-live-data.polymarket.com',connect:socket=>{socket.send(JSON.stringify({action:'subscribe',subscriptions:[{topic:'crypto_prices_chainlink',type:'*',filters:''}]}));state.heartbeats.oracle=setInterval(()=>{if(socket.readyState===WebSocket.OPEN)socket.send('PING');},5000);}},
     coinbase:{url:'wss://advanced-trade-ws.coinbase.com',connect:socket=>socket.send(JSON.stringify({type:'subscribe',product_ids:[`${asset}-USD`],channel:'ticker'}))},
     binance:{url:`wss://stream.binance.com:9443/ws/${symbols.binance}@trade`,connect:()=>{}},
     kraken:{url:'wss://ws.kraken.com/v2',connect:socket=>socket.send(JSON.stringify({method:'subscribe',params:{channel:'ticker',symbol:[symbols.kraken],event_trigger:'bbo',snapshot:true},req_id:1}))},
-    gemini:{url:'wss://ws.gemini.com',assets:['BTC'],connect:socket=>socket.send(JSON.stringify({id:'1',method:'subscribe',params:['btcusd@bookTicker']}))},
+    gemini:{url:'wss://ws.gemini.com',connect:socket=>socket.send(JSON.stringify({id:'1',method:'subscribe',params:[`${symbols.gemini}@bookTicker`]}))},
     okx:{url:'wss://ws.okx.com/ws/v5/public',connect:socket=>socket.send(JSON.stringify({op:'subscribe',args:[{channel:'books5',instId:symbols.okx}]}))}
   };
   const connect=source=>{
