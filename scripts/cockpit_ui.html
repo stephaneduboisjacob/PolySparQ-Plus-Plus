@@ -2741,11 +2741,15 @@ function predictionReferenceDecimate(points,limit=1400){
   if(points.length<=limit)return points;
   const bucketSize=Math.max(1,Math.ceil(points.length/(limit/4))),reduced=[];
   for(let start=0;start<points.length;start+=bucketSize){
-    const bucket=points.slice(start,start+bucketSize);if(bucket.length<=4){reduced.push(...bucket);continue;}
-    let low=bucket[0],high=bucket[0];
-    for(const point of bucket){if(point.value<low.value)low=point;if(point.value>high.value)high=point;}
-    const picked=[bucket[0],low,high,bucket.at(-1)].sort((a,b)=>a.t-b.t);
-    for(const point of picked)if(reduced.at(-1)?.t!==point.t)reduced.push(point);
+    const end=Math.min(points.length,start+bucketSize),first=points[start],last=points[end-1];
+    if(end-start<=4){for(let index=start;index<end;index++){const point=points[index];if(reduced.at(-1)?.t!==point.t)reduced.push(point);}continue;}
+    let low=first,high=first;
+    for(let index=start+1;index<end;index++){const point=points[index];if(point.value<low.value)low=point;if(point.value>high.value)high=point;}
+    const middleFirst=low.t<=high.t?low:high,middleLast=low.t<=high.t?high:low;
+    if(reduced.at(-1)?.t!==first.t)reduced.push(first);
+    if(reduced.at(-1)?.t!==middleFirst.t)reduced.push(middleFirst);
+    if(reduced.at(-1)?.t!==middleLast.t)reduced.push(middleLast);
+    if(reduced.at(-1)?.t!==last.t)reduced.push(last);
   }
   return reduced;
 }
@@ -2883,7 +2887,12 @@ function renderPredictionReferenceChart(){
     const xx=x(ts);return`<line class="pred-reference-stage" x1="${xx.toFixed(1)}" y1="${priceTop}" x2="${xx.toFixed(1)}" y2="${shareBottom}"/><text class="pred-reference-stage-label" x="${xx.toFixed(1)}" y="${priceTop-12}" text-anchor="${fraction===0?'start':fraction===1?'end':'middle'}">${label}</text>`;
   }).join('');
   const linePath=(points,valueFn)=>{
-    const reduced=predictionReferenceDecimate(points),intervals=reduced.slice(1).map((point,index)=>point.t-reduced[index].t).filter(value=>value>0).sort((a,b)=>a-b);
+    const reduced=predictionReferenceDecimate(points),intervals=[],stride=Math.max(1,Math.ceil((reduced.length-1)/64));
+    for(let index=stride;index<reduced.length;index+=stride){
+      const previous=Math.max(0,index-stride),steps=index-previous,interval=(reduced[index].t-reduced[previous].t)/steps;
+      if(interval>0)intervals.push(interval);
+    }
+    intervals.sort((a,b)=>a-b);
     const median=intervals.length?intervals[Math.floor(intervals.length/2)]:0,gapLimit=Math.max(2500,Math.min(15000,median*4||2500));
     let path='',previous=null;
     for(const point of reduced){const move=!previous||point.t-previous.t>gapLimit;path+=`${move?'M':' L'}${x(point.t).toFixed(1)} ${valueFn(point).toFixed(1)}`;previous=point;}
