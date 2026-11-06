@@ -4068,7 +4068,11 @@ def api_v2_analytics(days=14, instance="", mode=""):
         cache_key = (days, instance, mode)
         cached = _analytics_cache.get(cache_key)
         if cached and now_ms - cached[0] < 15_000:
+            _analytics_cache.pop(cache_key, None)
+            _analytics_cache[cache_key] = cached
             return cached[1]
+        if cached:
+            _analytics_cache.pop(cache_key, None)
         fills = q("""SELECT f.id, f.ts, f.price, f.size_shares, f.fee_usd,
                     o.client_order_id::text, o.mode::text, o.instance,
                     o.session_id::text, o.condition_id, o.token_id,
@@ -4081,6 +4085,11 @@ def api_v2_analytics(days=14, instance="", mode=""):
         result = build_analytics(fills, now_ms-days*86_400_000 if days else 0, now_ms)
         result["scope"] = instance or "ALL BOTS"
         _analytics_cache[cache_key] = (now_ms, result)
+        for key, (cached_at, _) in list(_analytics_cache.items()):
+            if now_ms - cached_at >= 15_000:
+                _analytics_cache.pop(key, None)
+        while len(_analytics_cache) > 32:
+            _analytics_cache.pop(next(iter(_analytics_cache)))
         return result
 
 
@@ -5485,6 +5494,14 @@ _mobile_gamma_failures = {}
 _mobile_gamma_host_retry_at = 0.0
 
 
+def _mobile_cache_store(cache, key, value, limit=128):
+    """Insert into an insertion-ordered cache and evict its oldest key."""
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > limit:
+        cache.pop(next(iter(cache)))
+
+
 class _MobileUpstreamCooldown(RuntimeError):
     """A public market-data request is deferred until its retry window ends."""
 
@@ -5537,7 +5554,7 @@ def _mobile_cached_json(key, url, ttl=15.0, timeout=5.0):
     try:
         value = _public_json(url, timeout=timeout)
         with _mobile_gamma_lock:
-            _mobile_gamma_cache[key] = (time.monotonic(), value)
+            _mobile_cache_store(_mobile_gamma_cache, key, (time.monotonic(), value))
             _mobile_gamma_retry_at.pop(key, None)
             _mobile_gamma_failures.pop(key, None)
         return value, False
@@ -5546,9 +5563,9 @@ def _mobile_cached_json(key, url, ttl=15.0, timeout=5.0):
             failure_count = _mobile_gamma_failures.get(key, 0) + 1
             delay = _mobile_gamma_retry_delay(exc, failure_count)
             if delay is not None:
-                _mobile_gamma_failures[key] = failure_count
+                _mobile_cache_store(_mobile_gamma_failures, key, failure_count)
                 retry_at = time.monotonic() + delay
-                _mobile_gamma_retry_at[key] = retry_at
+                _mobile_cache_store(_mobile_gamma_retry_at, key, retry_at)
                 import urllib.error
                 if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
                     # Gamma may rate-limit by host/IP rather than query key;
@@ -5782,7 +5799,7 @@ def api_mobile_market_book(condition_id, outcome_index):
                    "min_order_size": _mobile_number(book.get("min_order_size")),
                    "server_ts": int(time.time() * 1000)}
         with _mobile_gamma_lock:
-            _mobile_book_cache[cache_key] = (time.monotonic(), payload)
+            _mobile_cache_store(_mobile_book_cache, cache_key, (time.monotonic(), payload))
         return 200, payload
     except Exception:
         return 502, {"error": "Polymarket order book is temporarily unavailable"}
@@ -5929,16 +5946,14 @@ def api_mobile_market_books(condition_id):
                    "retry_after_seconds": 0}
         with _mobile_gamma_lock:
             cached_at = time.monotonic()
-            _mobile_book_batch_cache[cache_key] = (cached_at, payload)
+            _mobile_cache_store(_mobile_book_batch_cache, cache_key, (cached_at, payload), 64)
             for token_id, book in zip(token_ids, books):
                 if book:
-                    _mobile_book_cache["book:" + token_id] = (cached_at, book)
+                    _mobile_cache_store(_mobile_book_cache, "book:" + token_id, (cached_at, book))
             _mobile_book_retry_keys.pop(cache_key, None)
             _mobile_book_failures.pop(cache_key, None)
             if _mobile_book_retry_at <= cached_at:
                 _mobile_book_retry_at = 0.0
-            while len(_mobile_book_batch_cache) > 64:
-                _mobile_book_batch_cache.pop(next(iter(_mobile_book_batch_cache)))
         return 200, payload
     except Exception as exc:
         import urllib.error
@@ -5948,12 +5963,12 @@ def api_mobile_market_books(condition_id):
             failure_count = _mobile_book_failures.get(cache_key, 0) + 1
             delay = _mobile_gamma_retry_delay(exc, failure_count)
             if delay is not None:
-                _mobile_book_failures[cache_key] = failure_count
+                _mobile_cache_store(_mobile_book_failures, cache_key, failure_count)
                 retry_at = time.monotonic() + delay
                 if rate_limited:
                     _mobile_book_retry_at = max(_mobile_book_retry_at, retry_at)
                 else:
-                    _mobile_book_retry_keys[cache_key] = retry_at
+                    _mobile_cache_store(_mobile_book_retry_keys, cache_key, retry_at)
             cached = _mobile_book_batch_cache.get(cache_key)
         if isinstance(exc, urllib.error.HTTPError):
             exc.close()
@@ -6111,9 +6126,8 @@ def api_mobile_market_books_watchlist(condition_ids_raw):
                    "server_ts": int(time.time() * 1000), "stale": False,
                    "retry_after_seconds": 0}
         with _mobile_gamma_lock:
-            _mobile_book_batch_cache[cache_key] = (time.monotonic(), payload)
-            while len(_mobile_book_batch_cache) > 64:
-                _mobile_book_batch_cache.pop(next(iter(_mobile_book_batch_cache)))
+            _mobile_cache_store(_mobile_book_batch_cache, cache_key,
+                                (time.monotonic(), payload), 64)
         return 200, payload
 
     token_ids = [token_id for _, _, market_tokens in usable for token_id in market_tokens]
@@ -6141,22 +6155,23 @@ def api_mobile_market_books_watchlist(condition_ids_raw):
                               "server_ts": server_ts, "stale": False,
                               "retry_after_seconds": 0}
             with _mobile_gamma_lock:
-                _mobile_book_batch_cache["books:" + condition] = (time.monotonic(), single_payload)
+                _mobile_cache_store(_mobile_book_batch_cache, "books:" + condition,
+                                    (time.monotonic(), single_payload), 64)
                 for token_id, book in zip(market_tokens, books):
                     if book:
-                        _mobile_book_cache["book:" + token_id] = (time.monotonic(), book)
+                        _mobile_cache_store(_mobile_book_cache, "book:" + token_id,
+                                            (time.monotonic(), book))
 
         payload = {"markets": [result_rows[condition] for condition in conditions],
                    "server_ts": server_ts, "stale": False, "retry_after_seconds": 0}
         with _mobile_gamma_lock:
             cached_at = time.monotonic()
-            _mobile_book_batch_cache[cache_key] = (cached_at, payload)
+            _mobile_cache_store(_mobile_book_batch_cache, cache_key,
+                                (cached_at, payload), 64)
             _mobile_book_retry_keys.pop(cache_key, None)
             _mobile_book_failures.pop(cache_key, None)
             if _mobile_book_retry_at <= cached_at:
                 _mobile_book_retry_at = 0.0
-            while len(_mobile_book_batch_cache) > 64:
-                _mobile_book_batch_cache.pop(next(iter(_mobile_book_batch_cache)))
         return 200, payload
     except Exception as exc:
         import urllib.error
@@ -6166,12 +6181,12 @@ def api_mobile_market_books_watchlist(condition_ids_raw):
             failure_count = _mobile_book_failures.get(cache_key, 0) + 1
             delay = _mobile_gamma_retry_delay(exc, failure_count)
             if delay is not None:
-                _mobile_book_failures[cache_key] = failure_count
+                _mobile_cache_store(_mobile_book_failures, cache_key, failure_count)
                 retry_at = time.monotonic() + delay
                 if rate_limited:
                     _mobile_book_retry_at = max(_mobile_book_retry_at, retry_at)
                 else:
-                    _mobile_book_retry_keys[cache_key] = retry_at
+                    _mobile_cache_store(_mobile_book_retry_keys, cache_key, retry_at)
             cached = _mobile_book_batch_cache.get(cache_key)
         if isinstance(exc, urllib.error.HTTPError):
             exc.close()
@@ -6292,13 +6307,12 @@ def api_mobile_public_trades(condition_id, limit=20, cursor=None):
                    "server_ts": int(time.time() * 1000), "stale": False,
                    "retry_after_seconds": 0}
         with _mobile_public_trades_lock:
-            _mobile_public_trades_cache[cache_key] = (time.monotonic(), payload)
+            _mobile_cache_store(_mobile_public_trades_cache, cache_key,
+                                (time.monotonic(), payload), 64)
             _mobile_public_trades_retry_keys.pop(cache_key, None)
             _mobile_public_trades_failures.pop(cache_key, None)
             if _mobile_public_trades_retry_at <= time.monotonic():
                 _mobile_public_trades_retry_at = 0.0
-            while len(_mobile_public_trades_cache) > 64:
-                _mobile_public_trades_cache.pop(next(iter(_mobile_public_trades_cache)))
         return 200, payload
     except Exception as exc:
         import urllib.error
@@ -6308,7 +6322,7 @@ def api_mobile_public_trades(condition_id, limit=20, cursor=None):
             failure_count = _mobile_public_trades_failures.get(cache_key, 0) + 1
             delay = _mobile_gamma_retry_delay(exc, failure_count)
             if delay is not None:
-                _mobile_public_trades_failures[cache_key] = failure_count
+                _mobile_cache_store(_mobile_public_trades_failures, cache_key, failure_count)
                 retry_at = time.monotonic() + delay
                 if rate_limited:
                     # Data API limits may apply to this server's IP, so share
@@ -6316,7 +6330,7 @@ def api_mobile_public_trades(condition_id, limit=20, cursor=None):
                     _mobile_public_trades_retry_at = max(
                         _mobile_public_trades_retry_at, retry_at)
                 else:
-                    _mobile_public_trades_retry_keys[cache_key] = retry_at
+                    _mobile_cache_store(_mobile_public_trades_retry_keys, cache_key, retry_at)
                 cached = _mobile_public_trades_cache.get(cache_key)
             else:
                 retry_at = 0.0
