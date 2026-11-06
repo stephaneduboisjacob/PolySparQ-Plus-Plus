@@ -1824,8 +1824,8 @@ def api_orders(limit=60, instance=None, all_modes=False):
         args.append(instance)
     where_clause = " AND ".join(filters) if filters else "TRUE"
     rows = q(f"""
-        WITH recent_orders AS (
-            SELECT o.*
+        WITH recent_order_ids AS (
+            SELECT o.client_order_id,o.ts_created
               FROM vp.orders o
              WHERE {where_clause}
              ORDER BY o.ts_created DESC
@@ -1844,7 +1844,8 @@ def api_orders(limit=60, instance=None, all_modes=False):
                o.status, o.reject_reason, o.condition_id, o.instance,
                m.asset, m.horizon_seconds, o.execution_mode, o.post_only,
                o.exchange_order_id, o.mode
-        FROM recent_orders o
+        FROM recent_order_ids recent
+        JOIN vp.orders o USING (client_order_id)
         LEFT JOIN LATERAL (
             SELECT SUM(f.size_shares) AS filled_shares,
                    SUM(f.price * f.size_shares) AS fill_notional,
@@ -1853,7 +1854,7 @@ def api_orders(limit=60, instance=None, all_modes=False):
              WHERE f.client_order_id = o.client_order_id
         ) f ON TRUE
         LEFT JOIN vp.pm_markets m ON m.condition_id = o.condition_id
-        ORDER BY o.ts_created DESC
+        ORDER BY recent.ts_created DESC
     """, tuple(args + [limit]))
     for row in rows:
         if row.get("reject_reason"):
