@@ -2255,7 +2255,11 @@ function renderPredictionReferenceSeriesControls(){
   const target=$('predictionReferenceSeriesToggles');if(!target)return;
   const current=target.dataset.ready==='true';
   if(current){
-    for(const series of PREDICTION_REFERENCE_SERIES){const button=target.querySelector(`[data-ref-series="${series.key}"]`);if(button)button.setAttribute('aria-pressed',String(S.predictionReferenceSeriesVisibility[series.key]!==false));}
+    for(const button of target.children){
+      const key=button.dataset.refSeries;if(!key)continue;
+      const pressed=String(S.predictionReferenceSeriesVisibility[key]!==false);
+      if(button.getAttribute('aria-pressed')!==pressed)button.setAttribute('aria-pressed',pressed);
+    }
     return;
   }
   target.innerHTML=PREDICTION_REFERENCE_SERIES.map(series=>`<button type="button" class="${series.key.startsWith('poly_')?'share '+series.key.slice(5):series.key}" data-ref-series="${series.key}" aria-pressed="${S.predictionReferenceSeriesVisibility[series.key]!==false}" onclick="togglePredictionReferenceSeries('${series.key}')">${series.label}</button>`).join('');
@@ -2803,8 +2807,8 @@ function renderPredictionReferenceChart(){
   viewEnd=Math.max(Math.min(windowEnd,start+Math.min(span,windowDuration)),Math.min(windowEnd,viewEnd));
   const viewportStart=Math.max(start,viewEnd-span),duration=Math.max(1,viewEnd-viewportStart);
   const follow=$('predictionReferenceFollow');if(follow){follow.setAttribute('aria-pressed',String(S.predictionReferenceViewEndMs==null));follow.title=S.predictionReferenceViewEndMs==null?'Live edge is following. Click to pause the chart.':'Chart is paused. Click to return to the live edge.';}
-  document.querySelectorAll('[data-ref-share-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.refShareMode===S.predictionReferenceShareMode)));
-  document.querySelectorAll('[data-ref-range]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.refRange)===rangeMs)));
+  document.querySelectorAll('[data-ref-share-mode]').forEach(button=>{const pressed=String(button.dataset.refShareMode===S.predictionReferenceShareMode);if(button.getAttribute('aria-pressed')!==pressed)button.setAttribute('aria-pressed',pressed);});
+  document.querySelectorAll('[data-ref-range]').forEach(button=>{const pressed=String(Number(button.dataset.refRange)===rangeMs);if(button.getAttribute('aria-pressed')!==pressed)button.setAttribute('aria-pressed',pressed);});
   if(windowEnd<start){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">This window has not opened yet. Live venue prices are shown above.</div>';setPredictionReferenceChartStatsMessage('Window has not opened yet.');return;}
   const sourceSeries=S.predictionReferenceSamples[asset]||{},openRef=S.predictionReferenceTimeline?.open_reference,closeRef=S.predictionReferenceTimeline?.close_reference;
   const visible=S.predictionReferenceSeriesVisibility;
