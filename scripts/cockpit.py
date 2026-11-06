@@ -3574,8 +3574,82 @@ def _wilson_interval(successes, samples):
     return max(0.0, center - half_width), min(1.0, center + half_width)
 
 
+_prediction_reference_cache = {}
+_prediction_reference_inflight = {}
+_prediction_reference_cache_lock = threading.Lock()
+_prediction_reference_cache_ttl_s = 0.25
+
+
+def _age_prediction_reference_snapshot(snapshot, now_ms):
+    result = dict(snapshot)
+    latest = snapshot.get("latest")
+    if isinstance(latest, dict):
+        result["latest"] = {
+            name: dict(tick) if isinstance(tick, dict) else tick
+            for name, tick in latest.items()
+        }
+    built_at = int(result.get("server_ts_ms") or now_ms)
+    elapsed_ms = max(0, int(now_ms) - built_at)
+    for tick in (result.get("latest") or {}).values():
+        if not isinstance(tick, dict):
+            continue
+        for field in ("age_ms", "received_age_ms"):
+            age = tick.get(field)
+            if isinstance(age, (int, float)) and math.isfinite(age) and age >= 0:
+                tick[field] = int(age + elapsed_ms)
+    return result
+
+
 def api_prediction_reference(asset, horizon_seconds, window_open_ms,
                              window_close_ms=None, point_limit=600):
+    """Share a short-lived chart snapshot and coalesce simultaneous windows."""
+    cache_key = (str(asset or "").upper(), str(horizon_seconds),
+                 str(window_open_ms), str(window_close_ms), str(point_limit))
+    owner_event = None
+    while True:
+        now = time.monotonic()
+        cached_snapshot = None
+        with _prediction_reference_cache_lock:
+            cached = _prediction_reference_cache.get(cache_key)
+            if cached and now - cached[0] < _prediction_reference_cache_ttl_s:
+                cached_snapshot = cached[1]
+            else:
+                event = _prediction_reference_inflight.get(cache_key)
+                if event is None:
+                    owner_event = threading.Event()
+                    _prediction_reference_inflight[cache_key] = owner_event
+                    break
+        if cached_snapshot is not None:
+            return _age_prediction_reference_snapshot(cached_snapshot, int(time.time() * 1000))
+        if not event.wait(timeout=5.0):
+            return {"error": "prediction reference refresh is still in progress", "series": {}}
+    try:
+        result = _build_api_prediction_reference(asset, horizon_seconds, window_open_ms,
+                                                 window_close_ms, point_limit)
+    except Exception:
+        with _prediction_reference_cache_lock:
+            if _prediction_reference_inflight.get(cache_key) is owner_event:
+                _prediction_reference_inflight.pop(cache_key, None)
+            owner_event.set()
+        raise
+    with _prediction_reference_cache_lock:
+        inserted_at = time.monotonic()
+        for key, (cached_at, _snapshot) in list(_prediction_reference_cache.items()):
+            if inserted_at - cached_at >= _prediction_reference_cache_ttl_s:
+                _prediction_reference_cache.pop(key, None)
+        if len(_prediction_reference_cache) >= 16 and cache_key not in _prediction_reference_cache:
+            oldest = min(_prediction_reference_cache,
+                         key=lambda key: _prediction_reference_cache[key][0])
+            _prediction_reference_cache.pop(oldest, None)
+        _prediction_reference_cache[cache_key] = (inserted_at, result)
+        if _prediction_reference_inflight.get(cache_key) is owner_event:
+            _prediction_reference_inflight.pop(cache_key, None)
+        owner_event.set()
+    return result
+
+
+def _build_api_prediction_reference(asset, horizon_seconds, window_open_ms,
+                                    window_close_ms=None, point_limit=600):
     """Return actual per-source ticks and official references for one prediction window."""
     asset = str(asset or "").upper()
     if asset not in ASSETS:
