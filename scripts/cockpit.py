@@ -700,7 +700,8 @@ def toml_scalar(value):
 def invalidate_runtime_caches():
     _since_cache.clear()
     for name in ("_live_cache", "_live_lite_cache", "_live_lite_retry_after",
-                 "_live_lite_failures", "_activity_cache", "_activity_tape_cache",
+                 "_live_lite_failures", "_window_bot_desk_retry_after",
+                 "_window_bot_desk_failures", "_activity_cache", "_activity_tape_cache",
                  "_execution_cache"):
         cache = globals().get(name)
         if isinstance(cache, dict):
@@ -9047,6 +9048,8 @@ def _build_fleet_detail():
 _window_bot_desk_cache = {}
 _window_bot_desk_lock = threading.Lock()
 _window_bot_desk_refreshing = set()
+_window_bot_desk_retry_after = {}
+_window_bot_desk_failures = {}
 _WINDOW_BOT_IDS = {
     "btc-5m-article-sim-test",
     "btc-5m-ofi-impulse-paper-test",
@@ -9078,6 +9081,7 @@ def api_window_bot_desk(allowed_instances=None):
     scope = None if allowed_instances is None else tuple(sorted(allowed_instances))
     cache_key = ("admin",) if scope is None else ("user", *scope)
     now = time.monotonic()
+    stale = None
     with _window_bot_desk_lock:
         hit = _window_bot_desk_cache.get(cache_key)
         if hit and now - hit[0] < 1.5:
@@ -9088,12 +9092,46 @@ def api_window_bot_desk(allowed_instances=None):
                 "refresh_ms": 1500,
                 "mode_policy": "Dedicated multi-asset strategy view. Profiles default to PAPER.",
             }
+        if hit:
+            stale = hit[1]
+            if now < _window_bot_desk_retry_after.get(cache_key, 0.0):
+                return stale
         _window_bot_desk_refreshing.add(cache_key)
+    if stale is not None:
+        try:
+            threading.Thread(
+                target=_refresh_window_bot_desk_cache,
+                args=(cache_key, scope),
+                name="cockpit-window-desk-refresh",
+                daemon=True,
+            ).start()
+            return stale
+        except Exception:
+            with _window_bot_desk_lock:
+                _window_bot_desk_refreshing.discard(cache_key)
     try:
         return _build_window_bot_desk(scope, cache_key)
     finally:
         with _window_bot_desk_lock:
             _window_bot_desk_refreshing.discard(cache_key)
+
+
+def _refresh_window_bot_desk_cache(cache_key, scope):
+    try:
+        _build_window_bot_desk(scope, cache_key)
+    except Exception:
+        with _window_bot_desk_lock:
+            failures = min(6, _window_bot_desk_failures.get(cache_key, 0) + 1)
+            _window_bot_desk_failures[cache_key] = failures
+            _window_bot_desk_retry_after[cache_key] = time.monotonic() + min(
+                30.0, 0.5 * (2 ** (failures - 1))
+            )
+            _window_bot_desk_refreshing.discard(cache_key)
+        return
+    with _window_bot_desk_lock:
+        _window_bot_desk_retry_after.pop(cache_key, None)
+        _window_bot_desk_failures.pop(cache_key, None)
+        _window_bot_desk_refreshing.discard(cache_key)
 
 
 _WINDOW_LOG_TIMESTAMP_RE = re.compile(
@@ -9620,6 +9658,8 @@ def _build_window_bot_desk(scope, cache_key):
               "mode_policy": "Dedicated multi-asset strategy view. Profiles default to PAPER."}
     if len(_window_bot_desk_cache) > 32:
         _window_bot_desk_cache.clear()
+        _window_bot_desk_retry_after.clear()
+        _window_bot_desk_failures.clear()
     _window_bot_desk_cache[cache_key] = (time.monotonic(), result)
     return result
 
