@@ -9555,9 +9555,17 @@ def api_supervisor_model(inst, model):
 
 
 _stream_cache = [0.0, None]
+_stream_cache_lock = threading.Lock()
 
 
 def build_stream_payload():
+    # SSE clients poll at nearly the same cadence. Serialize the short cache
+    # check and rebuild so concurrent clients share one DB/position snapshot.
+    with _stream_cache_lock:
+        return _build_stream_payload_locked()
+
+
+def _build_stream_payload_locked():
     now = time.monotonic()
     if _stream_cache[1] and now - _stream_cache[0] < 0.5:
         return _stream_cache[1]
