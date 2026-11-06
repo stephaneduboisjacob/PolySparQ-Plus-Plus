@@ -3145,22 +3145,54 @@ def _backfill_prediction_history_sqlite():
     path = os.path.join(ROOT, "logs", "prediction_quality.sqlite3")
     if not os.path.isfile(path):
         return
+
+    # The SQLite journal can contain hundreds of thousands of large diagnostic
+    # snapshots. Check the durable migration marker before scanning it so every
+    # cockpit restart does not repeat a completed large backfill.
+    pool, conn = _prediction_history_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM vp.prediction_history_imports WHERE migration_key=%s",
+                        (migration_key,))
+            already_imported = cur.fetchone() is not None
+        conn.rollback()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+    if already_imported:
+        return
+
     db = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True, timeout=2)
     db.row_factory = sqlite3.Row
     try:
         columns = {row[1] for row in db.execute("PRAGMA table_info(forecasts)")}
         required = {"cid", "slug", "bucket", "captured", "closes", "p", "outcome", "version"}
         if not required.issubset(columns):
+            db.close()
             return
         diagnostics_expr = "diagnostics_json" if "diagnostics_json" in columns else "NULL"
-        rows = db.execute(f"""SELECT cid,slug,bucket,captured,closes,p,outcome,version,{diagnostics_expr} AS diagnostics
-            FROM forecasts WHERE version IN (?,?) ORDER BY captured""",
-            ("vantagepulse-independent-v1", "vantagepulse-independent-v1-next")).fetchall()
-    finally:
+        row_query = f"""SELECT cid,slug,bucket,captured,closes,p,outcome,version,{diagnostics_expr} AS diagnostics
+            FROM forecasts WHERE version IN (?,?) ORDER BY captured"""
+        row_args = ("vantagepulse-independent-v1", "vantagepulse-independent-v1-next")
+    except Exception:
         db.close()
+        raise
+
+    def read_rows():
+        try:
+            cursor = db.execute(row_query, row_args)
+            while True:
+                batch = cursor.fetchmany(2048)
+                if not batch:
+                    return
+                yield from batch
+        finally:
+            db.close()
 
     windows = {}
-    for row in rows:
+    for row in read_rows():
         cid = str(row["cid"] or "").strip()
         slug = str(row["slug"] or "").strip()
         match = _re.fullmatch(r"(btc|eth|sol|xrp)-updown-(5m|15m)-(\d+)", slug, _re.I)
