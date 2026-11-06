@@ -2020,10 +2020,16 @@ const pnlClass=n=>n==null?'neutral':n>0?'pos':'neg';
 const pnlSign=n=>n==null?'':n>0?'+':n<0?'−':'';
 const fmtSecs=s=>{if(s==null||s<0)return'—';if(s<60)return`${s}s`;if(s<3600)return`${Math.floor(s/60)}m${s%60?` ${s%60}s`:''}`;return`${Math.floor(s/3600)}h`;};
 const horizLabel=s=>({300:'5m',900:'15m',3600:'1h',86400:'1d'}[s]||`${s}s`);
+const _valueFlashFrames=new WeakMap();
 function setText(id,text,cls){
   const el=$(id);if(!el)return;
   const val=String(text);
-  if(el.textContent!==val){el.textContent=val;el.classList.remove('val-flash');void el.offsetWidth;el.classList.add('val-flash');}
+  if(el.textContent!==val){
+    el.textContent=val;el.classList.remove('val-flash');
+    const previous=_valueFlashFrames.get(el);if(previous!==undefined)cancelAnimationFrame(previous);
+    const frame=requestAnimationFrame(()=>{if(_valueFlashFrames.get(el)!==frame)return;_valueFlashFrames.delete(el);el.classList.add('val-flash');});
+    _valueFlashFrames.set(el,frame);
+  }
   if(cls!=null)el.className=cls;
 }
 function ageMs(ts){return ts?Math.max(0,Date.now()-ts):null;}
