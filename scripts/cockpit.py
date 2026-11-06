@@ -8377,8 +8377,8 @@ def _build_fleet_detail():
         if isinstance(row, dict) and isinstance(row.get("instance"), str)
     }
     strategy_rows = q("""SELECT instance,strategy_id,llm_model,
-                                LEFT(reason,60) AS reason,created_at,
-                                strategies_total,seq
+                                CASE WHEN seq=1 THEN reason ELSE LEFT(reason,60) END AS reason,
+                                created_at,strategies_total,seq
                            FROM (
                              SELECT instance,strategy_id,llm_model,reason,created_at,
                                     COUNT(*) OVER (PARTITION BY instance) AS strategies_total,
@@ -8397,7 +8397,12 @@ def _build_fleet_detail():
             "last": None, "recent": [],
         })
         if int(strategy_row.get("seq") or 0) == 1:
-            entry["last"] = strategy_row
+            entry["last"] = {
+                "strategy_id": strategy_row["strategy_id"],
+                "llm_model": strategy_row["llm_model"],
+                "reason": strategy_row.get("reason"),
+                "created_at": strategy_row["created_at"],
+            }
         entry["recent"].append({
             "id": strategy_row["strategy_id"],
             "reason": strategy_row.get("reason") or "",
