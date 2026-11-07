@@ -7205,6 +7205,9 @@ ADMIN_WALLET_CREDENTIALS_FILE = "./secrets/polymarket_admin_credentials.json"
 ADMIN_WALLET_PRIVATE_KEY_FILE = "./secrets/polymarket_admin_private_key.txt"
 _fleet_cache = [0.0, None]  # (built_monotonic, payload)
 _fleet_cache_lock = threading.Lock()
+# Reuse the complete fleet snapshot for 6 seconds. Runtime heartbeats expire
+# after 10 seconds, while the lightweight tournament feed updates bot state.
+_FLEET_DETAIL_CACHE_TTL_S = 6.0
 _fleet_refreshing = False
 _pnl_cache   = [0.0, None]  # (built_monotonic, payload)
 _pnl_cache_lock = threading.Lock()
@@ -9204,7 +9207,7 @@ def api_fleet_detail():
     now = time.monotonic()
     with _fleet_cache_lock:
         cached = _fleet_cache[1]
-        if cached and now - _fleet_cache[0] < 3.0:
+        if cached and now - _fleet_cache[0] < _FLEET_DETAIL_CACHE_TTL_S:
             return cached
         if _fleet_refreshing:
             return cached or {"fleet": [], "available_configs": []}
@@ -9219,7 +9222,7 @@ def api_fleet_detail():
 def _build_fleet_detail():
     """Everything the fleet tab needs in one call."""
     now = time.monotonic()
-    if _fleet_cache[1] and now - _fleet_cache[0] < 3.0:
+    if _fleet_cache[1] and now - _fleet_cache[0] < _FLEET_DETAIL_CACHE_TTL_S:
         return _fleet_cache[1]
     names = instance_names()
     env = _models_env()

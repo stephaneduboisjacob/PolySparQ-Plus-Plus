@@ -7602,7 +7602,7 @@ function fleetRuntimePresentation(f,running=!!(f&&f.running)){
 }
 
 function fleetCard(f,t,pnl,perf={}){
-  const inst=f.instance,name=f.name||inst,running=f.running;
+  const inst=f.instance,name=f.name||inst,running=typeof t.running==='boolean'?t.running:!!f.running;
   const col=BOT_COLORS[inst]||'var(--text)';
   const s=f.strategy||{},sup=f.supervisor||{},w=f.wallet||{};
   const runtimeState=fleetRuntimePresentation(f,running);
