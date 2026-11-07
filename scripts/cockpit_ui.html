@@ -5913,6 +5913,8 @@ function _marketExplorerBookAgeSeconds(book){
 const _marketExplorerQuickTrailSampleMs=5000;
 const _marketExplorerQuickTrailMaxWindowMs=90000;
 const _marketExplorerQuickTrailMaxSamples=19;
+const _marketExplorerQuickSummaryRefreshMs=5000;
+let _marketExplorerLastWatchPrintReorderAt=0;
 function _marketExplorerQuickTrailSummary(name,rows,windowSeconds){
   const current=rows.at(-1),first=rows[0],value=current?(Number(current.mid)*100).toFixed(1)+'¢':'COLLECTING';
   const low=rows.length?Math.min(...rows.map(point=>Number(point.mid))):null,high=rows.length?Math.max(...rows.map(point=>Number(point.mid))):null;
@@ -5972,15 +5974,16 @@ function _marketExplorerWatchPrintsMarkup(id,outcomes){
 function _marketExplorerQuickPrintRender(id,index,now=Date.now()){
   const entry=_marketExplorerState.bookCache[id],node=document.querySelector(`[data-market-quick-print-id="${id}"][data-market-quick-print-index="${index}"]`);
   if(!entry)return;
-  if(index===0){
-    const cutoff=now-_marketExplorerQuickTrailMaxWindowMs;
-    entry.watchTrades=(Array.isArray(entry.watchTrades)?entry.watchTrades:[]).filter(trade=>Number.isFinite(Number(trade?.receivedAt))&&Number(trade.receivedAt)>=cutoff&&Number(trade.receivedAt)<=now).slice(0,200);
-    entry.watchTradeKeys=new Set(entry.watchTrades.map(trade=>trade.key));
-  }
   if(!node)return;
   const market=_marketExplorerBookStream.activeTargets.get(id)?.market||_marketExplorerMarketById(id),name=String(market?.outcomes?.[index]?.label||'OUTCOME');
   const summary=_marketExplorerQuickPrintSummary(name,entry.watchTrades,_marketExplorerState.trailWindowSeconds,now,index);
   node.textContent=summary.value;node.setAttribute('aria-label',summary.accessible);
+}
+function _marketExplorerPruneWatchPrints(entry,now=Date.now()){
+  const cutoff=now-_marketExplorerQuickTrailMaxWindowMs;
+  entry.watchTrades=(Array.isArray(entry.watchTrades)?entry.watchTrades:[]).filter(trade=>Number.isFinite(Number(trade?.receivedAt))&&Number(trade.receivedAt)>=cutoff&&Number(trade.receivedAt)<=now).slice(0,200);
+  entry.watchTradeKeys=new Set(entry.watchTrades.map(trade=>trade.key));
+  entry.watchPrintPrunedAt=now;
 }
 function _marketExplorerQuickTrailRender(id,index){
   const entry=_marketExplorerState.bookCache[id],market=_marketExplorerBookStream.activeTargets.get(id)?.market||_marketExplorerMarketById(id);
@@ -6025,16 +6028,26 @@ function _marketExplorerSampleWatchlistQuoteTrails(now=Date.now()){
   for(const [id] of _marketExplorerBookStream.activeTargets){
     const entry=_marketExplorerState.bookCache[id];if(!entry)continue;
     entry.quoteTrail=Array.isArray(entry.quoteTrail)?entry.quoteTrail:[[],[]];
+    entry.quickTrailRenderedAt=Array.isArray(entry.quickTrailRenderedAt)?entry.quickTrailRenderedAt:[0,0];
     for(let index=0;index<2;index++){
       const book=entry.payloads?.[index],age=_marketExplorerBookAgeSeconds(book),bid=Number(book?.best_bid),ask=Number(book?.best_ask);
       const valid=book?.source==='clob_ws'&&book.fresh===true&&age!==null&&age<=15&&Number.isFinite(bid)&&bid>0&&bid<=1&&Number.isFinite(ask)&&ask>=bid&&ask<=1;
       const trail=Array.isArray(entry.quoteTrail[index])?entry.quoteTrail[index]:(entry.quoteTrail[index]=[]),last=trail.at(-1);
+      let sampled=false;
       if(valid&&(!last||now-Number(last.at)>=_marketExplorerQuickTrailSampleMs)){
         trail.push({at:now,mid:(bid+ask)/2});
         entry.quoteTrail[index]=trail.filter(point=>Number(point.at)>=now-_marketExplorerQuickTrailMaxWindowMs).slice(-_marketExplorerQuickTrailMaxSamples);
+        sampled=true;
       }
-      _marketExplorerQuickTrailRender(id,index);
-      _marketExplorerQuickPrintRender(id,index,now);
+      if(sampled||now-Number(entry.quickTrailRenderedAt[index]||0)>=_marketExplorerQuickTrailSampleMs){
+        _marketExplorerQuickTrailRender(id,index);
+        entry.quickTrailRenderedAt[index]=now;
+      }
+    }
+    if(now-Number(entry.watchPrintPrunedAt||0)>=_marketExplorerQuickSummaryRefreshMs){
+      _marketExplorerPruneWatchPrints(entry,now);
+      _marketExplorerQuickPrintRender(id,0,now);
+      _marketExplorerQuickPrintRender(id,1,now);
     }
   }
 }
@@ -6247,7 +6260,6 @@ function _marketExplorerStreamQuickBookRender(id){
     const value=document.querySelector(`[data-market-quick-value-id="${id}"][data-market-quick-value-index="${index}"]`);
     if(value)value.textContent=`${px(bid)} / ${px(ask)}`;
   }
-  updateMarketExplorerBookFreshness();
 }
 function _marketExplorerStopBookStream(resetTarget=false){
   const stream=_marketExplorerBookStream,old=stream.socket;
@@ -6364,12 +6376,14 @@ function _marketExplorerApplyBookStreamMessage(id,message){
     if(watchlistTarget){
       if(!Array.isArray(entry.watchTrades))entry.watchTrades=[];
       if(!(entry.watchTradeKeys instanceof Set))entry.watchTradeKeys=new Set(entry.watchTrades.map(row=>row.key));
-      entry.watchTrades=entry.watchTrades.filter(row=>Number.isFinite(Number(row?.receivedAt))&&Number(row.receivedAt)>=updatedAt-_marketExplorerQuickTrailMaxWindowMs&&Number(row.receivedAt)<=updatedAt);
-      entry.watchTradeKeys=new Set(entry.watchTrades.map(row=>row.key));
-      if(!entry.watchTradeKeys.has(tradeKey))entry.watchTrades=[trade,...entry.watchTrades].slice(0,200);
-      entry.watchTradeKeys=new Set(entry.watchTrades.map(row=>row.key));
-      _marketExplorerQuickPrintRender(id,index,updatedAt);
-      _marketExplorerReorderWatchlistByPrint(updatedAt);
+      if(updatedAt-Number(entry.watchPrintPrunedAt||0)>=_marketExplorerQuickSummaryRefreshMs)_marketExplorerPruneWatchPrints(entry,updatedAt);
+      if(!entry.watchTradeKeys.has(tradeKey)){
+        entry.watchTrades.unshift(trade);
+        if(entry.watchTrades.length>200){const dropped=entry.watchTrades.pop();if(dropped?.key)entry.watchTradeKeys.delete(dropped.key);}
+        entry.watchTradeKeys.add(tradeKey);
+        _marketExplorerQuickPrintRender(id,index,updatedAt);
+        _marketExplorerReorderWatchlistByPrint(updatedAt);
+      }
     }
     if(detailTarget&&!stream.liveTradeKeys.has(tradeKey)){
       stream.liveTrades=[trade,...stream.liveTrades].slice(0,20);
@@ -6401,7 +6415,6 @@ function _marketExplorerApplyBookStreamMessage(id,message){
   entry.streamStatus='live';entry.streamLastEventAt=updatedAt;entry.streamRetryAt=0;entry.error='';
   if(entry.open)_marketExplorerStreamBookRender(id);
   else _marketExplorerStreamQuickBookRender(id);
-  _marketExplorerStreamStatusForTargets();
 }
 function _marketExplorerConnectBookStream(generation){
   const stream=_marketExplorerBookStream,desired=_marketExplorerDesiredBookStreamTargets();
@@ -6671,8 +6684,10 @@ function updateMarketExplorerBookFreshness(){
     node.className=fresh?'fresh':book?'stale':'unavailable';
     node.textContent=`${fresh?(book?.source==='clob_ws'?'LIVE':'FRESH'):book?'STALE':'UNAVAILABLE'} · ${age===null?'AGE UNKNOWN':`${age.toFixed(1)}s`}`;
   }
+  _marketExplorerStreamStatusForTargets();
   _marketExplorerSampleWatchlistQuoteTrails();
-  _marketExplorerReorderWatchlistByPrint();
+  const now=Date.now();
+  if(now-_marketExplorerLastWatchPrintReorderAt>=_marketExplorerQuickSummaryRefreshMs)_marketExplorerReorderWatchlistByPrint(now);
 }
 setInterval(updateMarketExplorerBookFreshness,1000);
 function _sortMarketExplorerRows(rows,isWatch=false){
@@ -6726,6 +6741,7 @@ function setMarketExplorerQuickPrintFloor(value){
 }
 function _marketExplorerReorderWatchlistByPrint(now=Date.now()){
   if(_marketExplorerState.view!=='watchlist'||_marketExplorerState.sort!=='print')return;
+  _marketExplorerLastWatchPrintReorderAt=now;
   const host=$('marketExplorerResults');
   if(!host)return;
   const current=[...host.children];
