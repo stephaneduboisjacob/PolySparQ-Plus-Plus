@@ -3601,13 +3601,18 @@ function _demoHeaders(){
 }
 
 // ── Fetch helpers ─────────────────────────────────────────────────────────
-async function apiFetch(url,{timeoutMs=15000}={}){
+async function apiFetch(url,{timeoutMs=15000,signal:externalSignal=null}={}){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  const abortFromCaller=()=>controller.abort();
+  if(externalSignal){
+    if(externalSignal.aborted)controller.abort();
+    else externalSignal.addEventListener('abort',abortFromCaller,{once:true});
+  }
   try{
     const r=await fetch(url,{headers:_demoHeaders(),signal:controller.signal});
     return r.ok?await r.json():null;
   }catch(_){return null;}
-  finally{clearTimeout(timer);}
+  finally{clearTimeout(timer);externalSignal?.removeEventListener('abort',abortFromCaller);}
 }
 async function apiPost(url,body,{timeoutMs=30000}={}){
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
@@ -9788,7 +9793,7 @@ async function refreshStrategyRuntimeStatus(name,force){
   }
 }
 
-let _strategyConfigLoadSeq=0;
+let _strategyConfigLoadSeq=0,_strategyConfigLoadController=null;
 function applyStrategyDrafts(edits){
   for(const [qkey,value] of Object.entries(edits||{})){
     const card=S.strategyCardByKey?.get(qkey);
@@ -9814,12 +9819,15 @@ function applyStrategyDrafts(edits){
 }
 
 async function loadConfig(name,recheckRuntimeAfterSave=false,discardPending=false){
+  _strategyConfigLoadController?.abort();
+  const controller=new AbortController();_strategyConfigLoadController=controller;
   const loadSeq=++_strategyConfigLoadSeq;
   const pending=!discardPending&&name===S.curConfig?{...(S.configEdits||{})}:{};
   const editRevisionAtStart=Number(S.strategyEditRevision)||0;
   if(name!==S.configLoadedName)renderStrategyLoadState('loading','Loading selected profile',`Loading editable settings for ${name}. The previous profile is hidden until this profile finishes loading.`);
-  const r=await apiFetch('/api/config?name='+encodeURIComponent(name),{timeoutMs:10000});
-  if(loadSeq!==_strategyConfigLoadSeq||name!==S.curConfig)return;
+  const r=await apiFetch('/api/config?name='+encodeURIComponent(name),{timeoutMs:10000,signal:controller.signal});
+  if(_strategyConfigLoadController===controller)_strategyConfigLoadController=null;
+  if(controller.signal.aborted||loadSeq!==_strategyConfigLoadSeq||name!==S.curConfig)return;
   const editsChangedDuringLoad=(Number(S.strategyEditRevision)||0)!==editRevisionAtStart;
   const currentPending={...(S.configEdits||{})};
   const pendingToRestore=discardPending&&!editsChangedDuringLoad?pending:currentPending;
