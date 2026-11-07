@@ -1261,11 +1261,21 @@ def _news_for_display(stories, now_s):
 
 
 def _asset_tape(query, asset):
-    rows = query("""SELECT o.price AS spot,o.ts_s AS spot_ts,
+    return _asset_tapes(query, (asset,)).get(asset, {})
+
+
+def _asset_tapes(query, assets):
+    """Fetch the latest spot and lead/lag ticks for all assets in one round trip."""
+    assets = tuple(dict.fromkeys(str(asset) for asset in assets))
+    if not assets:
+        return {}
+    values = ','.join(['(%s::text)'] * len(assets))
+    rows = query(f"""WITH wanted(asset) AS (VALUES {values})
+        SELECT x.asset,o.price AS spot,o.ts_s AS spot_ts,
         cb.price AS coinbase,cb.ts_s AS coinbase_ts,cb10.price AS coinbase_10,
         cb10.ts_s AS coinbase_10_ts,bn.price AS binance,bn.ts_s AS binance_ts,
         bn10.price AS binance_10,bn10.ts_s AS binance_10_ts
-        FROM (SELECT %s::text AS asset) x
+        FROM wanted x
         LEFT JOIN LATERAL (SELECT price,EXTRACT(EPOCH FROM ts) AS ts_s
           FROM vp.oracle_ticks WHERE asset=x.asset||':SPOT' ORDER BY ts DESC LIMIT 1) o ON TRUE
         LEFT JOIN LATERAL (SELECT price,EXTRACT(EPOCH FROM ts) AS ts_s
@@ -1277,27 +1287,62 @@ def _asset_tape(query, asset):
           FROM vp.binance_ticks WHERE symbol=x.asset||'USDT' ORDER BY ts DESC LIMIT 1) bn ON TRUE
         LEFT JOIN LATERAL (SELECT price,EXTRACT(EPOCH FROM ts) AS ts_s
           FROM vp.binance_ticks WHERE symbol=x.asset||'USDT' AND ts<=now()-interval '10 seconds'
-          ORDER BY ts DESC LIMIT 1) bn10 ON TRUE""", (asset,))
-    return rows[0] if rows else {}
+          ORDER BY ts DESC LIMIT 1) bn10 ON TRUE""", assets)
+    return {row['asset']: {key: value for key, value in row.items() if key != 'asset'}
+            for row in rows}
 
 
 def _window_reference(query, asset, horizon, opened, market):
-    window = reference_window(market)
-    if window < 0:
-        return {'strike':0.0,'reference_now':0.0,'reference_ts':None,'window_s':window}
-    key = asset+(':SPOT' if window == 0 else f':TWAP{window}')
-    rows = query("""SELECT o.price AS strike,o.ts_s AS strike_ts,
-        n.price AS reference_now,n.ts_s AS reference_ts
-        FROM (SELECT %s::text AS ref_key,%s::double precision AS open_s) x
-        LEFT JOIN LATERAL (SELECT price,EXTRACT(EPOCH FROM ts) AS ts_s FROM vp.oracle_ticks
-          WHERE asset=x.ref_key AND ts<=to_timestamp(x.open_s)
-            AND ts>=to_timestamp(x.open_s)-interval '10 seconds'
-          ORDER BY ts DESC LIMIT 1) o ON TRUE
-        LEFT JOIN LATERAL (SELECT price,EXTRACT(EPOCH FROM ts) AS ts_s
-          FROM vp.oracle_ticks WHERE asset=x.ref_key ORDER BY ts DESC LIMIT 1) n ON TRUE""",
-        (key,opened))
-    row = rows[0] if rows else {}
-    return {**row,'window_s':window}
+    key = (asset, horizon, opened)
+    return _window_references(query, (key,), {key: market})[key]
+
+
+def _window_references(query, windows, markets):
+    """Resolve all current/next market references with one indexed DB query."""
+    references = {}
+    wanted = []
+    for asset, horizon, opened in dict.fromkeys(windows):
+        market_key = (asset, horizon, opened)
+        window = reference_window(markets.get(market_key, {}))
+        if window < 0:
+            references[market_key] = {
+                'strike': 0.0, 'reference_now': 0.0,
+                'reference_ts': None, 'window_s': window,
+            }
+            continue
+        ref_key = asset + (':SPOT' if window == 0 else f':TWAP{window}')
+        references[market_key] = {'window_s': window}
+        wanted.append((asset, horizon, opened, ref_key, window))
+    if not wanted:
+        return references
+
+    values = ','.join(
+        ['(%s::text,%s::integer,%s::double precision,%s::text,%s::integer)'] * len(wanted))
+    args = tuple(value for row in wanted for value in row)
+    rows = query(f"""WITH wanted(asset,horizon,opened_s,ref_key,window_s) AS
+        (VALUES {values})
+        SELECT w.asset,w.horizon,w.opened_s,w.window_s,
+          o.price AS strike,EXTRACT(EPOCH FROM o.ts) AS strike_ts,
+          n.price AS reference_now,EXTRACT(EPOCH FROM n.ts) AS reference_ts
+        FROM wanted w
+        LEFT JOIN LATERAL (
+          SELECT price,ts FROM vp.oracle_ticks
+          WHERE asset=w.ref_key AND ts<=to_timestamp(w.opened_s)
+            AND ts>=to_timestamp(w.opened_s)-interval '10 seconds'
+          ORDER BY ts DESC LIMIT 1
+        ) o ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT price,ts FROM vp.oracle_ticks
+          WHERE asset=w.ref_key ORDER BY ts DESC LIMIT 1
+        ) n ON TRUE""", args)
+    for row in rows:
+        key = (row['asset'], int(row['horizon']), int(row['opened_s']))
+        references[key] = {
+            'strike': row['strike'], 'strike_ts': row['strike_ts'],
+            'reference_now': row['reference_now'],
+            'reference_ts': row['reference_ts'], 'window_s': int(row['window_s']),
+        }
+    return references
 
 
 def _momentum(current, current_ts, previous, previous_ts, now_s, sigma):
@@ -1420,16 +1465,21 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         rows = cached('market:'+slug,30,lambda:public_json(
             'https://gamma-api.polymarket.com/markets?'+urlencode({'slug':slug}),timeout=2.0))
         return rows[0] if rows else {'slug':slug}
-    jobs = [(_BOARD_IO_EXECUTOR.submit(market,*key),'market',key) for key in windows]
+    jobs = [(_BOARD_IO_EXECUTOR.submit(_asset_tapes,query,ASSETS),'tapes',None)]
+    jobs += [(_BOARD_IO_EXECUTOR.submit(market,*key),'market',key) for key in windows]
     jobs += [(_BOARD_IO_EXECUTOR.submit(cached,'candles:'+a,20,
                 lambda a=a:recent_candles(query,public_json,a,now)),'candles',a) for a in ASSETS]
-    jobs += [(_BOARD_IO_EXECUTOR.submit(_asset_tape,query,a),'tape',a) for a in ASSETS]
     for future,kind,key in jobs:
         try:
             value=future.result()
-            (markets if kind=='market' else candles if kind=='candles' else tape)[key]=value
+            if kind == 'tapes':
+                tape.update(value)
+            else:
+                (markets if kind=='market' else candles)[key]=value
         except Exception:
             errors.append(f'{kind} unavailable: {key}')
+    references_future = _BOARD_IO_EXECUTOR.submit(
+        _window_references, query, windows, markets)
     # One batched CLOB read covers both sides of every current and next market.
     tokens=list({str(t) for m in markets.values() for t in array(m.get('clobTokenIds'))})
     books={};books_received_at_s=now_s
@@ -1448,10 +1498,11 @@ def build_board(query, public_json, root, news_fn, resolve=True):
     try: news=news_fn() or news
     except Exception: errors.append('News context unavailable')
     stories=news.get('stories',[])
+    references = references_future.result()
     requests=[];metadata={};
     for a,h,o in combos:
         m=markets.get((a,h,o),{})
-        ref=_window_reference(query,a,h,o,m)
+        ref=references[(a,h,o)]
         current_tape=tape.get(a,{})
         bars=candles.get(a,{}).get('rows',[])
         spot=_number(current_tape.get('spot'))
@@ -1487,7 +1538,7 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         requests.append(req)
         next_o=o+h
         next_m=markets.get((a,h,next_o),{})
-        next_ref=_window_reference(query,a,h,next_o,next_m)
+        next_ref=references[(a,h,next_o)]
         next_fee,next_exp=fee_parameters(next_m)
         next_req={'spot':spot,'strike':spot,'seconds_left':h,'twap_window_s':next_ref['window_s'],
                   'reference_age_s':now_s-spot_ts if spot_ts else 1e9,'candle_age_s':candle_age,
