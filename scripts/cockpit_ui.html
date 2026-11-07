@@ -3301,8 +3301,11 @@ function connectSSE(){
 // Patch MARK NOW + P&L + winning/losing in place from the SSE stream (book or
 // synthetic mark) so positions update at stream cadence without a full re-render.
 function patchPositionMarks(marks){
-  if(!marks||!marks.length)return;
-  marks.forEach(pm=>{
+  if(!Array.isArray(marks)||!marks.length)return;
+  const updatePositionCards=S.curTab==='positions';
+  const updatePositionChart=typeof PCM!=='undefined'&&PCM.cid&&PCM.markLine;
+  if(!updatePositionCards&&!updatePositionChart)return;
+  if(updatePositionCards)marks.forEach(pm=>{
     const cid=pm.cid;if(!cid)return;
     // Closed windows are awaiting 0/1 settlement — don't overwrite the label with
     // a marked-to-cost $0.00, and leave the full render's "AWAITING SETTLEMENT".
@@ -3331,7 +3334,7 @@ function patchPositionMarks(marks){
     }
   });
   // Live-update the open position chart modal's mark line between its own polls
-  if(typeof PCM!=='undefined'&&PCM.cid&&PCM.markLine){
+  if(updatePositionChart){
     const pm=marks.find(x=>x.cid===PCM.cid&&x.side===PCM.side);
     if(pm&&pm.mark!=null){
       try{PCM.markLine.applyOptions({price:pm.mark,color:pm.mark>=PCM.avgEntry?'#18c98b':'#ef4f5f',axisLabelVisible:true,title:`MARK ${fmt(pm.mark,4)}`});}catch(_){}
@@ -4495,9 +4498,11 @@ function updateStrategyFeedFreshness(now=Date.now()){
   const chip=$('strategyFeedFreshness');if(!chip)return;
   const timestamp=Number(S.lastServerTs),age=timestamp>0?Math.max(0,now-timestamp):null;
   const state=age===null?'unknown':age<2500?'fresh':age<7000?'delayed':'stale';
-  chip.dataset.state=state;
-  chip.textContent=age===null?'SNAPSHOT · WAITING':`SNAPSHOT · ${(age/1000).toFixed(1)}s`;
-  chip.setAttribute('aria-label',age===null?'Live REST snapshot waiting':`Live REST snapshot ${state}, ${Math.floor(age/1000)} seconds old`);
+  if(chip.dataset.state!==state)chip.dataset.state=state;
+  const text=age===null?'SNAPSHOT · WAITING':`SNAPSHOT · ${(age/1000).toFixed(1)}s`;
+  if(chip.textContent!==text)chip.textContent=text;
+  const label=age===null?'Live REST snapshot waiting':`Live REST snapshot ${state}, ${Math.floor(age/1000)} seconds old`;
+  if(chip.getAttribute('aria-label')!==label)chip.setAttribute('aria-label',label);
 }
 function updateStrategyUiResponsiveness(now=Date.now()){
   const chip=$('strategyUiResponsiveness');if(!chip)return;
