@@ -3563,6 +3563,8 @@ document.querySelectorAll('.nav-tab').forEach(btn=>{
     syncMobileNav();
     document.querySelectorAll('.tab-section').forEach(s=>s.classList.remove('active'));
     $(`tab${btn.dataset.tab[0].toUpperCase()+btn.dataset.tab.slice(1)}`).classList.add('active');
+    // Hand market-book stream ownership over immediately when the workspace changes.
+    if(typeof _marketExplorerSyncBookStream==='function')_marketExplorerSyncBookStream();
     if(S.curTab==='overview'){
       if(S.data){renderOperatorRadar(S.data,true);renderPositionTriage(S.data);}
       renderOverview(S.data||{status:{}});loadEquityHero();loadOverviewSlow(true);
@@ -6548,7 +6550,7 @@ function _marketExplorerSyncBookStream(){
   stream.tokens=[];
   _marketExplorerConnectBookStream(stream.generation);
 }
-setInterval(_marketExplorerSyncBookStream,1000);
+setInterval(()=>{if(!document.hidden&&$('tabMarkets')?.classList.contains('active'))_marketExplorerSyncBookStream();},1000);
 document.addEventListener('visibilitychange',_marketExplorerSyncBookStream);
 document.addEventListener('beforeunload',()=>_marketExplorerStopBookStream(true));
 function _marketExplorerMarketById(id){
