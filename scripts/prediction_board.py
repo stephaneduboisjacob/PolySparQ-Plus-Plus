@@ -76,7 +76,17 @@ _TICK_V2_CLOB_LOGLOSS = 0.4391
 
 def age_board(board, now_ms=None, stale_after_s=SNAPSHOT_STALE_SECONDS):
     """Invalidate old recommendations even when refresh fails or a window rolls."""
-    out = copy.deepcopy(board)
+    # Aging only mutates board/card fields. Preserve the immutable nested
+    # forecast payload and copy the mutable containers rather than traversing
+    # every component, book level, and size scenario for each long-poll reader.
+    out = dict(board)
+    out['errors'] = list(board.get('errors') or [])
+    out['cards'] = []
+    for current in board.get('cards', []):
+        card = dict(current)
+        if current.get('next_window') is not None:
+            card['next_window'] = dict(current['next_window'])
+        out['cards'].append(card)
     now_ms = int(time.time()*1000) if now_ms is None else now_ms
     age = max(0, (now_ms-out.get('inputs_at', out['generated_at']))/1000)
     out['snapshot_age_s'] = age
