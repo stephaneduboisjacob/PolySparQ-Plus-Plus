@@ -3203,12 +3203,21 @@ window.addEventListener('resize',()=>{
   clearTimeout(S.predictionReferenceResizeTimer);
   S.predictionReferenceResizeTimer=setTimeout(()=>renderPredictionReferenceChart(),100);
 });
+let _sseReconnectTimer=0;
+function suspendSSE(){
+  if(_sseReconnectTimer){clearTimeout(_sseReconnectTimer);_sseReconnectTimer=0;}
+  if(sseSource){sseSource.close();sseSource=null;}
+  S.sseReconnecting=true;
+  updateSseIndicator();
+}
 function connectSSE(){
+  if(document.hidden){suspendSSE();return;}
+  if(_sseReconnectTimer){clearTimeout(_sseReconnectTimer);_sseReconnectTimer=0;}
   if(sseSource){sseSource.close();sseSource=null;}
   updateSseIndicator();
   const sseUrl=_demoToken?`/api/stream?demo_token=${encodeURIComponent(_demoToken)}`:'/api/stream';
-  sseSource=new EventSource(sseUrl);
-  sseSource.onmessage=e=>{
+  const source=new EventSource(sseUrl);sseSource=source;
+  source.onmessage=e=>{
     try{
       const d=JSON.parse(e.data);
       S.lastSseAt=Date.now();
@@ -3243,7 +3252,11 @@ function connectSSE(){
     updateSseIndicator();
     updateSpeedPanel();
   };
-  sseSource.onerror=()=>{S.sseReconnecting=true;updateSseIndicator();sseSource.close();sseSource=null;setTimeout(connectSSE,5000);};
+  source.onerror=()=>{
+    if(sseSource!==source)return;
+    S.sseReconnecting=true;updateSseIndicator();source.close();sseSource=null;
+    if(!document.hidden&&!_sseReconnectTimer)_sseReconnectTimer=setTimeout(()=>{_sseReconnectTimer=0;connectSSE();},5000);
+  };
 }
 
 // Patch MARK NOW + P&L + winning/losing in place from the SSE stream (book or
@@ -10767,7 +10780,11 @@ function refreshVisibleWorkspace(){
   if($('predictionTapeModal')?.classList.contains('open'))loadPredictionTape();
   if($('posChartModal')?.classList.contains('open'))_refreshPosChart();
 }
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshVisibleWorkspace();});
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){suspendSSE();return;}
+  connectSSE();
+  refreshVisibleWorkspace();
+});
 // /api/live_lite shares 1.5-second snapshots across cockpit windows. SSE carries
 // live prices and position marks between these accounting and status refreshes.
 // Match the shared live_lite snapshot cadence; SSE keeps prices and position
