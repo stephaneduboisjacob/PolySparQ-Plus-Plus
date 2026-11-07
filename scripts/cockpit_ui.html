@@ -9083,6 +9083,52 @@ function predictionTradeMarketHref(card,side){
     return url.href;
   }catch{return'';}
 }
+const predictionTradeSideNodeCache=new WeakMap();
+function createPredictionTradeSideNodes(side){
+  const article=document.createElement('article');article.className=`pred-share-side ${side.toLowerCase()}`;article.dataset.quoteState='waiting';
+  const head=document.createElement('div');head.className='pred-share-side-head';
+  const title=document.createElement('strong');title.textContent=side;
+  const kind=document.createElement('span');kind.textContent='UP / DOWN SHARE';head.append(title,kind);
+  const priceRow=document.createElement('div');priceRow.className='pred-share-price-row';
+  const price=document.createElement('b');price.textContent='—';
+  const quote=document.createElement('small');quote.textContent='WAITING FOR ASK';priceRow.append(price,quote);
+  const action=document.createElement('a');action.className='pred-share-buy unavailable';action.target='_blank';action.rel='noopener noreferrer';action.setAttribute('aria-disabled','true');action.tabIndex=-1;
+  const actionLabel=document.createElement('span');actionLabel.textContent='MARKET LINK UNAVAILABLE';
+  const arrow=document.createElement('span');arrow.setAttribute('aria-hidden','true');arrow.textContent='↗';arrow.hidden=true;
+  action.append(actionLabel,arrow);article.append(head,priceRow,action);
+  return{article,price,quote,action,actionLabel,arrow};
+}
+function predictionTradeSideNodes(sides){
+  let nodes=predictionTradeSideNodeCache.get(sides);
+  if(!nodes||nodes.up.article.parentElement!==sides||nodes.down.article.parentElement!==sides){
+    nodes={up:createPredictionTradeSideNodes('UP'),down:createPredictionTradeSideNodes('DOWN')};
+    sides.replaceChildren(nodes.up.article,nodes.down.article);predictionTradeSideNodeCache.set(sides,nodes);
+  }
+  return nodes;
+}
+function updatePredictionTradeSide(node,side,asset,horizon,ask,quoteState,quoteLabel,href){
+  const price=ask==null?'—':`${(ask*100).toFixed(1)}¢`;
+  if(node.article.dataset.quoteState!==quoteState)node.article.dataset.quoteState=quoteState;
+  if(node.price.textContent!==price)node.price.textContent=price;
+  if(node.quote.textContent!==quoteLabel)node.quote.textContent=quoteLabel;
+  const actionText=href?`BUY ${side} ON POLYMARKET`:'MARKET LINK UNAVAILABLE';
+  if(node.actionLabel.textContent!==actionText)node.actionLabel.textContent=actionText;
+  const accessibleLabel=href?`Open the ${side} side of the ${asset} ${horizon/60} minute market on Polymarket`:`Market link unavailable for the ${side} side of the ${asset} ${horizon/60} minute market`;
+  if(node.action.getAttribute('aria-label')!==accessibleLabel)node.action.setAttribute('aria-label',accessibleLabel);
+  if(href){
+    if(node.action.getAttribute('href')!==href)node.action.setAttribute('href',href);
+    if(node.action.classList.contains('unavailable'))node.action.classList.remove('unavailable');
+    if(node.action.hasAttribute('aria-disabled'))node.action.removeAttribute('aria-disabled');
+    if(node.action.hasAttribute('tabindex'))node.action.removeAttribute('tabindex');
+    if(node.arrow.hidden)node.arrow.hidden=false;
+  }else{
+    if(node.action.hasAttribute('href'))node.action.removeAttribute('href');
+    if(!node.action.classList.contains('unavailable'))node.action.classList.add('unavailable');
+    if(node.action.getAttribute('aria-disabled')!=='true')node.action.setAttribute('aria-disabled','true');
+    if(node.action.getAttribute('tabindex')!=='-1')node.action.setAttribute('tabindex','-1');
+    if(!node.arrow.hidden)node.arrow.hidden=true;
+  }
+}
 function renderPredictionTradePanel(board=S.predictionBoard,now=Date.now()){
   const root=$('predictionTradeQuotes'),sides=$('predictionTradeSides');if(!root||!sides)return;
   const asset=S.predictionReferenceAsset||'BTC',label=$('predictionTradeMarketLabel'),state=$('predictionTradeMarketState');
@@ -9104,14 +9150,13 @@ function renderPredictionTradePanel(board=S.predictionBoard,now=Date.now()){
     const value=card?.[`polymarket_${side.toLowerCase()}_price`],ask=value==null?NaN:Number(value),age=ageFor(side);
     return !snapshotStale&&isCurrent&&age!=null&&age<=3&&Number.isFinite(ask)&&ask>0&&ask<1?ask:null;
   };
-  const sideTile=side=>{
+  const sideNodes=predictionTradeSideNodes(sides);
+  for(const side of ['UP','DOWN']){
     const ask=askFor(side),age=ageFor(side),href=marketHref?predictionTradeMarketHref(card,side):'';
     const quoteState=ask!=null?'live':snapshotStale?'stale':!isCurrent?'closed':age==null?'unknown':age>3?'stale':'waiting';
     const quoteLabel=ask!=null?`BEST ASK · ${age.toFixed(1)}s OLD`:snapshotStale?'FORECAST FEED STALE':!isCurrent?'MARKET CLOSED':age==null?'QUOTE AGE UNKNOWN':age>3?`ASK STALE · ${age.toFixed(1)}s`:'WAITING FOR ASK';
-    const action=href?`<a class="pred-share-buy" href="${esc(href)}" target="_blank" rel="noopener noreferrer" aria-label="Open the ${side} side of the ${asset} ${horizon/60} minute market on Polymarket">BUY ${side} ON POLYMARKET <span aria-hidden="true">↗</span></a>`:'<span class="pred-share-buy unavailable" aria-disabled="true">MARKET LINK UNAVAILABLE</span>';
-    return`<article class="pred-share-side ${side.toLowerCase()}" data-quote-state="${quoteState}"><div class="pred-share-side-head"><strong>${side}</strong><span>UP / DOWN SHARE</span></div><div class="pred-share-price-row"><b>${ask==null?'—':`${(ask*100).toFixed(1)}¢`}</b><small>${quoteLabel}</small></div>${action}</article>`;
-  };
-  sides.innerHTML=sideTile('UP')+sideTile('DOWN');
+    updatePredictionTradeSide(sideNodes[side.toLowerCase()],side,asset,horizon,ask,quoteState,quoteLabel,href);
+  }
   if(state){
     const ages=['UP','DOWN'].map(ageFor),fresh=ages.every(age=>age!=null&&age<=3)&&!snapshotStale&&isCurrent;
     state.textContent=snapshotStale?'FEED STALE · PRICES HIDDEN':!card?`${horizon/60} MIN MARKET NOT IN SNAPSHOT`:!isCurrent?`NO ACTIVE ${horizon/60} MIN MARKET`:fresh?`LIVE · ${fmtSecs(Math.ceil((close-now)/1000))} LEFT`:'WAITING FOR FRESH ASKS';
