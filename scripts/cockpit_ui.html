@@ -5406,7 +5406,8 @@ function startTimer(p){
 // ── Position live chart modal ─────────────────────────────────────────────
 const PCM={obj:null,series:null,markLine:null,cid:null,side:null,asset:null,inst:null,
            avgEntry:0,targetPrice:1,question:'',shares:0,costBasis:0,ticker:null,
-           resizeObserver:null,resizeHost:null,resizeWidth:0,resizeHeight:0,refreshing:false,session:0};
+           resizeObserver:null,resizeHost:null,resizeWidth:0,resizeHeight:0,refreshing:false,session:0,
+           historyPoints:[],historyFitted:false,markerSignature:null,infoHtml:''};
 
 function openPosChart(cid,side,asset,inst,avgEntry,targetPrice,question,shares,costBasis){
   PCM.session++;
@@ -5433,6 +5434,7 @@ $('posChartModal').addEventListener('click',e=>{if(e.target===$('posChartModal')
 function _initPosChart(){
   const host=$('pcmHost');
   if(PCM.obj){try{PCM.obj.remove();}catch(_){}PCM.obj=null;PCM.series=null;PCM.markLine=null;}
+  PCM.historyPoints=[];PCM.historyFitted=false;PCM.markerSignature=null;PCM.infoHtml='';
   const width=Math.max(1,host.clientWidth),height=host.clientHeight||380;
   PCM.obj=LightweightCharts.createChart(host,{
     layout:{background:{color:'transparent'},textColor:'#7a8899'},
@@ -5463,6 +5465,23 @@ function _initPosChart(){
   }
 }
 
+function updatePositionChartPoints(points){
+  const previous=PCM.historyPoints||[];
+  if(!previous.length){PCM.series.setData(points);PCM.historyPoints=points;return points.length>0;}
+  if(!points.length)return false;
+  const shared=Math.min(previous.length,points.length);let common=0;
+  while(common<shared&&previous[common].time===points[common].time&&previous[common].value===points[common].value)common++;
+  if(common===previous.length&&common===points.length)return false;
+  const tailOnly=points.length>=previous.length&&points[0].time===previous[0].time&&common>=previous.length-1;
+  if(!tailOnly){PCM.series.setData(points);PCM.historyPoints=points;return true;}
+  let next=common;
+  if(common===previous.length-1&&common<points.length&&points[common].time===previous[common].time){
+    PCM.series.update(points[common]);next++;
+  }
+  for(;next<points.length;next++)PCM.series.update(points[next]);
+  PCM.historyPoints=points;return true;
+}
+
 async function _refreshPosChart(){
   if(!PCM.cid||!PCM.series||PCM.refreshing)return;
   const session=PCM.session,cid=PCM.cid,side=PCM.side;PCM.refreshing=true;
@@ -5472,8 +5491,8 @@ async function _refreshPosChart(){
     const pts=(r.points||[]).map(p=>({time:Math.floor(new Date(p.ts).getTime()/1000),value:parseFloat(p.price)}))
                .filter(p=>p.time>0&&p.value>0&&p.value<=1.01);
     if(pts.length){
-      PCM.series.setData(pts);
-      PCM.obj.timeScale().fitContent();
+      updatePositionChartPoints(pts);
+      if(!PCM.historyFitted){PCM.obj.timeScale().fitContent();PCM.historyFitted=true;}
     }
     // All markers (buys = green arrow up, sells = red arrow down)
     const allMarks=(r.markers||[]).map(m=>({
@@ -5483,7 +5502,8 @@ async function _refreshPosChart(){
       shape:m.direction==='buy'?'arrowUp':'arrowDown',
       text:`${m.direction.toUpperCase()} @${fmt(m.price,4)} (${m.source||''})`
     })).sort((a,b)=>a.time-b.time);
-    PCM.series.setMarkers(allMarks);
+    const markerSignature=allMarks.map(m=>`${m.time}|${m.position}|${m.color}|${m.shape}|${m.text}`).join('\n');
+    if(markerSignature!==PCM.markerSignature){PCM.series.setMarkers(allMarks);PCM.markerSignature=markerSignature;}
     // Current mark: latest data point
     const lastPt=pts.length?pts[pts.length-1]:null;
     const markPx=lastPt?lastPt.value:0;
@@ -5498,7 +5518,7 @@ async function _refreshPosChart(){
     // Info bar
     const px=PCM.asset&&S.prices[PCM.asset]||{};
     const orc=px.oracle,cb=px.coinbase,d=px.delta_pct;
-    $('pcmInfoBar').innerHTML=`
+    const infoHtml=`
     <div class="pcm-info"><div class="pcm-lbl">${esc(PCM.asset||'')} ORACLE</div><div class="pcm-val" style="color:var(--cyan)">${fmtPx(orc)}</div></div>
     <div class="pcm-info"><div class="pcm-lbl">COINBASE</div><div class="pcm-val">${fmtPx(cb)}</div></div>
     ${d!=null?`<div class="pcm-info"><div class="pcm-lbl">CB/ORC Δ</div><div class="pcm-val" style="color:${d>0?'var(--green)':'var(--red)'}">${d>0?'+':''}${fmt(d,3)}%</div></div>`:''}
@@ -5506,6 +5526,7 @@ async function _refreshPosChart(){
     <div class="pcm-info"><div class="pcm-lbl">MARK</div><div class="pcm-val" style="color:${markPx>=PCM.avgEntry?'var(--green)':'var(--red)'}">${markPx>0?fmt(markPx,4):'—'}</div></div>
     <div class="pcm-info"><div class="pcm-lbl">SHARES</div><div class="pcm-val">${fmt(PCM.shares,2)}</div></div>
     <div class="pcm-info"><div class="pcm-lbl">P&L</div><div class="pcm-val" style="color:${pnlColor}">${pnlUsd!=null?(pnlUsd>=0?'+':'')+fmt(pnlUsd,2)+(pnlPct!=null?' ('+(pnlPct>=0?'+':'')+fmt(pnlPct,1)+'%)':''):'—'}</div></div>`;
+    if(infoHtml!==PCM.infoHtml){$('pcmInfoBar').innerHTML=infoHtml;PCM.infoHtml=infoHtml;}
     // Data source label
     const src=$('pcmDataSrc');
     if(src)src.textContent=r.source==='fills'?'⚠ fill prices (no live feed)':r.source==='synthetic'?`≈ ${pts.length} oracle-estimated pts`:pts.length?`${pts.length} book pts`:'no data';

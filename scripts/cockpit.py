@@ -1819,10 +1819,18 @@ def api_price_history(cid, side, minutes=30):
     # Snake chart: share price (0..1) over time.
     # Primary: pm_book_snapshots (live feed midprice).
     # Fallback: synthetic oracle-derived line, then sparse fill prices.
+    # Keep a one-second visual series even when the feed stores several book
+    # snapshots per second. The position chart refreshes frequently; returning
+    # every raw frame makes each poll and browser redraw grow with feed rate.
     rows = q("""SELECT ts, midprice, best_bid, best_ask
-                FROM vp.pm_book_snapshots
-                WHERE condition_id=%s AND side_label=%s
-                  AND ts > now() - %s::interval
+                FROM (
+                  SELECT DISTINCT ON (date_trunc('second', ts))
+                         ts, midprice, best_bid, best_ask
+                    FROM vp.pm_book_snapshots
+                   WHERE condition_id=%s AND side_label=%s
+                     AND ts > now() - %s::interval
+                   ORDER BY date_trunc('second', ts), ts DESC
+                ) sampled
                 ORDER BY ts ASC""", (cid, side, f"{minutes} minutes"))
     pts = []
     for r in rows:
