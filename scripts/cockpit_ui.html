@@ -1980,7 +1980,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
 
 <script>
 const S={paused:false,refreshing:false,activityRefreshing:false,curInstance:'',curTab:'overview',
-  data:{},activity:{},prices:{},prevFillTs:0,token:null,configRaw:'',configEdits:{},curConfig:'',configFingerprint:'',configRuntimeStatus:{state:'checking'},
+  data:{},activity:{},prices:{},prevFillTs:0,token:null,configRaw:'',configEdits:{},curConfig:'',configFingerprint:'',configLoadedMtime:0,configMtimes:{},configRuntimeStatus:{state:'checking'},
   instNames:{},chartObj:null,candleSeries:null,pnlChartObj:null,pnlSeries:{},
   execution:{},executionRefreshing:false,fetchMs:null,paintMs:null,lastLoopAt:0,lastSseAt:0,lastServerTs:0,sseReconnecting:false,
   predictionTrails:{},predictionPulseTrails:{},predictionReferenceSamples:{},predictionReferenceDirectPrices:{},predictionReferenceSockets:null,predictionReferencePolySocket:null,predictionReferenceRangeMs:0,predictionReferenceViewEndMs:null,predictionReferenceShareMode:'delta',predictionReferenceSeriesVisibility:{oracle:true,coinbase:true,binance:true,kraken:true,gemini:true,okx:true,poly_up:true,poly_down:true},predictionReferenceGesture:null,predictionReferencePaintTimer:null,predictionReferenceDirectStatusTimer:null,predictionReferenceResizeTimer:null,predictionReferenceDirectUiAt:0,predictionReferenceAsset:'BTC',predictionReferenceHorizon:300,predictionReferenceWindow:null,predictionReferenceTimeline:null,predictionReferenceFetchAt:0,predictionReferenceRequest:null,predictionReferenceApiUnavailable:false,predictionPulseHorizon:300,predictionPulseLookback:60,predictionPulseThreshold:2,predictionPulseSort:'asset',
@@ -9491,7 +9491,7 @@ function renderStrategyLoadState(state,title,detail){
 }
 async function loadConfigs(force=false){
   if(_strategyConfigsLoading)return;
-  if(!force&&Date.now()-_strategyConfigsCheckedAt<3000)return;
+  if(!force&&S.configLoadedName&&S.configLoadedName===S.curConfig&&Date.now()-_strategyConfigsCheckedAt<3000)return;
   _strategyConfigsLoading=true;
   try{
     const r=await apiFetch('/api/configs',{timeoutMs:8000});
@@ -9502,6 +9502,10 @@ async function loadConfigs(force=false){
       return;
     }
     const cfgs=r.configs;
+    S.configMtimes=Object.create(null);
+    for(const cfg of cfgs){
+      if(cfg&&typeof cfg.name==='string')S.configMtimes[cfg.name]=Number(cfg.mtime)||0;
+    }
     const signature=cfgs.map(c=>[String(c.name||''),String(c.mtime||0),String(c.label||''),c.external?'1':'0'].join(':')).join('|');
     if(signature!==_strategyConfigsSignature){
       $('configSelect').innerHTML=cfgs.map(c=>`<option value="${esc(c.name)}">${esc(c.label||c.name)}${c.external?' · EXTERNAL PROFILE':''}</option>`).join('');
@@ -9519,9 +9523,14 @@ async function loadConfigs(force=false){
     }
     if(cfgs.length&&!S.curConfig)S.curConfig=cfgs[0].name;
     $('configSelect').value=S.curConfig||'';
-    if(S.curConfig)await loadConfig(S.curConfig);
+    if(S.curConfig){
+      const listedMtime=Number(S.configMtimes[S.curConfig])||0;
+      if(!force&&listedMtime>0&&S.configLoadedName===S.curConfig&&listedMtime===Number(S.configLoadedMtime||0)){
+        await refreshStrategyRuntimeStatus(S.curConfig,false);
+      }else await loadConfig(S.curConfig);
+    }
     else if(!Object.keys(S.configEdits||{}).length){
-      S.configLoadedName='';S.configFingerprint='';S.configEdits={};
+      S.configLoadedName='';S.configFingerprint='';S.configLoadedMtime=0;S.configEdits={};
       $('strategyEditor').innerHTML='';
       renderStrategyLoadState('empty','No strategy profiles available','No bot configuration profiles are available in this account.');
     }
@@ -9621,6 +9630,7 @@ async function loadConfig(name,recheckRuntimeAfterSave=false,discardPending=fals
     return;
   }
   const fingerprint=String(r.redacted_config_sha256||'');
+  S.configLoadedMtime=Number(S.configMtimes?.[name])||0;
   const configChanged=S.configLoadedName!==name||fingerprint!==S.configFingerprint;
   if(configChanged&&!discardPending&&name===S.curConfig&&strategyInvalidCount()){
     $('saveStatus').textContent='The saved profile changed, but invalid text is being kept on screen. Fix it or reset to load the latest profile.';
