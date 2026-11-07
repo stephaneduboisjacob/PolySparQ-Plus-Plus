@@ -7273,6 +7273,11 @@ $('assetSel').onchange=()=>loadCandles();
 
 // ── Fleet tab v2 ──────────────────────────────────────────────────────────
 let _fleetPnl={};
+let _fleetPnlFetchedAt=0;
+// The server rebuilds fee-aware P&L every 30s and serves stale data while it
+// refreshes; this mid-window fetch picks up the completed snapshot without
+// retransmitting its history on every 3s Fleet refresh.
+const FLEET_PNL_POLL_MS=15_000;
 let _availConfigs=[];
 let _allowedModels=[];
 let _allowCustomModel=false;
@@ -7284,13 +7289,16 @@ async function loadFleet(){
   if(_fleetBusy)return;
   _fleetBusy=true;
   try{
+    const pnlFetchDue=Date.now()-_fleetPnlFetchedAt>=FLEET_PNL_POLL_MS;
+    if(pnlFetchDue)_fleetPnlFetchedAt=Date.now();
     const liveAge=Date.now()-(Number(S.data?.server_ts)||0);
     const liveSnapshot=Array.isArray(S.data?.tournament?.instances)&&liveAge>=-1500&&liveAge<3000
       ?Promise.resolve(S.data):apiFetch('/api/live_lite');
+    const pnlSnapshot=pnlFetchDue?apiFetch('/api/pnl_by_instance'):Promise.resolve(null);
     const [fleet,live,pnlData]=await Promise.all([
-      apiFetch('/api/fleet'),liveSnapshot,apiFetch('/api/pnl_by_instance')]);
+      apiFetch('/api/fleet'),liveSnapshot,pnlSnapshot]);
     const tourn={};(((live||{}).tournament||{}).instances||[]).forEach(x=>{tourn[x.instance]=x;});
-    _fleetPnl=(pnlData||{}).instances||{};
+    if(pnlFetchDue)_fleetPnl=(pnlData||{}).instances||{};
     _availConfigs=(fleet||{}).available_configs||[];
     _allowedModels=(fleet||{}).allowed_models||[];
     _allowCustomModel=!!(fleet||{}).allow_custom_model;

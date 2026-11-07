@@ -7117,6 +7117,7 @@ def _build_tournament_payload():
     names = instance_names()
     instances = fleet_instances()
     pnl_rows = api_pnl_by_instance(stale_while_refresh=True).get("instances", {})
+    runtime_status = _cached_systemd_bot_status_many(instances)
     latest_runs = {}
     if instances:
         run_rows = q("""SELECT DISTINCT ON (r.instance)
@@ -7130,8 +7131,9 @@ def _build_tournament_payload():
     for inst in instances:
         mode = current_mode(inst)
         pnl = pnl_rows.get(inst, {})
+        runtime = runtime_status.get(inst)
         row = {"instance": inst, "name": names.get(inst, inst),
-               "running": bool(pnl.get("running")),
+               "running": bool(runtime.get("running")) if runtime else bool(pnl.get("running")),
                "mode": mode,
                "session_start": pnl.get("session_start"),
                "session_end": pnl.get("session_end"),
@@ -7206,6 +7208,9 @@ _fleet_cache_lock = threading.Lock()
 _fleet_refreshing = False
 _pnl_cache   = [0.0, None]  # (built_monotonic, payload)
 _pnl_cache_lock = threading.Lock()
+# Rebuild the fee-aware session ledger every 30 seconds; live marks and
+# process status have their own faster update paths.
+_PNL_BY_INSTANCE_CACHE_TTL_S = 30.0
 _pnl_refreshing = False
 _pnl_retry_after = 0.0
 
@@ -8810,7 +8815,7 @@ def api_pnl_by_instance(stale_while_refresh=False):
     now = time.monotonic()
     with _pnl_cache_lock:
         cached = _pnl_cache[1]
-        if cached and now - _pnl_cache[0] < 10.0:
+        if cached and now - _pnl_cache[0] < _PNL_BY_INSTANCE_CACHE_TTL_S:
             return cached
         if stale_while_refresh and cached and now < _pnl_retry_after:
             return cached
@@ -8842,7 +8847,7 @@ def api_pnl_by_instance(stale_while_refresh=False):
 
 def _build_pnl_by_instance():
     now = time.monotonic()
-    if _pnl_cache[1] and now - _pnl_cache[0] < 10.0:
+    if _pnl_cache[1] and now - _pnl_cache[0] < _PNL_BY_INSTANCE_CACHE_TTL_S:
         return _pnl_cache[1]
     names = instance_names()
     all_insts = fleet_instances()
