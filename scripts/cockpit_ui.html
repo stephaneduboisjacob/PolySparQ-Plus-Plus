@@ -2229,9 +2229,13 @@ function toast(title,body,cls=''){
 
 function checkNewFills(fills){
   if(!fills||!fills.length)return;
-  const nf=fills.filter(f=>(f.ts||0)>S.prevFillTs);
+  const previousTs=S.prevFillTs;let newestTs=previousTs;const nf=[];
+  for(const fill of fills){
+    const ts=fill.ts||0;
+    if(ts>previousTs){nf.push(fill);if(ts>newestTs)newestTs=Math.max(newestTs,ts);}
+  }
   if(!nf.length)return;
-  S.prevFillTs=Math.max(...nf.map(f=>f.ts||0));
+  S.prevFillTs=newestTs;
   nf.forEach(f=>{
     const a=f.asset||'?',src=f.source||'',dir=f.direction||'';
     if(src==='settle'){
@@ -3344,7 +3348,7 @@ function patchPositionMarks(marks){
 }
 
 // ── Price ticker ──────────────────────────────────────────────────────────
-let prevPx={};
+let prevPx={},priceFlashTimers=Object.create(null);
 function updatePriceTicker(prices){
   const t=$('priceTicker');
   if(!t.children.length)
@@ -3360,7 +3364,12 @@ function updatePriceTicker(prices){
       if(chEl.className!==className)chEl.className=className;
     }
     const ta=$(`tick-${a}`);
-    if(ta&&prevPx[a]&&Math.abs(px-prevPx[a])>.0001){ta.classList.add(px>prevPx[a]?'flash-up':'flash-dn');setTimeout(()=>ta.classList.remove('flash-up','flash-dn'),450);}
+    if(ta&&prevPx[a]&&Math.abs(px-prevPx[a])>.0001){
+      const flashClass=px>prevPx[a]?'flash-up':'flash-dn';
+      if(!ta.classList.contains(flashClass)){ta.classList.remove('flash-up','flash-dn');ta.classList.add(flashClass);}
+      if(priceFlashTimers[a])clearTimeout(priceFlashTimers[a]);
+      priceFlashTimers[a]=setTimeout(()=>{ta.classList.remove('flash-up','flash-dn');delete priceFlashTimers[a];},450);
+    }
     prevPx[a]=px;
   });
 }
