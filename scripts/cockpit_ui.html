@@ -3870,10 +3870,24 @@ function setExecMode(_mode){
   document.querySelectorAll('.exec-mode').forEach(b=>b.classList.toggle('active',b.dataset.mode==='maker'));
 }
 
+function _execEpochMs(value){
+  if(value instanceof Date)return value.getTime();
+  if(typeof value==='number')return value<1e12?value*1000:value;
+  const raw=String(value||'').trim();
+  if(/^\d{10,16}$/.test(raw)){const n=Number(raw);return n>=1e14?n/1000:n<1e12?n*1000:n;}
+  return Date.parse(raw);
+}
 function _execAge(ts){
-  if(!ts)return'—';
-  const ms=Math.max(0,Date.now()-new Date(ts).getTime());
+  const at=_execEpochMs(ts);if(!Number.isFinite(at)||at<=0)return'—';
+  const ms=Math.max(0,Date.now()-at);
   return ms<1000?`${ms}ms`:ms<60000?`${(ms/1000).toFixed(1)}s`:`${Math.floor(ms/60000)}m ${Math.floor(ms/1000)%60}s`;
+}
+function updateExecutionAgeLabels(root){
+  if(!root)return;
+  root.querySelectorAll('[data-exec-age-ts]').forEach(el=>{
+    const ts=_execEpochMs(el.dataset.execAgeTs),text=Number.isFinite(ts)&&ts>0?`${_execAge(ts)} ago`:'—';
+    if(el.textContent!==text)el.textContent=text;
+  });
 }
 
 function _execRejectGuide(reason){
@@ -3901,39 +3915,42 @@ function renderExecutionRejections(rows){
   const list=$('execRejectList'),meta=$('execRejectMeta');
   if(!list||!meta)return;
   const items=Array.isArray(rows)?rows:[];
-  meta.textContent=`${String(S.execution.mode||'unknown').toUpperCase()} · ${items.length} SHOWN · LAST 24H · LATEST 12`;
-  if(!items.length){list.innerHTML='<div class="empty-state"><div class="empty-icon">✓</div><div>NO RECENT REJECTIONS</div><div style="font-size:10px;margin-top:6px">No rejected orders recorded in the last 24 hours for this mode and selection.</div></div>';return;}
-  list.innerHTML=items.map(o=>{
+  const metaText=`${String(S.execution.mode||'unknown').toUpperCase()} · ${items.length} SHOWN · LAST 24H · LATEST 12`;
+  if(meta.textContent!==metaText)meta.textContent=metaText;
+  if(!items.length){commitCockpitHtml(list,'<div class="empty-state"><div class="empty-icon">✓</div><div>NO RECENT REJECTIONS</div><div style="font-size:10px;margin-top:6px">No rejected orders recorded in the last 24 hours for this mode and selection.</div></div>');return;}
+  commitCockpitHtml(list,items.map(o=>{
     const guide=_execRejectGuide(o.reject_reason||'');
     const market=[o.asset||'',o.horizon_seconds?horizLabel(+o.horizon_seconds):''].filter(Boolean).join(' · ')||'Market unavailable';
     const when=o.ts_created?new Date(o.ts_created).toLocaleString():'Time unavailable';
     const route=`${String(o.execution_mode||'unknown').toUpperCase()}${o.post_only?' · POST ONLY':''}`;
-    return `<article class="exec-reject-card"><div class="exec-reject-head"><div class="exec-reject-market"><strong>${esc(market)}</strong><span>${esc(o.question||'')}</span></div><div class="exec-reject-when"><b>${esc(when)}</b><span>${esc(_execAge(o.ts_created))} ago</span></div></div><div class="exec-reject-tags"><span class="exec-reject-tag">${esc(guide.label)}</span><span>${esc(o.instance||'Fleet')}</span><span>${esc(route)}</span><span>${esc(String(o.direction||'').toUpperCase())} ${esc(o.side_label||'')}</span><span>${esc(o.source||'Unknown source')}</span></div><div class="exec-reject-summary">${esc(guide.detail)}</div><div class="exec-reject-metrics"><span><small>LIMIT</small><b>${fmt(o.price,4)}</b></span><span><small>SIZE</small><b>${o.notional_usd==null?'—':`$${fmt(o.notional_usd,2)}`}</b></span><span><small>ORDER</small><b>${esc(String(o.client_order_id||'').slice(0,12)||'—')}</b></span></div><div class="exec-reject-raw"><b>RECORDED REASON</b><span>${esc(o.reject_reason||'No reason was stored')}</span></div></article>`;
-  }).join('');
+    return `<article class="exec-reject-card"><div class="exec-reject-head"><div class="exec-reject-market"><strong>${esc(market)}</strong><span>${esc(o.question||'')}</span></div><div class="exec-reject-when"><b>${esc(when)}</b><span data-exec-age-ts="${esc(o.ts_created||'')}" aria-live="off"></span></div></div><div class="exec-reject-tags"><span class="exec-reject-tag">${esc(guide.label)}</span><span>${esc(o.instance||'Fleet')}</span><span>${esc(route)}</span><span>${esc(String(o.direction||'').toUpperCase())} ${esc(o.side_label||'')}</span><span>${esc(o.source||'Unknown source')}</span></div><div class="exec-reject-summary">${esc(guide.detail)}</div><div class="exec-reject-metrics"><span><small>LIMIT</small><b>${fmt(o.price,4)}</b></span><span><small>SIZE</small><b>${o.notional_usd==null?'—':`$${fmt(o.notional_usd,2)}`}</b></span><span><small>ORDER</small><b>${esc(String(o.client_order_id||'').slice(0,12)||'—')}</b></span></div><div class="exec-reject-raw"><b>RECORDED REASON</b><span>${esc(o.reject_reason||'No reason was stored')}</span></div></article>`;
+  }).join(''));
+  updateExecutionAgeLabels(list);
 }
 
 function renderExecutionMakerPressure(data){
   const summary=$('execPressureSummary'),list=$('execPressureList'),meta=$('execPressureMeta');
   if(!summary||!list||!meta)return;
   const d=data||{},quotes=Array.isArray(d.quotes)?d.quotes:[];
-  $('execPressureTitle').textContent='PAPER PUBLIC TAPE PRESSURE';
-  meta.textContent=d.available?`LOCAL RECORDER · LAST ${d.lookback_hours||6}H · ${quotes.length} MOST RECENT QUOTES`:'PAPER EVIDENCE ONLY';
+  const title=$('execPressureTitle');if(title&&title.textContent!=='PAPER PUBLIC TAPE PRESSURE')title.textContent='PAPER PUBLIC TAPE PRESSURE';
+  const metaText=d.available?`LOCAL RECORDER · LAST ${d.lookback_hours||6}H · ${quotes.length} MOST RECENT QUOTES`:'PAPER EVIDENCE ONLY';
+  if(meta.textContent!==metaText)meta.textContent=metaText;
   if(!d.available){
-    summary.innerHTML='';
-    list.innerHTML=`<div class="empty-state"><div class="empty-icon">◌</div><div>PRESSURE REVIEW UNAVAILABLE</div><div style="font-size:10px;margin-top:6px">${esc(d.reason||'Local quote and tape evidence is unavailable.')}</div></div>`;
+    commitCockpitHtml(summary,'');
+    commitCockpitHtml(list,`<div class="empty-state"><div class="empty-icon">◌</div><div>PRESSURE REVIEW UNAVAILABLE</div><div style="font-size:10px;margin-top:6px">${esc(d.reason||'Local quote and tape evidence is unavailable.')}</div></div>`);
     return;
   }
-  summary.innerHTML=[
+  commitCockpitHtml(summary,[
     ['QUOTES REVIEWED',d.quotes_checked||0,'most recent · 6 hours'],
     ['AT-LIMIT EVIDENCE',d.quotes_with_at_limit||0,'quotes with opposing-aggressor prints'],
     ['THROUGH-LIMIT',d.quotes_with_through_limit||0,'quotes with prints beyond limit'],
     ['NO PRINT OBSERVED',d.quotes_without_recorded_pressure||0,'quotes with a recorded resting interval']
-  ].map((x,i)=>`<div class="exec-pressure-stat ${i===2?'through':i===3?'partial':''}"><small>${x[0]}</small><b>${x[1]}</b><span>${x[2]}</span></div>`).join('');
+  ].map((x,i)=>`<div class="exec-pressure-stat ${i===2?'through':i===3?'partial':''}"><small>${x[0]}</small><b>${x[1]}</b><span>${x[2]}</span></div>`).join(''));
   if(!quotes.length){
-    list.innerHTML='<div class="empty-state"><div class="empty-icon">◇</div><div>NO RECENT PAPER MAKER QUOTES</div><div style="font-size:10px;margin-top:6px">No post-only maker or hybrid orders were recorded in the last six hours for this selection.</div></div>';
+    commitCockpitHtml(list,'<div class="empty-state"><div class="empty-icon">◇</div><div>NO RECENT PAPER MAKER QUOTES</div><div style="font-size:10px;margin-top:6px">No post-only maker or hybrid orders were recorded in the last six hours for this selection.</div></div>');
     return;
   }
-  list.innerHTML=quotes.map(q=>{
+  commitCockpitHtml(list,quotes.map(q=>{
     const at=+q.at_limit_prints||0,through=+q.through_limit_prints||0;
     const evidenceClass=through?'strong':at?'observed':q.resting_intervals?'quiet':'unknown';
     const evidenceLabel=through?'TRADE THROUGH LIMIT':at?'AT-LIMIT PRESSURE':q.resting_intervals?'NO QUALIFYING PRINT':String(q.status||'').toLowerCase()==='filled'?'FILLED · NO TAPE INTERVAL':'NO RESTING INTERVAL';
@@ -3947,7 +3964,7 @@ function renderExecutionMakerPressure(data){
     const suffix=q.order_id?String(q.order_id).slice(0,8):'—';
     const history=q.event_history_truncated?'<span class="exec-pressure-truncated">PARTIAL TRANSITION HISTORY</span>':'';
     return `<article class="exec-pressure-quote"><header><div class="exec-pressure-market"><strong>${esc(market)}</strong><span>${esc(q.instance||'Fleet')} · ${esc(q.source||'Unknown source')}</span></div><div class="exec-pressure-order-state"><b>${esc(state)}</b><span>${esc(suffix)}</span></div></header><div class="exec-pressure-tags"><span>${esc(side||'SIDE UNKNOWN')}</span><span>LIMIT ${fmt(q.limit_price,4)}</span><span>${esc(fillText)}</span></div><div class="exec-pressure-result ${evidenceClass}"><i aria-hidden="true"></i><div><b>${evidenceLabel}</b><span>${esc(evidenceDetail)}</span></div><small>${last?esc(last.toLocaleTimeString()):'—'}</small></div>${history}</article>`;
-  }).join('');
+  }).join(''));
 }
 
 async function loadExecution(force=false){
@@ -3971,19 +3988,21 @@ async function loadExecution(force=false){
     const paperSession=executionMode==='paper';
     $('execLifecycleTitle').textContent=paperSession?'PAPER ORDER LIFECYCLE':executionMode==='live'?'LIVE ORDER LIFECYCLE':'ORDER LIFECYCLE · MODE UNKNOWN';
     const quoteLife=postOnlyLifetimeSamples?stats.reduce((n,x)=>n+(+x.avg_post_only_lifetime_ms||0)*(+x.post_only_lifetime_samples||0),0)/postOnlyLifetimeSamples:0;
-    $('execKpis').innerHTML=[
+    commitCockpitHtml($('execKpis'),[
       ['RESTING',open.length,paperSession?'active paper-session orders':executionMode==='live'?'live venue exposure':'mode unavailable'],
       ['ORDER FILL INCIDENCE · 24H',total?`${fmt(withFillRows/total*100,1)}%`:'—',`${withFillRows} order IDs with fills / ${total} recorded`],
       ['POST-ONLY QUOTE FILL RATE',postOnlyAttempts?`${fmt(postOnlyWithFillRows/postOnlyAttempts*100,1)}%`:'—',`${postOnlyWithFillRows} quote IDs with fills / ${postOnlyAttempts} attempts`],
       ['POST-ONLY QUOTE LIFETIME',postOnlyLifetimeSamples?`${fmt(quoteLife,0)}ms`:'—',`${postOnlyLifetimeSamples} closed quotes with valid times`]
-    ].map(x=>`<div class="exec-kpi"><div class="k">${x[0]}</div><div class="v">${x[1]}</div><div class="exec-kpi-note">${x[2]}</div></div>`).join('');
+    ].map(x=>`<div class="exec-kpi"><div class="k">${x[0]}</div><div class="v">${x[1]}</div><div class="exec-kpi-note">${x[2]}</div></div>`).join(''));
 
     const badge=$('execCount');
     badge.textContent=String(open.length);badge.style.display=open.length?'':'none';
-    $('execUpdated').textContent=`SYNC ${new Date(r.server_ts||Date.now()).toLocaleTimeString()}`;
-    $('execSelectHint').textContent=S.curInstance
+    const updatedText=`SYNC ${new Date(r.server_ts||Date.now()).toLocaleTimeString()}`;
+    if($('execUpdated').textContent!==updatedText)$('execUpdated').textContent=updatedText;
+    const selectHint=S.curInstance
       ? `${S.curInstance.toUpperCase()} · MAKER ONLY · config hot-reloads within 2s`
       : 'Select a bot above to edit its routing policy. Fleet telemetry remains visible.';
+    if($('execSelectHint').textContent!==selectHint)$('execSelectHint').textContent=selectHint;
 
     const policy=r.policy||{};
     if(S.curInstance&&Object.keys(policy).length){
@@ -3996,13 +4015,14 @@ async function loadExecution(force=false){
     }
     document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!S.curInstance||_whoami.role==='demo');
 
-    $('execOrders').innerHTML=open.length
+    commitCockpitHtml($('execOrders'),open.length
       ? `<div class="exec-order hdr"><span>BOT</span><span>ASSET</span><span>ROUTE</span><span>ORDER / VENUE ID</span><span>PRICE</span><span>REMAIN</span><span>AGE</span></div>${open.map(o=>{
           const matched=+o.matched_shares||0,remaining=Math.max(0,(+o.size_shares||0)-matched);
           const route=(o.execution_mode||'taker').toUpperCase();
-          return `<div class="exec-order"><span class="exec-order-bot" data-label="BOT">${esc(o.instance||'—')}</span><span class="exec-order-market" data-label="MARKET" style="color:var(--text);font-weight:700">${esc(o.asset||'?')} ${esc(horizLabel(+o.horizon_seconds||0))}</span><span class="exec-order-route" data-label="ROUTE" style="color:${o.post_only?'var(--green)':'var(--gold)'}">${route}${o.post_only?' · POST':''}</span><span class="exec-order-id" data-label="ORDER / VENUE ID" style="overflow:hidden"><b style="color:var(--text2)">${esc((o.client_order_id||'').slice(0,16))}</b><small style="display:block;color:var(--text3);overflow:hidden;text-overflow:ellipsis">${esc(o.exchange_order_id||'awaiting venue id')}</small></span><span class="exec-order-price" data-label="PRICE">${fmt(o.price,4)}</span><span class="exec-order-remaining" data-label="REMAINING">${fmt(remaining,2)} / ${fmt(o.size_shares,2)}</span><span class="exec-order-age exec-status ${o.status==='partial'?'partial':''}" data-label="STATUS · AGE">${esc((o.status||'open').toUpperCase())}<small style="display:block;border:0">${_execAge(o.ts_submitted)}</small></span></div>`;
+          return `<div class="exec-order"><span class="exec-order-bot" data-label="BOT">${esc(o.instance||'—')}</span><span class="exec-order-market" data-label="MARKET" style="color:var(--text);font-weight:700">${esc(o.asset||'?')} ${esc(horizLabel(+o.horizon_seconds||0))}</span><span class="exec-order-route" data-label="ROUTE" style="color:${o.post_only?'var(--green)':'var(--gold)'}">${route}${o.post_only?' · POST':''}</span><span class="exec-order-id" data-label="ORDER / VENUE ID" style="overflow:hidden"><b style="color:var(--text2)">${esc((o.client_order_id||'').slice(0,16))}</b><small style="display:block;color:var(--text3);overflow:hidden;text-overflow:ellipsis">${esc(o.exchange_order_id||'awaiting venue id')}</small></span><span class="exec-order-price" data-label="PRICE">${fmt(o.price,4)}</span><span class="exec-order-remaining" data-label="REMAINING">${fmt(remaining,2)} / ${fmt(o.size_shares,2)}</span><span class="exec-order-age exec-status ${o.status==='partial'?'partial':''}" data-label="STATUS · AGE">${esc((o.status||'open').toUpperCase())}<small data-exec-age-ts="${esc(o.ts_submitted||'')}" aria-live="off" style="display:block;border:0"></small></span></div>`;
         }).join('')}`
-      : `<div class="empty-state"><div class="empty-icon">◇</div><div>NO RESTING ORDERS</div><div style="font-size:9px;margin-top:5px">${paperSession?'No active orders in this bot session.':'The venue queue is clear.'}</div></div>`;
+      : `<div class="empty-state"><div class="empty-icon">◇</div><div>NO RESTING ORDERS</div><div style="font-size:9px;margin-top:5px">${paperSession?'No active orders in this bot session.':'The venue queue is clear.'}</div></div>`);
+    updateExecutionAgeLabels($('execOrders'));
   }finally{S.executionRefreshing=false;}
 }
 
