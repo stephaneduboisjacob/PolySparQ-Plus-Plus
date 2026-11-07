@@ -9671,7 +9671,7 @@ function knobInput(entry){
   return`<input class="str-val" type="text" ${attrs} value="${esc(sv)}" oninput="onKnobEdit(this)" spellcheck="false">`;
 }
 
-let _strategyConfigsLoading=false,_strategyConfigsCheckedAt=0,_strategyConfigsSignature='';
+let _strategyConfigsLoading=false,_strategyConfigsQueuedForce=false,_strategyConfigsCheckedAt=0,_strategyConfigsSignature='';
 function strategyInvalidCount(){
   if(Number.isFinite(S.strategyInvalidCount))return S.strategyInvalidCount;
   S.strategyInvalidCount=document.querySelectorAll('#strategyEditor .knob-card.invalid').length;
@@ -9685,7 +9685,7 @@ function renderStrategyLoadState(state,title,detail){
   host.innerHTML='<div class="strategy-load-state '+esc(state)+'" role="status"><h2>'+esc(title)+'</h2><p>'+esc(detail)+'</p>'+retry+'</div>';
 }
 async function loadConfigs(force=false){
-  if(_strategyConfigsLoading)return;
+  if(_strategyConfigsLoading){if(force)_strategyConfigsQueuedForce=true;return;}
   if(!force&&S.configLoadedName&&S.configLoadedName===S.curConfig&&Date.now()-_strategyConfigsCheckedAt<3000)return;
   _strategyConfigsLoading=true;
   try{
@@ -9732,6 +9732,10 @@ async function loadConfigs(force=false){
     }
   }finally{
     _strategyConfigsLoading=false;
+    if(_strategyConfigsQueuedForce){
+      _strategyConfigsQueuedForce=false;
+      setTimeout(()=>loadConfigs(true),0);
+    }
   }
 }
 $('configSelect').onchange=function(){
