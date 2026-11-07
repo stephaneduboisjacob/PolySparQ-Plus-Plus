@@ -3016,16 +3016,28 @@ function predictionReferenceCachedShareExtent(points,openingPrice,cache,version,
   cache.points=points;cache.version=version;cache.from=from;cache.to=to;cache.limit=limit;cache.openingPrice=open;cache.extent=extent;
   return extent;
 }
+function predictionReferenceCachedGapLimit(points,cache,version,from,to,limit){
+  if(cache.points===points&&cache.version===version&&cache.from===from&&cache.to===to&&cache.limit===limit)return cache.gapLimit;
+  const intervals=[],stride=Math.max(1,Math.ceil((points.length-1)/64));
+  for(let index=stride;index<points.length;index+=stride){
+    const previous=Math.max(0,index-stride),steps=index-previous,interval=(points[index].t-points[previous].t)/steps;
+    if(interval>0)intervals.push(interval);
+  }
+  intervals.sort((a,b)=>a-b);
+  const median=intervals.length?intervals[Math.floor(intervals.length/2)]:0,gapLimit=Math.max(2500,Math.min(15000,median*4||2500));
+  cache.points=points;cache.version=version;cache.from=from;cache.to=to;cache.limit=limit;cache.gapLimit=gapLimit;
+  return gapLimit;
+}
 function predictionReferenceFirstInRange(points,start,end){
   const [from,to]=predictionReferenceRangeBounds(points,start,end);return from<to?points[from]:null;
 }
 const _predictionReferenceBuffersByAsset=Object.create(null),_predictionReferenceEmptyPoints=[];
 function predictionReferenceChartBuffers(asset){
   let buffers=_predictionReferenceBuffersByAsset[asset];if(buffers)return buffers;
-  const raw=Object.create(null),decimated=Object.create(null),rawMeta=Object.create(null),shareMeta=Object.create(null),decimationMeta=Object.create(null),moveStats=Object.create(null),shareStats=Object.create(null),shares={up:[],down:[]};
-  for(const source of PREDICTION_REFERENCE_SOURCES){raw[source.key]=[];decimated[source.key]=[];rawMeta[source.key]={};decimationMeta[source.key]={};moveStats[source.key]={};}
-  for(const side of ['up','down']){decimated[`poly_${side}`]=[];shareMeta[side]={};decimationMeta[`poly_${side}`]={};shareStats[side]={};}
-  buffers={raw,decimated,rawMeta,shareMeta,decimationMeta,moveStats,shareStats,shares};_predictionReferenceBuffersByAsset[asset]=buffers;return buffers;
+  const raw=Object.create(null),decimated=Object.create(null),rawMeta=Object.create(null),shareMeta=Object.create(null),decimationMeta=Object.create(null),moveStats=Object.create(null),shareStats=Object.create(null),gapLimits=Object.create(null),shares={up:[],down:[]};
+  for(const source of PREDICTION_REFERENCE_SOURCES){raw[source.key]=[];decimated[source.key]=[];rawMeta[source.key]={};decimationMeta[source.key]={};moveStats[source.key]={};gapLimits[source.key]={};}
+  for(const side of ['up','down']){decimated[`poly_${side}`]=[];shareMeta[side]={};decimationMeta[`poly_${side}`]={};shareStats[side]={};gapLimits[`poly_${side}`]={};}
+  buffers={raw,decimated,rawMeta,shareMeta,decimationMeta,moveStats,shareStats,gapLimits,shares};_predictionReferenceBuffersByAsset[asset]=buffers;return buffers;
 }
 let _predictionReferenceForecastHtml=null,_predictionReferenceStatsContext='',_predictionReferenceStatsPaintAt=0;
 function setPredictionReferenceChartStatsMessage(message){
@@ -3242,14 +3254,7 @@ function renderPredictionReferenceChart(){
     const ts=start+fraction*(close-start);if(ts<viewportStart||ts>viewEnd)return'';
     const xx=x(ts);return`<line class="pred-reference-stage" x1="${xx.toFixed(1)}" y1="${priceTop}" x2="${xx.toFixed(1)}" y2="${shareBottom}"/><text class="pred-reference-stage-label" x="${xx.toFixed(1)}" y="${priceTop-12}" text-anchor="${fraction===0?'start':fraction===1?'end':'middle'}">${label}</text>`;
   }).join('');
-  const linePath=(points,valueFn)=>{
-    const intervals=[],stride=Math.max(1,Math.ceil((points.length-1)/64));
-    for(let index=stride;index<points.length;index+=stride){
-      const previous=Math.max(0,index-stride),steps=index-previous,interval=(points[index].t-points[previous].t)/steps;
-      if(interval>0)intervals.push(interval);
-    }
-    intervals.sort((a,b)=>a-b);
-    const median=intervals.length?intervals[Math.floor(intervals.length/2)]:0,gapLimit=Math.max(2500,Math.min(15000,median*4||2500));
+  const linePath=(points,valueFn,gapLimit)=>{
     let path='',previous=null;
     for(const point of points){const move=!previous||point.t-previous.t>gapLimit;path+=`${move?'M':' L'}${x(point.t).toFixed(1)} ${valueFn(point).toFixed(1)}`;previous=point;}
     return path;
@@ -3257,11 +3262,15 @@ function renderPredictionReferenceChart(){
   const liveQuote=predictionReferenceLivePrices()[asset]||{};
   const spotLines=PREDICTION_REFERENCE_SOURCES.map(source=>{
     if(visible[source.key]===false||!sourceMoveStats[source.key].count)return{key:source.key,path:'',fresh:false,dot:null};
-    const points=plotSamplesBySource[source.key],path=linePath(points,point=>yMove((point.value/anchorPrice-1)*100)),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
+    const key=source.key,points=plotSamplesBySource[key],range=buffers.rawMeta[key],from=visible[key]!==false?range.from:0,to=visible[key]!==false?range.to:0;
+    const gapLimit=predictionReferenceCachedGapLimit(points,buffers.gapLimits[key],versionsBySource[key],from,to,pointLimit);
+    const path=linePath(points,point=>yMove((point.value/anchorPrice-1)*100),gapLimit),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
     return{key:source.key,path,fresh,dot:last?{cx:x(last.t).toFixed(1),cy:yMove((last.value/anchorPrice-1)*100).toFixed(1),r:compact?4:5}:null};
   });
   const shareLines=['up','down'].map(side=>{
-    const points=plotShares[side],path=linePath(points,point=>yShare(point.value,side)),last=points.at(-1);
+    const key=`poly_${side}`,points=plotShares[side],range=buffers.shareMeta[side],from=visible[key]!==false?range.from:0,to=visible[key]!==false?range.to:0;
+    const gapLimit=predictionReferenceCachedGapLimit(points,buffers.gapLimits[key],shareVersions[side],from,to,pointLimit);
+    const path=linePath(points,point=>yShare(point.value,side),gapLimit),last=points.at(-1);
     return{side,path,dot:path&&last?{cx:x(last.t).toFixed(1),cy:yShare(last.value,side).toFixed(1),r:compact?4:5}:null};
   });
   const shareOpenLines=['up','down'].map(side=>{
