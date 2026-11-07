@@ -2984,16 +2984,38 @@ function predictionReferenceCachedDecimate(source,points,limit,output,cache,vers
   cache.source=source;cache.version=version;cache.from=from;cache.to=to;cache.limit=limit;cache.points=reduced;
   return reduced;
 }
+function predictionReferenceCachedMoveStats(points,anchorPrice,cache,version,from,to,limit){
+  if(cache.points===points&&cache.version===version&&cache.from===from&&cache.to===to&&cache.limit===limit&&cache.anchorPrice===anchorPrice)return cache.stats;
+  let low=Infinity,high=-Infinity,count=0;
+  if(anchorPrice)for(const point of points){
+    const move=(point.value/anchorPrice-1)*100;if(!Number.isFinite(move))continue;
+    low=Math.min(low,move);high=Math.max(high,move);count++;
+  }
+  const stats={low:count?low:0,high:count?high:0,count};
+  cache.points=points;cache.version=version;cache.from=from;cache.to=to;cache.limit=limit;cache.anchorPrice=anchorPrice;cache.stats=stats;
+  return stats;
+}
+function predictionReferenceCachedShareExtent(points,openingPrice,cache,version,from,to,limit){
+  const open=openingPrice==null?null:Number(openingPrice);
+  if(cache.points===points&&cache.version===version&&cache.from===from&&cache.to===to&&cache.limit===limit&&cache.openingPrice===open)return cache.extent;
+  let extent=0;
+  for(const point of points){
+    const value=(open==null?Number(point.value):Number(point.value)-open)*100;
+    if(Number.isFinite(value))extent=Math.max(extent,Math.abs(value));
+  }
+  cache.points=points;cache.version=version;cache.from=from;cache.to=to;cache.limit=limit;cache.openingPrice=open;cache.extent=extent;
+  return extent;
+}
 function predictionReferenceFirstInRange(points,start,end){
   const [from,to]=predictionReferenceRangeBounds(points,start,end);return from<to?points[from]:null;
 }
 const _predictionReferenceBuffersByAsset=Object.create(null),_predictionReferenceEmptyPoints=[];
 function predictionReferenceChartBuffers(asset){
   let buffers=_predictionReferenceBuffersByAsset[asset];if(buffers)return buffers;
-  const raw=Object.create(null),decimated=Object.create(null),rawMeta=Object.create(null),shareMeta=Object.create(null),decimationMeta=Object.create(null),shares={up:[],down:[]};
-  for(const source of PREDICTION_REFERENCE_SOURCES){raw[source.key]=[];decimated[source.key]=[];rawMeta[source.key]={};decimationMeta[source.key]={};}
-  for(const side of ['up','down']){decimated[`poly_${side}`]=[];shareMeta[side]={};decimationMeta[`poly_${side}`]={};}
-  buffers={raw,decimated,rawMeta,shareMeta,decimationMeta,shares};_predictionReferenceBuffersByAsset[asset]=buffers;return buffers;
+  const raw=Object.create(null),decimated=Object.create(null),rawMeta=Object.create(null),shareMeta=Object.create(null),decimationMeta=Object.create(null),moveStats=Object.create(null),shareStats=Object.create(null),shares={up:[],down:[]};
+  for(const source of PREDICTION_REFERENCE_SOURCES){raw[source.key]=[];decimated[source.key]=[];rawMeta[source.key]={};decimationMeta[source.key]={};moveStats[source.key]={};}
+  for(const side of ['up','down']){decimated[`poly_${side}`]=[];shareMeta[side]={};decimationMeta[`poly_${side}`]={};shareStats[side]={};}
+  buffers={raw,decimated,rawMeta,shareMeta,decimationMeta,moveStats,shareStats,shares};_predictionReferenceBuffersByAsset[asset]=buffers;return buffers;
 }
 let _predictionReferenceForecastHtml=null,_predictionReferenceStatsContext='',_predictionReferenceStatsPaintAt=0;
 function setPredictionReferenceChartStatsMessage(message){
@@ -3073,16 +3095,10 @@ function renderPredictionReferenceChart(){
   for(const source of PREDICTION_REFERENCE_SOURCES){
     const key=source.key,rawPoints=rawBySource[key],range=buffers.rawMeta[key],from=visible[key]!==false?range.from:0,to=visible[key]!==false?range.to:0;
     const points=predictionReferenceCachedDecimate(seriesBySource[key],rawPoints,pointLimit,buffers.decimated[key],buffers.decimationMeta[key],versionsBySource[key],from,to);
-    let sourceLow=Infinity,sourceHigh=-Infinity,count=0;
-    for(const point of points){
-      const move=anchorPrice?(point.value/anchorPrice-1)*100:null;
-      if(!Number.isFinite(move))continue;
-      if(!hasMoves){low=high=move;hasMoves=true;}
-      else{low=Math.min(low,move);high=Math.max(high,move);}
-      sourceLow=Math.min(sourceLow,move);sourceHigh=Math.max(sourceHigh,move);count++;
-    }
+    const stats=predictionReferenceCachedMoveStats(points,anchorPrice,buffers.moveStats[key],versionsBySource[key],from,to,pointLimit);
+    if(stats.count){if(!hasMoves){low=stats.low;high=stats.high;hasMoves=true;}else{low=Math.min(low,stats.low);high=Math.max(high,stats.high);}}
     samplesBySource[key]=rawPoints;plotSamplesBySource[key]=points;
-    sourceMoveStats[key]={low:count?sourceLow:0,high:count?sourceHigh:0,count};
+    sourceMoveStats[key]=stats;
   }
   const closeMove=visible.oracle!==false&&closeRef?.price!=null&&anchorPrice?(Number(closeRef.price)/anchorPrice-1)*100:null;
   if(Number.isFinite(closeMove)){
@@ -3094,13 +3110,14 @@ function renderPredictionReferenceChart(){
     const key=`poly_${side}`,range=buffers.shareMeta[side],from=visible[key]!==false?range.from:0,to=visible[key]!==false?range.to:0;
     plotShares[side]=predictionReferenceCachedDecimate(shareSeries[side],visibleShares[side],pointLimit,buffers.decimated[key],buffers.decimationMeta[key],shareVersions[side],from,to);
   }
-  const openingShares=Object.fromEntries(['up','down'].map(side=>[side,predictionReferenceFirstInRange(sourceSeries[`poly_${side}`]||[],start,windowEnd)]));
+  const openingShares=Object.fromEntries(['up','down'].map(side=>[side,predictionReferenceFirstInRange(sourceSeries[`poly_${side}`]||_predictionReferenceEmptyPoints,start,windowEnd)]));
   const shareMode=S.predictionReferenceShareMode||'delta';
   const shareYValue=(value,side)=>shareMode==='delta'&&openingShares[side]?(Number(value)-Number(openingShares[side].value))*100:Number(value)*100;
   let maxAbsShare=0;
-  if(shareMode==='delta')for(const side of ['up','down'])for(const point of plotShares[side]){
-    const value=shareYValue(point.value,side);
-    if(Number.isFinite(value))maxAbsShare=Math.max(maxAbsShare,Math.abs(value));
+  if(shareMode==='delta')for(const side of ['up','down']){
+    const key=`poly_${side}`,range=buffers.shareMeta[side],from=visible[key]!==false?range.from:0,to=visible[key]!==false?range.to:0;
+    const extent=predictionReferenceCachedShareExtent(plotShares[side],openingShares[side]?.value,buffers.shareStats[side],shareVersions[side],from,to,pointLimit);
+    maxAbsShare=Math.max(maxAbsShare,extent);
   }
   const hasShares=visibleShares.up.length>0||visibleShares.down.length>0;
   if(!hasMoves&&!hasShares){
