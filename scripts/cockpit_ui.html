@@ -3422,7 +3422,9 @@ function renderInstTabs(insts){
 }
 
 function selectInstance(inst){
+  const previousInstance=S.curInstance;
   S.curInstance=inst;
+  if(inst!==previousInstance||_execPolicyInputInstance!==inst)_setExecPolicyInputInstance('');
   if(inst){const details=$('persistQueueDetails');if(details)details.open=true;}
   if(_feedPulsePayload)renderPersistenceQueue(_feedPulsePayload);
   S.activity={};
@@ -3898,6 +3900,44 @@ function renderActivityStream(activity,fresh=false){
 
 // ── Execution console ────────────────────────────────────────────────────
 let _execMode='maker';
+const _execPolicyFields=[
+  {id:'execImprove',key:'maker_improve_ticks',fallback:0},
+  {id:'execReprice',key:'maker_reprice_ms',fallback:750},
+  {id:'execPoll',key:'maker_poll_ms',fallback:500},
+  {id:'execAge',key:'maker_max_age_ms',fallback:6000},
+  {id:'execClose',key:'maker_cancel_before_close_ms',fallback:5000}
+];
+const _execPolicyDrafts=new Map();
+let _executionRefreshQueued=false;
+let _execPolicyInputInstance='';
+function _setExecPolicyInputInstance(instance){
+  _execPolicyInputInstance=instance||'';
+  const ready=!!_execPolicyInputInstance;
+  document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!ready||_whoami.role==='demo');
+}
+function _readExecutionPolicyInputs(){
+  return Object.fromEntries(_execPolicyFields.map(field=>[field.id,$(field.id)?.value??'']));
+}
+function _writeExecutionPolicyInputs(values){
+  _execPolicyFields.forEach(field=>{
+    const input=$(field.id),value=String(values[field.id]??field.fallback);
+    if(input&&input.value!==value)input.value=value;
+  });
+}
+function _executionPolicyFromServer(policy){
+  return Object.fromEntries(_execPolicyFields.map(field=>[field.id,String(policy[field.key]??field.fallback)]));
+}
+function _executionPolicyDraftMatches(draft,policy){
+  return _execPolicyFields.every(field=>Number(draft[field.id])===Number(policy[field.key]??field.fallback));
+}
+function _executionPolicyInputsMatch(a,b){
+  return _execPolicyFields.every(field=>String(a[field.id]??'')===String(b[field.id]??''));
+}
+const _execPolicyRoot=document.querySelector('.exec-policy');
+if(_execPolicyRoot)_execPolicyRoot.addEventListener('input',event=>{
+  if(!S.curInstance||S.curInstance!==_execPolicyInputInstance||!_execPolicyFields.some(field=>field.id===event.target?.id))return;
+  _execPolicyDrafts.set(S.curInstance,{values:_readExecutionPolicyInputs(),committedAt:0});
+});
 function setExecMode(_mode){
   _execMode='maker';
   document.querySelectorAll('.exec-mode').forEach(b=>b.classList.toggle('active',b.dataset.mode==='maker'));
@@ -4001,13 +4041,16 @@ function renderExecutionMakerPressure(data){
 }
 
 async function loadExecution(force=false){
-  if(S.executionRefreshing)return;
+  if(S.curInstance!==_execPolicyInputInstance)_setExecPolicyInputInstance('');
+  if(S.executionRefreshing){if(force)_executionRefreshQueued=true;return;}
   if(!force&&S.execution.ts&&Date.now()-S.execution.ts<850)return;
   S.executionRefreshing=true;
+  const requestedInstance=S.curInstance;
   try{
-    const qs=S.curInstance?`?instance=${encodeURIComponent(S.curInstance)}`:'';
+    const qs=requestedInstance?`?instance=${encodeURIComponent(requestedInstance)}`:'';
     const r=await apiFetch(`/api/execution${qs}`);
     if(!r)return;
+    if(requestedInstance!==S.curInstance){_executionRefreshQueued=true;return;}
     S.execution={...r,ts:Date.now()};
     renderExecutionRejections(r.recent_rejections||[]);
     renderExecutionMakerPressure(r.maker_pressure||{});
@@ -4038,15 +4081,19 @@ async function loadExecution(force=false){
     if($('execSelectHint').textContent!==selectHint)$('execSelectHint').textContent=selectHint;
 
     const policy=r.policy||{};
-    if(S.curInstance&&Object.keys(policy).length){
-      setExecMode('maker');
-      $('execImprove').value=policy.maker_improve_ticks??0;
-      $('execReprice').value=policy.maker_reprice_ms??750;
-      $('execPoll').value=policy.maker_poll_ms??500;
-      $('execAge').value=policy.maker_max_age_ms??6000;
-      $('execClose').value=policy.maker_cancel_before_close_ms??5000;
+    if(requestedInstance){
+      const hasServerPolicy=Object.keys(policy).length>0;
+      if(hasServerPolicy)setExecMode('maker');
+      const draft=_execPolicyDrafts.get(requestedInstance);
+      if(draft&&hasServerPolicy&&_executionPolicyDraftMatches(draft.values,policy))_execPolicyDrafts.delete(requestedInstance);
+      else if(draft?.committedAt&&Date.now()-draft.committedAt>15000)_execPolicyDrafts.delete(requestedInstance);
+      const currentDraft=_execPolicyDrafts.get(requestedInstance);
+      if(currentDraft||hasServerPolicy){
+        _writeExecutionPolicyInputs(currentDraft?currentDraft.values:_executionPolicyFromServer(policy));
+        _setExecPolicyInputInstance(requestedInstance);
+      }else _setExecPolicyInputInstance('');
     }
-    document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!S.curInstance||_whoami.role==='demo');
+    document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!S.curInstance||S.curInstance!==_execPolicyInputInstance||_whoami.role==='demo');
 
     commitCockpitHtml($('execOrders'),open.length
       ? `<div class="exec-order hdr"><span>BOT</span><span>ASSET</span><span>ROUTE</span><span>ORDER / VENUE ID</span><span>PRICE</span><span>REMAIN</span><span>AGE</span></div>${open.map(o=>{
@@ -4056,21 +4103,38 @@ async function loadExecution(force=false){
         }).join('')}`
       : `<div class="empty-state"><div class="empty-icon">◇</div><div>NO RESTING ORDERS</div><div style="font-size:9px;margin-top:5px">${paperSession?'No active orders in this bot session.':'The venue queue is clear.'}</div></div>`);
     updateExecutionAgeLabels($('execOrders'));
-  }finally{S.executionRefreshing=false;}
+  }finally{
+    S.executionRefreshing=false;
+    if(_executionRefreshQueued){
+      _executionRefreshQueued=false;
+      setTimeout(()=>loadExecution(true),0);
+    }
+  }
 }
 
 async function saveExecutionPolicy(){
   if(!S.curInstance){toast('Select a bot','Routing policy is per instance','fill-settle-l');return;}
+  const instance=S.curInstance;
+  const draftValues=_readExecutionPolicyInputs();
   const updates={
     entry_order_mode:'maker',
-    maker_improve_ticks:+$('execImprove').value,
-    maker_reprice_ms:+$('execReprice').value,
-    maker_poll_ms:+$('execPoll').value,
-    maker_max_age_ms:+$('execAge').value,
-    maker_cancel_before_close_ms:+$('execClose').value
+    maker_improve_ticks:+draftValues.execImprove,
+    maker_reprice_ms:+draftValues.execReprice,
+    maker_poll_ms:+draftValues.execPoll,
+    maker_max_age_ms:+draftValues.execAge,
+    maker_cancel_before_close_ms:+draftValues.execClose
   };
-  const r=await apiPost('/api/config/write',{name:S.curInstance,updates});
-  if(r&&r.ok){toast('Routing policy committed',`${S.curInstance.toUpperCase()} · ${_execMode.toUpperCase()} · ${(r.changed||[]).length} fields`,'fill-buy');setTimeout(()=>loadExecution(true),600);}
+  const r=await apiPost('/api/config/write',{name:instance,updates});
+  if(r&&r.ok){
+    if(S.curInstance===instance&&_execPolicyInputInstance===instance){
+      const latestValues=_readExecutionPolicyInputs();
+      _execPolicyDrafts.set(instance,_executionPolicyInputsMatch(latestValues,draftValues)
+        ? {values:draftValues,committedAt:Date.now()}
+        : {values:latestValues,committedAt:0});
+    }else _execPolicyDrafts.set(instance,{values:draftValues,committedAt:Date.now()});
+    toast('Routing policy committed',`${instance.toUpperCase()} · ${_execMode.toUpperCase()} · ${(r.changed||[]).length} fields`,'fill-buy');
+    if(S.curInstance===instance)setTimeout(()=>loadExecution(true),600);
+  }
   else toast('Policy rejected',(r&&r.error)||JSON.stringify((r&&r.rejected)||{}),'fill-settle-l');
 }
 
