@@ -2280,6 +2280,43 @@ const PREDICTION_REFERENCE_POLY_LIMIT=12000,PREDICTION_REFERENCE_DIRECT_LIMIT=60
 const PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS=1000;
 const PREDICTION_REFERENCE_SOURCE_STALE_MS=10000,PREDICTION_REFERENCE_POLY_STALE_MS=15000;
 const PREDICTION_REFERENCE_PAINT_INTERVAL_MS=200;
+const PREDICTION_REFERENCE_INTERACTION_PAINT_INTERVAL_MS=33;
+let _predictionReferenceInteractionTimer=0,_predictionReferenceInteractionFrame=0,_predictionReferenceInteractionPending=false,_predictionReferenceInteractionPaintAt=0;
+function cancelPredictionReferenceInteractionPaint(){
+  if(_predictionReferenceInteractionTimer)clearTimeout(_predictionReferenceInteractionTimer);
+  if(_predictionReferenceInteractionFrame)cancelAnimationFrame(_predictionReferenceInteractionFrame);
+  _predictionReferenceInteractionTimer=0;_predictionReferenceInteractionFrame=0;_predictionReferenceInteractionPending=false;
+}
+function paintPredictionReferenceInteraction(){
+  _predictionReferenceInteractionFrame=0;
+  if(!_predictionReferenceInteractionPending)return;
+  const delay=PREDICTION_REFERENCE_INTERACTION_PAINT_INTERVAL_MS-(performance.now()-_predictionReferenceInteractionPaintAt);
+  if(delay>0){
+    _predictionReferenceInteractionTimer=setTimeout(()=>{
+      _predictionReferenceInteractionTimer=0;
+      if(_predictionReferenceInteractionPending)_predictionReferenceInteractionFrame=requestAnimationFrame(paintPredictionReferenceInteraction);
+    },delay);
+    return;
+  }
+  _predictionReferenceInteractionPending=false;_predictionReferenceInteractionPaintAt=performance.now();
+  renderPredictionReferenceChart();
+}
+function schedulePredictionReferenceInteractionPaint(){
+  _predictionReferenceInteractionPending=true;
+  if(_predictionReferenceInteractionTimer||_predictionReferenceInteractionFrame)return;
+  const delay=PREDICTION_REFERENCE_INTERACTION_PAINT_INTERVAL_MS-(performance.now()-_predictionReferenceInteractionPaintAt);
+  if(delay>0){
+    _predictionReferenceInteractionTimer=setTimeout(()=>{
+      _predictionReferenceInteractionTimer=0;
+      if(_predictionReferenceInteractionPending)_predictionReferenceInteractionFrame=requestAnimationFrame(paintPredictionReferenceInteraction);
+    },delay);
+  }else _predictionReferenceInteractionFrame=requestAnimationFrame(paintPredictionReferenceInteraction);
+}
+function flushPredictionReferenceInteractionPaint(){
+  if(!_predictionReferenceInteractionPending)return;
+  cancelPredictionReferenceInteractionPaint();_predictionReferenceInteractionPaintAt=performance.now();
+  renderPredictionReferenceChart();
+}
 function schedulePredictionReferenceChartPaint(){
   if(S.predictionReferencePaintTimer)return;
   S.predictionReferencePaintTimer=setTimeout(()=>{
@@ -2939,6 +2976,7 @@ function renderPredictionReferenceForecast(){
   if(html!==_predictionReferenceForecastHtml){target.innerHTML=html;_predictionReferenceForecastHtml=html;}
 }
 function renderPredictionReferenceChart(){
+  cancelPredictionReferenceInteractionPaint();
   const target=$('predictionReferenceChart');if(!target)return;
   renderPredictionReferenceSeriesControls();
   const asset=S.predictionReferenceAsset||'BTC',now=Date.now(),window=S.predictionReferenceWindow;
@@ -3156,16 +3194,16 @@ function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,
       const plotScreenWidth=Math.max(1,target.clientWidth*(chart.plotRight-chart.L)/chart.W),delta=dx/plotScreenWidth*gesture.span;
       const minEnd=gesture.windowStart+Math.min(gesture.span,Math.max(1,gesture.windowEnd-gesture.windowStart));
       S.predictionReferenceViewEndMs=Math.min(gesture.windowEnd,Math.max(minEnd,gesture.baseEnd-delta));
-      S.predictionReferenceRangeMs=gesture.span;renderPredictionReferenceChart();return;
+      S.predictionReferenceRangeMs=gesture.span;schedulePredictionReferenceInteractionPaint();return;
     }
     inspect(event);
   };
   target.onpointerup=event=>{
     const gesture=S.predictionReferenceGesture;if(!gesture||gesture.pointerId!==event.pointerId)return;
     S.predictionReferenceGesture=null;try{target.releasePointerCapture(event.pointerId);}catch(e){}
-    if(!gesture.moved)inspect(event);
+    if(gesture.moved)flushPredictionReferenceInteractionPaint();else inspect(event);
   };
-  target.onpointercancel=()=>{S.predictionReferenceGesture=null;};
+  target.onpointercancel=()=>{const gesture=S.predictionReferenceGesture;S.predictionReferenceGesture=null;if(gesture?.moved)flushPredictionReferenceInteractionPaint();};
   target.onpointerleave=()=>{
     if(S.predictionReferenceGesture)return;
     const cursor=$('predictionReferenceCursor');if(cursor)cursor.setAttribute('visibility','hidden');
@@ -3179,7 +3217,7 @@ function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,
     const nextSpan=Math.max(5000,Math.min(chart.windowClose-chart.windowStart,duration*Math.exp(event.deltaY*.001)));
     const nextStart=anchor-fraction*nextSpan;S.predictionReferenceRangeMs=nextSpan>=(chart.windowClose-chart.windowStart)*.999?0:nextSpan;
     S.predictionReferenceViewEndMs=Math.min(chart.windowEnd,Math.max(chart.windowStart+Math.min(nextSpan,chart.windowEnd-chart.windowStart),nextStart+nextSpan));
-    renderPredictionReferenceChart();
+    schedulePredictionReferenceInteractionPaint();
   };
   target.ondblclick=event=>{event.preventDefault();resetPredictionReferenceView();};
   target.onkeydown=event=>{
