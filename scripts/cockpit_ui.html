@@ -3288,8 +3288,9 @@ function connectSSE(){
       // move at SSE rate, not just on the 1s poll.
       patchPositionMarks(d.positions_marks||[]);
     }catch(_){}
-    updateSseIndicator();
-    updateSpeedPanel();
+    // Stream callbacks can arrive faster than the health UI needs. The
+    // one-second timers update stream age, Strategy freshness, and the Overview
+    // feed pulse without rescanning those DOM nodes for every market event.
   };
   source.onerror=()=>{
     if(sseSource!==source)return;
