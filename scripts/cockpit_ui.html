@@ -3211,12 +3211,12 @@ function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,
   };
   target.onwheel=event=>{
     const state=current();if(!state)return;
-    const {chart,viewportStart,duration}=state;
+    const {chart}=state,viewport=predictionReferenceCurrentViewport();if(!viewport)return;
     const local=localPoint(event);if(!local||local.x<chart.L||local.x>chart.plotRight||local.y<chart.priceTop||local.y>chart.shareBottom)return;
-    event.preventDefault();const fraction=(local.x-chart.L)/(chart.plotRight-chart.L),anchor=viewportStart+fraction*duration;
-    const nextSpan=Math.max(5000,Math.min(chart.windowClose-chart.windowStart,duration*Math.exp(event.deltaY*.001)));
+    event.preventDefault();const fraction=(local.x-chart.L)/(chart.plotRight-chart.L),oldStart=viewport.viewEnd-viewport.duration,anchor=oldStart+fraction*viewport.duration;
+    const nextSpan=Math.max(5000,Math.min(chart.windowClose-chart.windowStart,viewport.duration*Math.exp(event.deltaY*.001)));
     const nextStart=anchor-fraction*nextSpan;S.predictionReferenceRangeMs=nextSpan>=(chart.windowClose-chart.windowStart)*.999?0:nextSpan;
-    S.predictionReferenceViewEndMs=Math.min(chart.windowEnd,Math.max(chart.windowStart+Math.min(nextSpan,chart.windowEnd-chart.windowStart),nextStart+nextSpan));
+    S.predictionReferenceViewEndMs=Math.min(viewport.windowEnd,Math.max(viewport.windowStart+Math.min(nextSpan,viewport.windowEnd-viewport.windowStart),nextStart+nextSpan));
     schedulePredictionReferenceInteractionPaint();
   };
   target.ondblclick=event=>{event.preventDefault();resetPredictionReferenceView();};
