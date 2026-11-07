@@ -9753,7 +9753,15 @@ async function loadManualPredictions(force=false){
     else if(predictionPageActive())setTimeout(()=>loadManualPredictions(false),retry?S.predRetryMs:0);
   }
 }
-setInterval(()=>{if(S.curTab!=='manualpred'||document.hidden)return;const now=Date.now();document.querySelectorAll('[data-close]').forEach(e=>{const next=Number(e.dataset.open)>0,target=Number(next?e.dataset.open:e.dataset.close);e.textContent=(next?'opens ':'')+fmtSecs(Math.max(0,Math.ceil((target-now)/1000)))+(next?'':' left');});updatePredictionWindowProgress(now);predWindowAlarmTick(now);updatePredictionFreshness();},1000);
+setInterval(()=>{
+  if(S.curTab!=='manualpred'||document.hidden)return;
+  const now=Date.now(),grid=$('manualPredictionGrid');
+  grid?.querySelectorAll('[data-close]').forEach(e=>{
+    const next=Number(e.dataset.open)>0,target=Number(next?e.dataset.open:e.dataset.close);
+    e.textContent=(next?'opens ':'')+fmtSecs(Math.max(0,Math.ceil((target-now)/1000)))+(next?'':' left');
+  });
+  updatePredictionWindowProgress(now);predWindowAlarmTick(now);updatePredictionFreshness();
+},1000);
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden){stopPredictionReferenceSockets();resetPredictionAlarmTracking();S.predRequestController?.abort();return;}
   if(S.curTab==='manualpred'){startPredictionReferenceSockets();loadManualPredictions(false);}
