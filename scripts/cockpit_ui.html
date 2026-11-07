@@ -2023,6 +2023,11 @@ const pnlSign=n=>n==null?'':n>0?'+':n<0?'−':'';
 const fmtSecs=s=>{if(s==null||s<0)return'—';if(s<60)return`${s}s`;if(s<3600)return`${Math.floor(s/60)}m${s%60?` ${s%60}s`:''}`;return`${Math.floor(s/3600)}h`;};
 const horizLabel=s=>({300:'5m',900:'15m',3600:'1h',86400:'1d'}[s]||`${s}s`);
 const _valueFlashFrames=new WeakMap();
+function _setTextIfChanged(el,value){
+  if(!el)return;
+  const text=String(value);
+  if(el.textContent!==text)el.textContent=text;
+}
 function setText(id,text,cls){
   const el=$(id);if(!el)return;
   const val=String(text);
@@ -2681,10 +2686,11 @@ function patchPredictionReferenceDirectQuotes(asset){
     for(const source of PREDICTION_REFERENCE_SOURCES){
       const valueNode=group.querySelector(`[data-ref-value="${source.key}"]`),ageNode=group.querySelector(`[data-ref-age="${source.key}"]`),deltaNode=group.querySelector(`[data-ref-delta="${source.key}"]`),cell=group.querySelector(`[data-ref-source="${source.key}"]`);
       if(!valueNode)continue;const value=quote[source.key],age=quote[`${source.key}_age_s`],ts=quote[`${source.key}_ts_ms`];
-      valueNode.textContent=predictionReferencePrice(value,asset);if(ageNode)ageNode.textContent=predictionReferenceAge(age);
-      if(deltaNode)deltaNode.textContent=source.key==='oracle'?'SETTLEMENT REFERENCE':predictionReferenceDelta(value,oracle);
-      if(cell){const numericAge=age==null?NaN:Number(age);cell.dataset.freshness=Number.isFinite(numericAge)?numericAge<=source.maxAge?'fresh':'stale':'unknown';}
-      if(ts&&Number.isFinite(Number(ts)))valueNode.title=`Direct source timestamp ${new Date(Number(ts)).toISOString()}`;
+      _setTextIfChanged(valueNode,predictionReferencePrice(value,asset));
+      _setTextIfChanged(ageNode,predictionReferenceAge(age));
+      _setTextIfChanged(deltaNode,source.key==='oracle'?'SETTLEMENT REFERENCE':predictionReferenceDelta(value,oracle));
+      if(cell){const numericAge=age==null?NaN:Number(age),freshness=Number.isFinite(numericAge)?numericAge<=source.maxAge?'fresh':'stale':'unknown';if(cell.dataset.freshness!==freshness)cell.dataset.freshness=freshness;}
+      if(ts&&Number.isFinite(Number(ts))){const title=`Direct source timestamp ${new Date(Number(ts)).toISOString()}`;if(valueNode.title!==title)valueNode.title=title;}
     }
   });
 }
@@ -2694,10 +2700,10 @@ function updatePredictionReferenceDisplays(prices=S.prices,{scheduleChart=true}=
   const livePrices=predictionReferenceLivePrices(prices);
   const topQuotes=$('predictionReferenceQuotes');
   if(topQuotes&&!topQuotes.querySelector('.pred-reference-quotes'))topQuotes.innerHTML=predictionReferenceQuoteHtml(S.predictionReferenceAsset||'BTC');
-  const select=$('predictionReferenceAsset');if(select)select.value=S.predictionReferenceAsset||'BTC';
+  const select=$('predictionReferenceAsset');if(select&&select.value!==(S.predictionReferenceAsset||'BTC'))select.value=S.predictionReferenceAsset||'BTC';
   const horizon=Number(S.predictionReferenceHorizon)||300;
-  document.querySelectorAll('[data-ref-horizon]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.refHorizon)===horizon)));
-  const title=$('predictionReferenceTitle');if(title)title.textContent=`${S.predictionReferenceAsset||'BTC'} · ${horizon/60}M LIVE SOURCE TRACE`;
+  document.querySelectorAll('[data-ref-horizon]').forEach(button=>{const pressed=String(Number(button.dataset.refHorizon)===horizon);if(button.getAttribute('aria-pressed')!==pressed)button.setAttribute('aria-pressed',pressed);});
+  const title=$('predictionReferenceTitle');_setTextIfChanged(title,`${S.predictionReferenceAsset||'BTC'} · ${horizon/60}M LIVE SOURCE TRACE`);
   document.querySelectorAll('.pred-reference-quotes[data-pred-reference-asset]').forEach(group=>{
     const asset=group.dataset.predReferenceAsset,quote=livePrices?.[asset]||{},fallbackOracle=group.querySelector('[data-ref-value="oracle"]')?.dataset.refFallback;
     const oracle=quote.oracle??(fallbackOracle===''?null:fallbackOracle);
@@ -2707,15 +2713,15 @@ function updatePredictionReferenceDisplays(prices=S.prices,{scheduleChart=true}=
       const streamed=quote[source.key],value=streamed??(valueNode.dataset.refFallback===''?null:valueNode.dataset.refFallback);
       const age=quote[`${source.key}_age_s`]??(valueNode.dataset.refAgeFallback===''?null:valueNode.dataset.refAgeFallback);
       const ts=quote[`${source.key}_ts_ms`]??(valueNode.dataset.refTsFallback===''?null:valueNode.dataset.refTsFallback);
-      valueNode.textContent=predictionReferencePrice(value,asset);
-      if(ageNode)ageNode.textContent=predictionReferenceAge(age);
-      if(deltaNode)deltaNode.textContent=source.key==='oracle'?'SETTLEMENT REFERENCE':predictionReferenceDelta(value,oracle);
-      if(cell){const numericAge=age==null?NaN:Number(age);cell.dataset.freshness=Number.isFinite(numericAge)?numericAge<=source.maxAge?'fresh':'stale':'unknown';}
-      if(ts&&Number.isFinite(Number(ts)))valueNode.title=`Source timestamp ${new Date(Number(ts)).toISOString()}`;
+      _setTextIfChanged(valueNode,predictionReferencePrice(value,asset));
+      _setTextIfChanged(ageNode,predictionReferenceAge(age));
+      _setTextIfChanged(deltaNode,source.key==='oracle'?'SETTLEMENT REFERENCE':predictionReferenceDelta(value,oracle));
+      if(cell){const numericAge=age==null?NaN:Number(age),freshness=Number.isFinite(numericAge)?numericAge<=source.maxAge?'fresh':'stale':'unknown';if(cell.dataset.freshness!==freshness)cell.dataset.freshness=freshness;}
+      if(ts&&Number.isFinite(Number(ts))){const titleText=`Source timestamp ${new Date(Number(ts)).toISOString()}`;if(valueNode.title!==titleText)valueNode.title=titleText;}
     }
   });
   const status=$('predictionReferenceStreamStatus');
-  if(status){const age=ageMs(S.lastSseAt);status.textContent=age==null?'COCKPIT SSE CONNECTING':`COCKPIT SSE ${age<1000?`${age}ms`:`${(age/1000).toFixed(1)}s`} AGO · ~500ms PUSH`;status.dataset.state=age==null||age>2500?'stale':'live';}
+  if(status){const age=ageMs(S.lastSseAt),text=age==null?'COCKPIT SSE CONNECTING':`COCKPIT SSE ${age<1000?`${age}ms`:`${(age/1000).toFixed(1)}s`} AGO · ~500ms PUSH`,state=age==null||age>2500?'stale':'live';_setTextIfChanged(status,text);if(status.dataset.state!==state)status.dataset.state=state;}
   if(scheduleChart)schedulePredictionReferenceChartPaint();
   if(S.curTab==='manualpred'&&S.predictionBoard)void refreshPredictionReferenceWindow();
 }
