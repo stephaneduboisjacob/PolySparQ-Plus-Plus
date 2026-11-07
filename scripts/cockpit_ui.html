@@ -3308,7 +3308,7 @@ function connectSSE(){
 function patchPositionMarks(marks){
   if(!Array.isArray(marks)||!marks.length)return;
   const updatePositionCards=S.curTab==='positions';
-  const updatePositionChart=typeof PCM!=='undefined'&&PCM.cid&&PCM.markLine;
+  const updatePositionChart=typeof PCM!=='undefined'&&PCM.cid&&PCM.markLine&&$('posChartModal')?.classList.contains('open');
   if(!updatePositionCards&&!updatePositionChart)return;
   if(updatePositionCards)marks.forEach(pm=>{
     const cid=pm.cid;if(!cid)return;
@@ -3341,9 +3341,7 @@ function patchPositionMarks(marks){
   // Live-update the open position chart modal's mark line between its own polls
   if(updatePositionChart){
     const pm=marks.find(x=>x.cid===PCM.cid&&x.side===PCM.side);
-    if(pm&&pm.mark!=null){
-      try{PCM.markLine.applyOptions({price:pm.mark,color:pm.mark>=PCM.avgEntry?'#18c98b':'#ef4f5f',axisLabelVisible:true,title:`MARK ${fmt(pm.mark,4)}`});}catch(_){}
-    }
+    if(pm&&pm.mark!=null)updatePositionChartMark(pm.mark);
   }
 }
 
@@ -5595,7 +5593,17 @@ const POS_CHART_HISTORY_REFRESH_MS=3000;
 const PCM={obj:null,series:null,markLine:null,cid:null,side:null,asset:null,inst:null,
            avgEntry:0,targetPrice:1,question:'',shares:0,costBasis:0,ticker:null,
            resizeObserver:null,resizeHost:null,resizeWidth:0,resizeHeight:0,refreshing:false,session:0,
-           historyPoints:[],historyFitted:false,markerSignature:null,infoHtml:''};
+           historyPoints:[],historyFitted:false,markerSignature:null,markPrice:null,infoHtml:''};
+
+function updatePositionChartMark(price){
+  if(!PCM.markLine||price==null)return;
+  const value=Number(price);if(!Number.isFinite(value)||PCM.markPrice===value)return;
+  try{
+    PCM.markLine.applyOptions({price:value,color:value>=PCM.avgEntry?'#18c98b':'#ef4f5f',
+      axisLabelVisible:true,title:`MARK ${fmt(value,4)}`});
+    PCM.markPrice=value;
+  }catch(_){}
+}
 
 function openPosChart(cid,side,asset,inst,avgEntry,targetPrice,question,shares,costBasis){
   PCM.session++;
@@ -5642,6 +5650,7 @@ function _initPosChart(){
   PCM.series.createPriceLine({price:.999,color:'#18c98b',lineWidth:1,lineStyle:0,axisLabelVisible:true,title:'TARGET $1.00'});
   // Current mark price line (will be updated in _refreshPosChart)
   PCM.markLine=PCM.series.createPriceLine({price:0,color:'#ef4f5f',lineWidth:1,lineStyle:1,axisLabelVisible:false,title:''});
+  PCM.markPrice=null;
   if(!PCM.resizeObserver||PCM.resizeHost!==host){
     PCM.resizeObserver?.disconnect();PCM.resizeHost=host;
     PCM.resizeObserver=new ResizeObserver(()=>{
@@ -5696,10 +5705,7 @@ async function _refreshPosChart(){
     // Current mark: latest data point
     const lastPt=pts.length?pts[pts.length-1]:null;
     const markPx=lastPt?lastPt.value:0;
-    if(markPx>0&&PCM.markLine){
-      try{PCM.markLine.applyOptions({price:markPx,color:markPx>PCM.avgEntry?'#18c98b':'#ef4f5f',axisLabelVisible:true,title:`MARK ${fmt(markPx,4)}`});}
-      catch(_){}
-    }
+    if(markPx>0&&PCM.markLine)updatePositionChartMark(markPx);
     // P&L calc
     const pnlUsd=markPx>0?((markPx-PCM.avgEntry)*PCM.shares):null;
     const pnlPct=markPx>0&&PCM.avgEntry>0?((markPx-PCM.avgEntry)/PCM.avgEntry*100):null;
