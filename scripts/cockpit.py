@@ -6891,12 +6891,25 @@ def instance_session_start(inst):
     return None
 
 
+_INSTANCE_RUNNING_CACHE_MAX_ENTRIES = 256
+_SINCE_CACHE_MAX_ENTRIES = 256
+
+
+def _bounded_cache_put(cache, key, value, max_entries):
+    """Refresh a TTL cache entry and cap retained keys for long-lived service use."""
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > max_entries:
+        cache.pop(next(iter(cache)), None)
+
+
 def instance_running(inst):
     """Use cached batched systemd state; fall back to the instance log mtime."""
     cache = _instance_running_cache
     now = time.monotonic()
     hit = cache.get(inst)
     if hit and hit[0] > now:
+        _bounded_cache_put(cache, inst, hit, _INSTANCE_RUNNING_CACHE_MAX_ENTRIES)
         return hit[1]
     status = _cached_systemd_bot_status_many((inst,)).get(inst)
     if status is not None:
@@ -6920,7 +6933,8 @@ def instance_running(inst):
             running = time.time() - os.stat(instance_log(inst)).st_mtime < 60
         except OSError:
             running = False
-    cache[inst] = (now + 2.0, running)
+    _bounded_cache_put(cache, inst, (now + 2.0, running),
+                       _INSTANCE_RUNNING_CACHE_MAX_ENTRIES)
     return running
 
 
@@ -6941,6 +6955,7 @@ def paper_since(instance=None, mode=None):
     now = time.monotonic()
     hit = _since_cache.get(key)
     if hit and hit[0] > now:
+        _bounded_cache_put(_since_cache, key, hit, _SINCE_CACHE_MAX_ENTRIES)
         return hit[1]
     val = None
     if mode == "paper":
@@ -6969,7 +6984,8 @@ def paper_since(instance=None, mode=None):
             starts = [s for s in starts if s]
             val = min(starts) if starts else None
     val = normalize_since(val)
-    _since_cache[key] = (now + 15, val)
+    _bounded_cache_put(_since_cache, key, (now + 15, val),
+                       _SINCE_CACHE_MAX_ENTRIES)
     return val
 
 
