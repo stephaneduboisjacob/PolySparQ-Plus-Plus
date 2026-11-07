@@ -664,6 +664,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code','C
 .speed-cell{padding:8px 9px;border:1px solid var(--border);background:rgba(0,0,0,.13);border-radius:5px}
 .speed-label{font-size:9px;color:var(--text3);letter-spacing:1px;text-transform:uppercase}
 .speed-val{font-size:15px;font-weight:800;margin-top:3px;font-variant-numeric:tabular-nums}
+.speed-val.ui-main-thread{font-size:11px;white-space:nowrap}
 .speed-val.good{color:var(--green)}.speed-val.warn{color:var(--gold)}.speed-val.bad{color:var(--red)}
 #cmdOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.68);z-index:2200;align-items:flex-start;justify-content:center;padding-top:10vh}
 #cmdOverlay.open{display:flex}
@@ -4491,23 +4492,44 @@ function updateStrategyFeedFreshness(now=Date.now()){
   chip.setAttribute('aria-label',age===null?'Live REST snapshot waiting':`Live REST snapshot ${state}, ${Math.floor(age/1000)} seconds old`);
 }
 
+const _uiLongTaskSamples=[];
+let _uiLongTaskSupported=false;
+if(typeof PerformanceObserver!=='undefined'&&Array.isArray(PerformanceObserver.supportedEntryTypes)&&PerformanceObserver.supportedEntryTypes.includes('longtask')){
+  try{
+    const observer=new PerformanceObserver(list=>{
+      const receivedAt=Date.now();
+      for(const entry of list.getEntries())if(Number(entry.duration)>=50)_uiLongTaskSamples.push({at:receivedAt,duration:Number(entry.duration)});
+      if(_uiLongTaskSamples.length>128)_uiLongTaskSamples.splice(0,_uiLongTaskSamples.length-128);
+    });
+    observer.observe({entryTypes:['longtask']});_uiLongTaskSupported=true;
+  }catch(_){_uiLongTaskSupported=false;}
+}
+function uiLongTaskReading(now=Date.now()){
+  if(!_uiLongTaskSupported)return['UNAVAILABLE','warn'];
+  while(_uiLongTaskSamples.length&&now-_uiLongTaskSamples[0].at>60000)_uiLongTaskSamples.shift();
+  if(!_uiLongTaskSamples.length)return['CLEAR · <50ms','good'];
+  const longest=Math.max(..._uiLongTaskSamples.map(sample=>sample.duration));
+  return[`${Math.round(longest)}ms · ${_uiLongTaskSamples.length} TASKS`,longest>=500?'bad':longest>=200?'warn':'good'];
+}
 function updateSpeedPanel(){
   updateOperatorRadarFreshness();
   updateStrategyFeedFreshness();
   if(document.hidden||S.curTab!=='overview')return;
   const host=$('speedPanel');if(!host)return;
+  const uiLongTask=uiLongTaskReading();
   if(host.dataset.speedCellsBuilt){
     const sseAge=ageMs(S.lastSseAt),serverLag=S.lastServerTs?Date.now()-S.lastServerTs:null;
     const values=[
       [S.fetchMs!=null?S.fetchMs+'ms':'—',speedClass(S.fetchMs)],
       [S.paintMs!=null?S.paintMs+'ms':'—',speedClass(S.paintMs)],
       [sseAge!=null?(Math.round(sseAge/100)/10)+'s':'—',sseAge==null?'warn':sseAge<1800?'good':sseAge<6000?'warn':'bad'],
-      [serverLag!=null?(Math.round(serverLag/100)/10)+'s':'—',serverLag==null?'warn':serverLag<1600?'good':serverLag<5000?'warn':'bad']
+      [serverLag!=null?(Math.round(serverLag/100)/10)+'s':'—',serverLag==null?'warn':serverLag<1600?'good':serverLag<5000?'warn':'bad'],
+      uiLongTask
     ];
     host.querySelectorAll('.speed-val').forEach((el,index)=>{
       const [text,state]=values[index]||['—','warn'];
       if(el.textContent!==text)el.textContent=text;
-      const className='speed-val '+state;if(el.className!==className)el.className=className;
+      const className=`speed-val ${index===4?'ui-main-thread ':''}${state}`;if(el.className!==className)el.className=className;
     });
     tickFeedPulse();return;
   }
@@ -4517,7 +4539,8 @@ function updateSpeedPanel(){
     <div class="speed-cell"><div class="speed-label">HTTP LOOP</div><div class="speed-val ${speedClass(S.fetchMs)}">${S.fetchMs!=null?S.fetchMs+'ms':'—'}</div></div>
     <div class="speed-cell"><div class="speed-label">PAINT</div><div class="speed-val ${speedClass(S.paintMs)}">${S.paintMs!=null?S.paintMs+'ms':'—'}</div></div>
     <div class="speed-cell"><div class="speed-label">STREAM AGE</div><div class="speed-val ${sseAge==null?'warn':sseAge<1800?'good':sseAge<6000?'warn':'bad'}">${sseAge!=null?(Math.round(sseAge/100)/10)+'s':'—'}</div></div>
-    <div class="speed-cell"><div class="speed-label">SERVER LAG</div><div class="speed-val ${serverLag==null?'warn':serverLag<1600?'good':serverLag<5000?'warn':'bad'}">${serverLag!=null?(Math.round(serverLag/100)/10)+'s':'—'}</div></div>`;
+    <div class="speed-cell"><div class="speed-label">SERVER LAG</div><div class="speed-val ${serverLag==null?'warn':serverLag<1600?'good':serverLag<5000?'warn':'bad'}">${serverLag!=null?(Math.round(serverLag/100)/10)+'s':'—'}</div></div>
+    <div class="speed-cell"><div class="speed-label">UI BLOCK · 60S</div><div class="speed-val ui-main-thread ${uiLongTask[1]}" title="Longest browser main-thread task over the past 60 seconds; Chromium long-task API reports tasks of at least 50 ms.">${uiLongTask[0]}</div></div>`;
   host.dataset.speedCellsBuilt='true';
   tickFeedPulse();
 }
