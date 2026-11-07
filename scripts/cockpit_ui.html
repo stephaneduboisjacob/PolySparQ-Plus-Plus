@@ -1285,12 +1285,12 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
         <div class="exec-field"><label>VENUE POLL<small>authoritative fill reconciliation cadence</small></label><input id="execPoll" type="number" min="100" max="60000"></div>
         <div class="exec-field"><label>ENTRY QUOTE AGE<small>expired quotes are cancelled without taking liquidity</small></label><input id="execAge" type="number" min="0" max="300000"></div>
         <div class="exec-field"><label>ENTRY CLOSE GUARD<small>withdraw entry quote before market expiry</small></label><input id="execClose" type="number" min="0" max="120000"></div>
-        <button id="execPolicyCommit" class="btn-primary" style="width:100%;margin-top:12px" onclick="saveExecutionPolicy()">COMMIT ROUTING POLICY</button>
+        <button id="execPolicyCommit" class="btn-primary" style="width:100%;margin-top:12px" onclick="saveExecutionPolicy()" disabled>COMMIT ROUTING POLICY</button>
       </div>
       <div class="card danger-zone">
         <div class="card-title"><span class="ct-accent" style="background:var(--red)"></span>QUOTE CONTAINMENT</div>
         <div style="color:var(--text2);line-height:1.6;margin-bottom:10px">Withdraw every resting order managed by the selected bot. Positions are not sold.</div>
-        <button class="action-btn danger" style="width:100%" onclick="cancelOpenOrders()">CANCEL ALL OPEN QUOTES</button>
+        <button id="execCancelQuotes" class="action-btn danger" style="width:100%" onclick="cancelOpenOrders()" disabled>CANCEL ALL OPEN QUOTES</button>
       </div>
     </div>
     <div class="card" style="min-width:0">
@@ -3920,7 +3920,8 @@ let _execPolicySaving=false;
 function _setExecPolicyInputInstance(instance){
   _execPolicyInputInstance=instance||'';
   const ready=!!_execPolicyInputInstance;
-  document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!ready||_whoami.role==='demo'||(el.id==='execPolicyCommit'&&_execPolicySaving));
+  document.querySelectorAll('.exec-policy input,#execPolicyCommit').forEach(el=>el.disabled=!ready||_whoami.role==='demo'||(el.id==='execPolicyCommit'&&_execPolicySaving));
+  const cancelButton=$('execCancelQuotes');if(cancelButton)cancelButton.disabled=!S.curInstance||_whoami.role==='demo';
 }
 function _readExecutionPolicyInputs(){
   return Object.fromEntries(_execPolicyFields.map(field=>[field.id,$(field.id)?.value??'']));
@@ -4100,7 +4101,8 @@ async function loadExecution(force=false){
         _setExecPolicyInputInstance(requestedInstance);
       }else _setExecPolicyInputInstance('');
     }
-    document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!S.curInstance||S.curInstance!==_execPolicyInputInstance||_whoami.role==='demo'||(el.id==='execPolicyCommit'&&_execPolicySaving));
+    document.querySelectorAll('.exec-policy input,#execPolicyCommit').forEach(el=>el.disabled=!S.curInstance||S.curInstance!==_execPolicyInputInstance||_whoami.role==='demo'||(el.id==='execPolicyCommit'&&_execPolicySaving));
+    const cancelButton=$('execCancelQuotes');if(cancelButton)cancelButton.disabled=!S.curInstance||_whoami.role==='demo';
 
     commitCockpitHtml($('execOrders'),open.length
       ? `<div class="exec-order hdr"><span>BOT</span><span>ASSET</span><span>ROUTE</span><span>ORDER / VENUE ID</span><span>PRICE</span><span>REMAIN</span><span>AGE</span></div>${open.map(o=>{
