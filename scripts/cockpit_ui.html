@@ -5534,6 +5534,7 @@ function startTimer(p){
 }
 
 // ── Position live chart modal ─────────────────────────────────────────────
+const POS_CHART_HISTORY_REFRESH_MS=3000;
 const PCM={obj:null,series:null,markLine:null,cid:null,side:null,asset:null,inst:null,
            avgEntry:0,targetPrice:1,question:'',shares:0,costBasis:0,ticker:null,
            resizeObserver:null,resizeHost:null,resizeWidth:0,resizeHeight:0,refreshing:false,session:0,
@@ -5551,7 +5552,8 @@ function openPosChart(cid,side,asset,inst,avgEntry,targetPrice,question,shares,c
   _initPosChart();
   _refreshPosChart();
   if(PCM.ticker)clearInterval(PCM.ticker);
-  PCM.ticker=setInterval(()=>{if(!document.hidden)_refreshPosChart();},1000);
+  // The current mark stays on the SSE path; this poll reloads the full history and marker set.
+  PCM.ticker=setInterval(()=>{if(!document.hidden)_refreshPosChart();},POS_CHART_HISTORY_REFRESH_MS);
 }
 
 function closePosChart(){
