@@ -1215,7 +1215,11 @@ int main(int argc, char** argv) {
     std::string instance_label;   // multi-instance: tag for logs/DB/report
     bool headless = false;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--config" && i + 1 < argc) {
+        if (std::string(argv[i]) == "--help" || std::string(argv[i]) == "-h") {
+            std::fprintf(stdout,
+                "Usage: polypulse [--config PATH] [--instance NAME] [--headless]\n");
+            return 0;
+        } else if (std::string(argv[i]) == "--config" && i + 1 < argc) {
             cfg_path = argv[++i];
         } else if (std::string(argv[i]).starts_with("--config=")) {
             cfg_path = argv[i] + 9; // skip "--config="
