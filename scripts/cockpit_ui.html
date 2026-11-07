@@ -1981,6 +1981,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
 <script>
 const S={paused:false,refreshing:false,activityRefreshing:false,curInstance:'',curTab:'overview',
   data:{},activity:{},prices:{},prevFillTs:0,token:null,configRaw:'',configEdits:{},curConfig:'',configFingerprint:'',configLoadedMtime:0,configMtimes:{},configRuntimeStatus:{state:'checking'},
+  strategyInvalidCount:0,
   instNames:{},chartObj:null,candleSeries:null,pnlChartObj:null,pnlSeries:{},
   execution:{},executionRefreshing:false,fetchMs:null,paintMs:null,lastLoopAt:0,lastSseAt:0,lastServerTs:0,sseReconnecting:false,
   predictionTrails:{},predictionPulseTrails:{},predictionReferenceSamples:{},predictionReferenceDirectPrices:{},predictionReferenceSockets:null,predictionReferencePolySocket:null,predictionReferenceRangeMs:0,predictionReferenceViewEndMs:null,predictionReferenceShareMode:'delta',predictionReferenceSeriesVisibility:{oracle:true,coinbase:true,binance:true,kraken:true,gemini:true,okx:true,poly_up:true,poly_down:true},predictionReferenceGesture:null,predictionReferencePaintTimer:null,predictionReferenceDirectStatusTimer:null,predictionReferenceResizeTimer:null,predictionReferenceDirectUiAt:0,predictionReferenceAsset:'BTC',predictionReferenceHorizon:300,predictionReferenceWindow:null,predictionReferenceTimeline:null,predictionReferenceFetchAt:0,predictionReferenceRequest:null,predictionReferenceApiUnavailable:false,predictionPulseHorizon:300,predictionPulseLookback:60,predictionPulseThreshold:2,predictionPulseSort:'asset',
@@ -9548,7 +9549,11 @@ function knobInput(entry){
 }
 
 let _strategyConfigsLoading=false,_strategyConfigsCheckedAt=0,_strategyConfigsSignature='';
-function strategyInvalidCount(){return document.querySelectorAll('#strategyEditor .knob-card.invalid').length;}
+function strategyInvalidCount(){
+  if(Number.isFinite(S.strategyInvalidCount))return S.strategyInvalidCount;
+  S.strategyInvalidCount=document.querySelectorAll('#strategyEditor .knob-card.invalid').length;
+  return S.strategyInvalidCount;
+}
 function hasStrategyDrafts(){return Object.keys(S.configEdits||{}).length>0||strategyInvalidCount()>0;}
 function renderStrategyLoadState(state,title,detail){
   const host=$('strategyEditor');if(!host)return;
@@ -9764,6 +9769,7 @@ function renderConfigEditor(cfg){
   html+='</div>';
   if(!entries.length)html+='<div class="strategy-empty">No editable strategy knobs are present in this configuration.</div>';
   $('strategyEditor').innerHTML=html;
+  S.strategyInvalidCount=0;
   S.strategyCards=Array.from($('strategyEditor').querySelectorAll('.knob-card'));
   S.strategyGroups=Array.from($('strategyEditor').querySelectorAll('.str-group')).map(node=>({node,cards:Array.from(node.querySelectorAll('.knob-card'))}));
   S.strategyCardByKey=new Map();
@@ -9796,7 +9802,9 @@ function onKnobEdit(input){
   }else if(kind==='floats'||kind==='ints'||kind==='pairs'||kind==='strings'){
     try{val=JSON.parse(input.value);valid=Array.isArray(val);}catch(_){valid=false;}
   }else val=input.value;
+  const wasInvalid=card.classList.contains('invalid'),invalidBefore=strategyInvalidCount();
   card.classList.toggle('invalid',!valid);input.classList.toggle('changed',valid);
+  if(wasInvalid!==!valid)S.strategyInvalidCount=Math.max(0,invalidBefore+(!valid?1:-1));
   if(valid){card.classList.add('changed');S.configEdits[qkey]=val;}
   else{card.classList.remove('changed');delete S.configEdits[qkey];}
   updateStrategyState(false,card);
