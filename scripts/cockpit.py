@@ -700,7 +700,15 @@ def toml_scalar(value):
 
 def invalidate_runtime_caches():
     _since_cache.clear()
-    for name in ("_config_cache", "_live_cache", "_live_lite_cache", "_live_lite_retry_after",
+    live_cache = globals().get("_live_cache")
+    live_cache_lock = globals().get("_live_cache_lock")
+    if isinstance(live_cache, dict):
+        if live_cache_lock:
+            with live_cache_lock:
+                live_cache.clear()
+        else:
+            live_cache.clear()
+    for name in ("_config_cache", "_live_lite_cache", "_live_lite_retry_after",
                  "_live_lite_failures", "_window_bot_desk_retry_after",
                  "_window_bot_desk_failures", "_activity_cache", "_activity_tape_cache",
                  "_execution_cache"):
@@ -7104,7 +7112,12 @@ def api_supervisor_feed(limit=15):
     return {"feed": feed}
 
 
+_LIVE_CACHE_TTL_S = 1.0
+_LIVE_CACHE_MAX_AGE_S = 60.0
+_LIVE_CACHE_MAX_ENTRIES = 64
 _live_cache = {}   # instance-key -> (built_monotonic, payload)
+_live_cache_lock = threading.Lock()
+_live_cache_build_locks = tuple(threading.Lock() for _ in range(32))
 _live_lite_cache = {}
 _live_lite_cache_lock = threading.Lock()
 _live_lite_refreshing = set()
@@ -7134,31 +7147,54 @@ _pnl_retry_after = 0.0
 
 
 def api_live(instance=None):
-    # 1s whole-response cache: concurrent pollers (tabs, overlapping
-    # refreshes) share one build instead of stacking duplicate query storms.
+    # Keep legacy full snapshots bounded and coalesce concurrent builds by
+    # instance. Multiple cockpit tabs should not duplicate the position and
+    # accounting queries when they miss the same short-lived cache entry.
     key = instance or ""
     now = time.monotonic()
-    hit = _live_cache.get(key)
-    if hit and now - hit[0] < 1.0:
-        return hit[1]
-    mode = current_mode(instance)
-    since = accounting_since(instance, mode)
-    positions = reconstructed_positions(mode, since, instance)
-    out = {
-        "status": api_status(positions, since=since, instance=instance),
-        "positions": positions,
-        "orders": api_orders(90, instance),
-        "settles": api_settles(40, instance),
-        "markets": api_markets(60),
-        "orderstats": api_orderstats(24),
-        "source_pnl": api_source_pnl(instance),
-        "health": api_health(),
-        "tournament": api_tournament(),
-        "instance": instance or "",
-        "server_ts": int(time.time() * 1000),
-    }
-    _live_cache[key] = (now, out)
-    return out
+    with _live_cache_lock:
+        hit = _live_cache.get(key)
+        if hit and now - hit[0] < _LIVE_CACHE_TTL_S:
+            _live_cache.pop(key, None)
+            _live_cache[key] = hit
+            return hit[1]
+
+    build_lock = _live_cache_build_locks[hash(key) % len(_live_cache_build_locks)]
+    with build_lock:
+        now = time.monotonic()
+        with _live_cache_lock:
+            hit = _live_cache.get(key)
+            if hit and now - hit[0] < _LIVE_CACHE_TTL_S:
+                _live_cache.pop(key, None)
+                _live_cache[key] = hit
+                return hit[1]
+
+        mode = current_mode(instance)
+        since = accounting_since(instance, mode)
+        positions = reconstructed_positions(mode, since, instance)
+        out = {
+            "status": api_status(positions, since=since, instance=instance),
+            "positions": positions,
+            "orders": api_orders(90, instance),
+            "settles": api_settles(40, instance),
+            "markets": api_markets(60),
+            "orderstats": api_orderstats(24),
+            "source_pnl": api_source_pnl(instance),
+            "health": api_health(),
+            "tournament": api_tournament(),
+            "instance": instance or "",
+            "server_ts": int(time.time() * 1000),
+        }
+        built_at = time.monotonic()
+        with _live_cache_lock:
+            for old_key, (old_at, _old_value) in list(_live_cache.items()):
+                if old_key != key and built_at - old_at > _LIVE_CACHE_MAX_AGE_S:
+                    _live_cache.pop(old_key, None)
+            _live_cache.pop(key, None)
+            _live_cache[key] = (built_at, out)
+            while len(_live_cache) > _LIVE_CACHE_MAX_ENTRIES:
+                _live_cache.pop(next(iter(_live_cache)), None)
+        return out
 
 
 OPERATOR_RADAR_BOOK_HEALTH_STALE_AFTER_S = 90
