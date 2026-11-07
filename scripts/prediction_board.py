@@ -1568,13 +1568,22 @@ def build_board(query, public_json, root, news_fn, resolve=True):
     proc=subprocess.run([os.path.join(root,'build','bin','polypulse-forecast')],
         input=json.dumps(requests,allow_nan=False),capture_output=True,text=True,timeout=3,check=True)
     forecasts=json.loads(proc.stdout)
-    cards=[]
+    cards=[];technical_cache={};sparkline_by_asset={}
+
+    def technical_for(asset, bars, sigma_minute):
+        key = (asset, sigma_minute)
+        if key not in technical_cache:
+            technical_cache[key] = _technical_features(bars, sigma_minute)
+        return technical_cache[key]
+
     for index,(a,h,o) in enumerate(combos):
         current_req,current_f=requests[2*index],forecasts[2*index]
         next_req,next_f=requests[2*index+1],forecasts[2*index+1]
         current_data=metadata[(a,h,o)];next_data=metadata[(a,h,o+h)]
         current_tape=current_data['tape'];bars=current_data['bars']
-        technical=_technical_features(bars,current_f['sigma_minute'])
+        if a not in sparkline_by_asset:
+            sparkline_by_asset[a]=[x['close'] for x in bars[-60:]]
+        technical=technical_for(a,bars,current_f['sigma_minute'])
         coinbase_age=now_s-_number(current_tape.get('coinbase_ts')) if current_tape.get('coinbase_ts') else None
         binance_age=now_s-_number(current_tape.get('binance_ts')) if current_tape.get('binance_ts') else None
         sigma=current_f['sigma_minute']
@@ -1795,13 +1804,13 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             'news_signal':{'score':news_score,'matched_headlines':news_matches},
             'candle_store':{'samples':current_f['samples'],'source':candles.get(a,{}).get('source','Unavailable'),
                 'last_closed_ms':bars[-1]['ts'] if bars else None},
-            'sparkline':[x['close'] for x in bars[-60:]],'components':components,
+            'sparkline':sparkline_by_asset[a],'components':components,
             'independent_components':independent_components,
             'independent_signal_contributions':independent_impacts,
             'signal_contributions':impacts,'opportunity':opportunity}
 
         next_market=next_data['market'];next_window=next_data['ref']['window_s']
-        next_technical=_technical_features(bars,next_f['sigma_minute'])
+        next_technical=technical_for(a,bars,next_f['sigma_minute'])
         next_req_market=_market_probability(next_req)
         next_shadow_p,next_shadow_low,next_shadow_high,next_market_impact,next_impacts=_ensemble(next_f['probability'],
             next_f['low'],next_f['high'],next_req_market,live_signals,.08)
@@ -1948,7 +1957,7 @@ def build_board(query, public_json, root, news_fn, resolve=True):
             'news_signal':{'score':news_score,'matched_headlines':news_matches},
             'candle_store':{'samples':next_f['samples'],'source':candles.get(a,{}).get('source','Unavailable'),
                 'last_closed_ms':bars[-1]['ts'] if bars else None},
-            'sparkline':[x['close'] for x in bars[-60:]],'components':next_components,
+            'sparkline':sparkline_by_asset[a],'components':next_components,
             'independent_components':next_independent_components,
             'independent_signal_contributions':next_independent_impacts,
             'signal_contributions':next_impacts,'opportunity':None}
