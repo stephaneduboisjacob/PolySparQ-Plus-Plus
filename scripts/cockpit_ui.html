@@ -7025,6 +7025,8 @@ let _allowedModels=[];
 let _allowCustomModel=false;
 let _planMaxBots=null;
 let _fleetBusy=false;
+const _fleetCardMarkup=new Map();
+const _fleetSparkMarkup=new Map();
 async function loadFleet(){
   if(_fleetBusy)return;
   _fleetBusy=true;
@@ -7045,9 +7047,41 @@ async function loadFleet(){
       const t=tourn[f.instance]||{};
       const perf=_fleetPnl[f.instance]||{};
       const pnl=perf.pnl_available&&perf.net_pnl!=null?Number(perf.net_pnl):null;
-      return fleetCard(f,t,pnl,perf);
+      return{instance:f.instance,html:fleetCard(f,t,pnl,perf),perf};
     });
-    $('fleetGrid').innerHTML=cards.join('');
+    const fleetHost=$('fleetGrid'),wanted=new Set(cards.map(card=>card.instance));
+    for(const card of Array.from(fleetHost.children)){
+      const instance=card.id.startsWith('fleet-')?card.id.slice(6):'';
+      if(instance&&!wanted.has(instance)){
+        card.remove();_fleetCardMarkup.delete(instance);_fleetSparkMarkup.delete(instance);
+      }
+    }
+    for(const{instance,html}of cards){
+      let current=$(`fleet-${instance}`);
+      if(_fleetCardMarkup.get(instance)!==html||!current){
+        const template=document.createElement('template');template.innerHTML=html.trim();
+        const next=template.content.firstElementChild;
+        if(!next)continue;
+        const pendingSelects=current?Array.from(current.querySelectorAll('select[id]'))
+          .filter(select=>select.id.startsWith('cfg-sel-')||select.id.startsWith('strat-sel-'))
+          .map(select=>[select.id,select.value]):[];
+        const focused=current&&current.contains(document.activeElement)?document.activeElement:null;
+        const focusedId=focused?.id||'',focusedAction=focused?.getAttribute('onclick')||'';
+        if(current)current.replaceWith(next);else fleetHost.appendChild(next);
+        _fleetCardMarkup.set(instance,html);
+        for(const[id,value]of pendingSelects){
+          const select=$(id);if(!select||!Array.from(select.options).some(option=>option.value===value))continue;
+          select.value=value;
+          if(id.startsWith('cfg-sel-'))cfgSelChange(id.slice('cfg-sel-'.length));
+        }
+        const focusTarget=focusedId?$(focusedId):focusedAction
+          ?Array.from(next.querySelectorAll('[onclick]')).find(element=>element.getAttribute('onclick')===focusedAction):null;
+        focusTarget?.focus({preventScroll:true});
+      }
+    }
+    const fleetOrder=cards.map(card=>card.instance);
+    if(Array.from(fleetHost.children,card=>card.id.slice(6)).join('\0')!==fleetOrder.join('\0'))
+      for(const instance of fleetOrder){const card=$(`fleet-${instance}`);if(card)fleetHost.appendChild(card);}
     // Update Go Live button from wallet mode of user's instance
     if(_whoami.role!=='demo'){
       const myInst=_whoami.instance||(S.curInstance||'');
@@ -7056,10 +7090,12 @@ async function loadFleet(){
     }
     // defer until browser has laid out the new canvas elements
     requestAnimationFrame(()=>{
-      fleetList.forEach(f=>{
-        const perf=_fleetPnl[f.instance]||{};
-        drawSpark(`spark-${f.instance}`,
-          perf.pnl_available?(perf.points||[]).map(p=>p.pnl):[]);
+      cards.forEach(({instance,perf})=>{
+        const values=perf.pnl_available?(perf.points||[]).map(p=>p.pnl):[];
+        const signature=values.join(','),canvas=$(`spark-${instance}`),previous=_fleetSparkMarkup.get(instance);
+        if(previous?.signature===signature&&previous.canvas===canvas)return;
+        drawSpark(`spark-${instance}`,values);
+        _fleetSparkMarkup.set(instance,{signature,canvas});
       });
     });
   }finally{_fleetBusy=false;}
@@ -7385,8 +7421,9 @@ function fleetCard(f,t,pnl,perf={}){
 }
 
 function drawSpark(id,vals){
-  const cv=$(id);if(!cv||vals.length<2)return;
+  const cv=$(id);if(!cv)return;
   const w=cv.width=cv.offsetWidth||280,h=cv.height=34,ctx=cv.getContext('2d');
+  if(vals.length<2){ctx.clearRect(0,0,w,h);return;}
   const min=Math.min(...vals,0),max=Math.max(...vals,0),span=(max-min)||1;
   const X=i=>i/(vals.length-1)*(w-2)+1, Y=v=>h-2-((v-min)/span)*(h-4);
   // zero line
