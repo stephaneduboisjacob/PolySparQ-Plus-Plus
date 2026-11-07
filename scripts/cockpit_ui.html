@@ -307,6 +307,10 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code','C
 .str-summary-chip.live{border-color:rgba(24,201,139,.45);color:var(--green)}
 .str-summary-chip.paper{border-color:rgba(244,189,56,.45);color:var(--gold)}
 .str-summary-chip.changed{border-color:rgba(244,189,56,.55);color:var(--gold)}
+.str-summary-chip.ui-responsiveness[data-state="good"]{border-color:rgba(24,201,139,.45);color:var(--green)}
+.str-summary-chip.ui-responsiveness[data-state="warn"]{border-color:rgba(244,189,56,.55);color:var(--gold)}
+.str-summary-chip.ui-responsiveness[data-state="bad"]{border-color:rgba(239,79,95,.6);color:var(--red)}
+.str-summary-chip.ui-responsiveness[data-state="unknown"]{color:var(--text3)}
 .str-runtime-card{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px 14px;padding:11px 13px;margin:0 0 10px;border:1px solid var(--border);background:linear-gradient(110deg,rgba(255,255,255,.025),rgba(2,10,15,.5))}
 .str-runtime-main{min-width:0}.str-runtime-kicker{display:block;color:var(--text3);font-size:8px;letter-spacing:1.3px}.str-runtime-label{display:block;margin-top:4px;color:var(--text);font-size:11px;font-weight:800;letter-spacing:.4px;line-height:1.35}
 .str-runtime-detail{grid-column:1/-1;margin:0;color:var(--text3);font-size:9px;line-height:1.5}.str-runtime-card[data-state="in_sync"]{border-color:rgba(24,201,139,.45)}.str-runtime-card[data-state="in_sync"] .str-runtime-label{color:var(--green)}
@@ -4486,12 +4490,22 @@ function renderPositionTriage(d){
 }
 
 function updateStrategyFeedFreshness(now=Date.now()){
-  const chip=$('strategyFeedFreshness');if(!chip||S.curTab!=='strategy'||document.hidden)return;
+  if(S.curTab!=='strategy'||document.hidden)return;
+  updateStrategyUiResponsiveness(now);
+  const chip=$('strategyFeedFreshness');if(!chip)return;
   const timestamp=Number(S.lastServerTs),age=timestamp>0?Math.max(0,now-timestamp):null;
   const state=age===null?'unknown':age<2500?'fresh':age<7000?'delayed':'stale';
   chip.dataset.state=state;
   chip.textContent=age===null?'SNAPSHOT · WAITING':`SNAPSHOT · ${(age/1000).toFixed(1)}s`;
   chip.setAttribute('aria-label',age===null?'Live REST snapshot waiting':`Live REST snapshot ${state}, ${Math.floor(age/1000)} seconds old`);
+}
+function updateStrategyUiResponsiveness(now=Date.now()){
+  const chip=$('strategyUiResponsiveness');if(!chip)return;
+  const [reading,state]=uiLongTaskReading(now),text=`BROWSER UI · ${reading}`;
+  if(chip.textContent!==text)chip.textContent=text;
+  if(chip.dataset.state!==state)chip.dataset.state=state;
+  const label=`Browser main-thread tasks over the last 60 seconds across this cockpit tab: ${reading}. This does not measure server delay.`;
+  if(chip.getAttribute('aria-label')!==label)chip.setAttribute('aria-label',label);
 }
 
 const _uiLongTaskSamples=[];
@@ -4511,7 +4525,8 @@ function uiLongTaskReading(now=Date.now()){
   while(_uiLongTaskSamples.length&&now-_uiLongTaskSamples[0].at>60000)_uiLongTaskSamples.shift();
   if(!_uiLongTaskSamples.length)return['CLEAR · <50ms','good'];
   const longest=Math.max(..._uiLongTaskSamples.map(sample=>sample.duration));
-  return[`${Math.round(longest)}ms · ${_uiLongTaskSamples.length} TASKS`,longest>=500?'bad':longest>=200?'warn':'good'];
+  const count=_uiLongTaskSamples.length;
+  return[`${Math.round(longest)}ms · ${count} TASK${count===1?'':'S'}`,longest>=500?'bad':longest>=200?'warn':'good'];
 }
 function updateSpeedPanel(){
   updateOperatorRadarFreshness();
@@ -9951,7 +9966,7 @@ function renderConfigEditor(cfg){
   const scopeCopy=`${S.configExternal?'External user profile stored outside the repository. Cockpit edits stay in that local profile. ':''}${S.fullConfigEditor?'All settings in this profile are editable. Credentials are write-only and never returned. Fingerprint covers redacted settings, not engine defaults or runtime overrides.':'Editable strategy settings only. Fingerprint covers redacted profile values, not effective runtime state.'}`;
   const fingerprint=/^[\da-f]{64}$/i.test(S.configFingerprint)?S.configFingerprint:'';
   const fingerprintChip=`<span class="str-summary-chip str-fingerprint-chip"><small>REDACTED SHA-256</small><button type="button" class="str-fingerprint-copy" ${fingerprint?`title="Copy full SHA-256 of redacted profile settings; excludes credentials, engine defaults, and runtime overrides" aria-label="Copy full redacted-config SHA-256 ${esc(fingerprint)}" onclick="copyStrategyFingerprint()"`:'disabled aria-label="Configuration fingerprint unavailable"'}>${fingerprint?esc(fingerprint.slice(0,12)):'UNAVAILABLE'}${fingerprint?' ⧉':''}</button></span>`;
-  let html=`<div class="str-head"><div class="str-head-main"><div class="str-head-title">${esc((S.curConfig||'strategy').toUpperCase())}</div><div class="str-head-sub">${scopeCopy}</div></div><div class="str-summary"><span class="str-summary-chip ${esc(mode)}">${esc(mode.toUpperCase())}</span><span class="str-summary-chip"><b id="strategyVisibleCount">${entries.length}</b> / <span id="strategyTotalCount">${entries.length}</span> SHOWN</span><span class="str-summary-chip changed"><b id="strategyChangedCount">0</b> UNSAVED</span><span id="strategyFeedFreshness" class="str-summary-chip feed-freshness" data-state="unknown" aria-live="off">SNAPSHOT · WAITING</span>${fingerprintChip}</div></div>`;
+  let html=`<div class="str-head"><div class="str-head-main"><div class="str-head-title">${esc((S.curConfig||'strategy').toUpperCase())}</div><div class="str-head-sub">${scopeCopy}</div></div><div class="str-summary"><span class="str-summary-chip ${esc(mode)}">${esc(mode.toUpperCase())}</span><span class="str-summary-chip"><b id="strategyVisibleCount">${entries.length}</b> / <span id="strategyTotalCount">${entries.length}</span> SHOWN</span><span class="str-summary-chip changed"><b id="strategyChangedCount">0</b> UNSAVED</span><span id="strategyFeedFreshness" class="str-summary-chip feed-freshness" data-state="unknown" aria-live="off">SNAPSHOT · WAITING</span><span id="strategyUiResponsiveness" class="str-summary-chip ui-responsiveness" data-state="unknown" aria-live="off" title="Browser main-thread tasks over the past 60 seconds; global to this cockpit tab, not a server timing. The browser reports tasks of at least 50 ms.">BROWSER UI · WAITING</span>${fingerprintChip}</div></div>`;
   html+=`<section id="strategyRuntimeCard" class="str-runtime-card" data-state="checking" aria-live="polite"><div class="str-runtime-main"><small class="str-runtime-kicker">RUNNING BOT · LOADED CONFIG SOURCE</small><strong id="strategyRuntimeLabel" class="str-runtime-label">CHECKING SAME-NAME BOT…</strong></div><button id="strategyRuntimeRefresh" class="str-runtime-refresh" type="button" aria-label="Refresh running bot configuration source check" onclick="refreshStrategyRuntimeStatus()">↻ CHECK RUNTIME</button><p id="strategyRuntimeDetail" class="str-runtime-detail">Checking fresh PID-matched runtime status for this profile.</p></section><div class="cfg-legend">Values are validated against the range shown beside each control. <span style="color:var(--gold)">RISK</span> marks controls that can materially change exposure.</div><div class="str-groups">`;
   STRATEGY_GROUPS.forEach((g,idx)=>{
     const rows=byGroup[g.id];if(!rows.length)return;
@@ -14032,6 +14047,10 @@ table td{border-color:#26373d!important}
 #tabStrategy .feed-freshness[data-state="delayed"]{color:var(--gold)!important;border-color:#796333!important}
 #tabStrategy .feed-freshness[data-state="stale"]{color:var(--red)!important;border-color:#874954!important}
 #tabStrategy .feed-freshness[data-state="unknown"]{color:var(--text2)!important}
+#tabStrategy .ui-responsiveness[data-state="good"]{color:var(--green)!important;border-color:#347a5e!important}
+#tabStrategy .ui-responsiveness[data-state="warn"]{color:var(--gold)!important;border-color:#796333!important}
+#tabStrategy .ui-responsiveness[data-state="bad"]{color:var(--red)!important;border-color:#874954!important}
+#tabStrategy .ui-responsiveness[data-state="unknown"]{color:var(--text2)!important}
 #tabStrategy .str-runtime-card{padding:13px 15px;border-radius:9px;background:#0b1216!important}
 #tabStrategy .str-runtime-kicker,#tabStrategy .str-side-label{color:#9fb1b7!important;font-size:9px}
 #tabStrategy .str-runtime-label{color:var(--text)!important}
