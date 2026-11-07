@@ -3088,7 +3088,7 @@ function renderPredictionReferenceChart(){
     const xx=x(ts);return`<line class="pred-reference-stage" x1="${xx.toFixed(1)}" y1="${priceTop}" x2="${xx.toFixed(1)}" y2="${shareBottom}"/><text class="pred-reference-stage-label" x="${xx.toFixed(1)}" y="${priceTop-12}" text-anchor="${fraction===0?'start':fraction===1?'end':'middle'}">${label}</text>`;
   }).join('');
   const linePath=(points,valueFn,output)=>{
-    const reduced=predictionReferenceDecimate(points,1400,output),intervals=[],stride=Math.max(1,Math.ceil((reduced.length-1)/64));
+    const reduced=predictionReferenceDecimate(points,pointLimit,output),intervals=[],stride=Math.max(1,Math.ceil((reduced.length-1)/64));
     for(let index=stride;index<reduced.length;index+=stride){
       const previous=Math.max(0,index-stride),steps=index-previous,interval=(reduced[index].t-reduced[previous].t)/steps;
       if(interval>0)intervals.push(interval);
@@ -3099,6 +3099,12 @@ function renderPredictionReferenceChart(){
     for(const point of reduced){const move=!previous||point.t-previous.t>gapLimit;path+=`${move?'M':' L'}${x(point.t).toFixed(1)} ${valueFn(point).toFixed(1)}`;previous=point;}
     return path;
   };
+  const visibleLineCount=Math.max(1,
+    PREDICTION_REFERENCE_SOURCES.filter(source=>visible[source.key]!==false&&sourceMoveStats[source.key].count>0).length+
+    ['up','down'].filter(side=>visible[`poly_${side}`]!==false&&visibleShares[side].length>0).length);
+  // Keep SVG path work near the screen's horizontal resolution. The cursor
+  // still uses full-resolution samples, and decimation keeps local extrema.
+  const pointLimit=Math.max(240,Math.min(1400,Math.floor(PW*.85),Math.floor(7200/visibleLineCount)));
   const liveQuote=predictionReferenceLivePrices()[asset]||{};
   const spotLines=PREDICTION_REFERENCE_SOURCES.map(source=>{
     if(visible[source.key]===false||!sourceMoveStats[source.key].count)return'';
