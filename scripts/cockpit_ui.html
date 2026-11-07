@@ -7029,8 +7029,11 @@ async function loadFleet(){
   if(_fleetBusy)return;
   _fleetBusy=true;
   try{
+    const liveAge=Date.now()-(Number(S.data?.server_ts)||0);
+    const liveSnapshot=Array.isArray(S.data?.tournament?.instances)&&liveAge>=-1500&&liveAge<3000
+      ?Promise.resolve(S.data):apiFetch('/api/live_lite');
     const [fleet,live,pnlData]=await Promise.all([
-      apiFetch('/api/fleet'),apiFetch('/api/live_lite'),apiFetch('/api/pnl_by_instance')]);
+      apiFetch('/api/fleet'),liveSnapshot,apiFetch('/api/pnl_by_instance')]);
     const tourn={};(((live||{}).tournament||{}).instances||[]).forEach(x=>{tourn[x.instance]=x;});
     _fleetPnl=(pnlData||{}).instances||{};
     _availConfigs=(fleet||{}).available_configs||[];
