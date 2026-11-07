@@ -6010,8 +6010,8 @@ function _marketBookAge(ts){
   return seconds<10?seconds.toFixed(1)+'s':Math.floor(seconds)+'s';
 }
 function tickMarketBookAges(){
-  if(document.hidden||!$('tabMarkets')?.classList.contains('active'))return;
-  document.querySelectorAll('#tabMarkets .mkt-book-age').forEach(el=>{
+  const tab=$('tabMarkets');if(document.hidden||!tab?.classList.contains('active'))return;
+  tab.querySelectorAll('.mkt-book-age').forEach(el=>{
     const age=_marketBookAge(el.dataset.ts),unknown=age==='UNKNOWN'||age==='CLOCK OFFSET';
     el.classList.toggle('unknown',unknown);
     el.textContent='AGE · '+age;
@@ -6937,20 +6937,22 @@ async function loadOlderMarketExplorerTrades(conditionId){
   renderMarketExplorer();
 }
 function updateMarketExplorerBookFreshness(){
-  if(document.visibilityState!=='visible'||!$('tabMarkets')?.classList.contains('active'))return;
-  for(const node of document.querySelectorAll('[data-market-book-age-id][data-market-book-age-index]')){
+  const tab=$('tabMarkets');if(document.visibilityState!=='visible'||!tab?.classList.contains('active'))return;
+  for(const node of tab.querySelectorAll('[data-market-book-age-id][data-market-book-age-index]')){
     const id=node.dataset.marketBookAgeId,index=Number(node.dataset.marketBookAgeIndex);
     const book=_marketExplorerState.bookCache[id]?.payloads?.[index],age=_marketExplorerBookAgeSeconds(book);
     const fresh=book?.fresh===true&&age!==null&&age<=15;
-    node.className=fresh?'fresh':'stale';
-    node.textContent=`${fresh?(book?.source==='clob_ws'?'LIVE':'FRESH'):book?'STALE':'UNAVAILABLE'} · ${age===null?'AGE UNKNOWN':`AGE ${age.toFixed(1)}s`}`;
+    const className=fresh?'fresh':'stale',text=`${fresh?(book?.source==='clob_ws'?'LIVE':'FRESH'):book?'STALE':'UNAVAILABLE'} · ${age===null?'AGE UNKNOWN':`AGE ${age.toFixed(1)}s`}`;
+    if(node.className!==className)node.className=className;
+    if(node.textContent!==text)node.textContent=text;
   }
-  for(const node of document.querySelectorAll('[data-market-quick-age-id][data-market-quick-age-index]')){
+  for(const node of tab.querySelectorAll('[data-market-quick-age-id][data-market-quick-age-index]')){
     const id=node.dataset.marketQuickAgeId,index=Number(node.dataset.marketQuickAgeIndex);
     const book=_marketExplorerState.bookCache[id]?.payloads?.[index],age=_marketExplorerBookAgeSeconds(book);
     const fresh=book?.fresh===true&&age!==null&&age<=15;
-    node.className=fresh?'fresh':book?'stale':'unavailable';
-    node.textContent=`${fresh?(book?.source==='clob_ws'?'LIVE':'FRESH'):book?'STALE':'UNAVAILABLE'} · ${age===null?'AGE UNKNOWN':`${age.toFixed(1)}s`}`;
+    const className=fresh?'fresh':book?'stale':'unavailable',text=`${fresh?(book?.source==='clob_ws'?'LIVE':'FRESH'):book?'STALE':'UNAVAILABLE'} · ${age===null?'AGE UNKNOWN':`${age.toFixed(1)}s`}`;
+    if(node.className!==className)node.className=className;
+    if(node.textContent!==text)node.textContent=text;
   }
   _marketExplorerStreamStatusForTargets();
   _marketExplorerSampleWatchlistQuoteTrails();
@@ -7293,9 +7295,9 @@ function _fmtCountdown(ms){
   return m+':'+String(s).padStart(2,'0');
 }
 function tickMarketCountdowns(){
-  if(document.hidden||!$('tabMarkets')?.classList.contains('active'))return;
+  const tab=$('tabMarkets');if(document.hidden||!tab?.classList.contains('active'))return;
   const now=Date.now();
-  document.querySelectorAll('.mkt-count').forEach(el=>{
+  tab.querySelectorAll('.mkt-count').forEach(el=>{
     const wc=+el.dataset.wc||0;
     if(!wc){el.textContent='—';el.setAttribute('aria-label','Time until market close unavailable');return;}
     const left=wc-now;
