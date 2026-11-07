@@ -3788,7 +3788,8 @@ function applyLiveLiteSnapshot(d,force=false,shared=false,requestStartedAt=perfo
   updateStatsBar(st,d.health||{});
   $('modeBadge').textContent=(st.mode||'paper').toUpperCase();
   $('modeBadge').className=`mode-badge ${(st.mode||'paper').toLowerCase()}`;
-  renderOperatorRadar(d,S.curTab==='overview');
+  if(S.curTab==='overview'||cockpitMobileMedia.matches)
+    renderOperatorRadar(d,S.curTab==='overview');
   if(S.curTab==='overview'){renderPositionTriage(d);renderOverview(d);}
   if(S.curTab==='positions')renderPositions(d);
   if(S.curTab==='markets')renderMarkets(d.markets||{});
@@ -4404,6 +4405,7 @@ function renderOperatorRadar(d,paint=true){
   updateOperatorRadarFreshness(now);
 }
 
+const cockpitMobileMedia=window.matchMedia('(max-width:700px)');
 const OPERATOR_RADAR_SNAPSHOT_STALE_MS=5000;
 function updateMobileRadarIndicator(state,count=0,level='info'){
   const trigger=$('mobileMoreButton'),indicator=$('mobileMoreAlert');if(!trigger||!indicator)return;
@@ -4587,7 +4589,7 @@ function uiLongTaskReading(now=Date.now()){
   return[`${Math.round(longest)}ms · ${count} TASK${count===1?'':'S'}`,longest>=500?'bad':longest>=200?'warn':'good'];
 }
 function updateSpeedPanel(){
-  updateOperatorRadarFreshness();
+  if(S.curTab==='overview'||cockpitMobileMedia.matches)updateOperatorRadarFreshness();
   updateStrategyFeedFreshness();
   if(document.hidden||S.curTab!=='overview')return;
   const host=$('speedPanel');if(!host)return;
