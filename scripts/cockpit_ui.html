@@ -2262,6 +2262,8 @@ const PREDICTION_REFERENCE_SOURCES=[
 ];
 const PREDICTION_REFERENCE_SERIES=[...PREDICTION_REFERENCE_SOURCES.map(source=>({key:source.key,label:source.key==='oracle'?'CHAINLINK':source.label})),{key:'poly_up',label:'POLY UP'},{key:'poly_down',label:'POLY DOWN'}];
 const PREDICTION_REFERENCE_POLY_LIMIT=12000,PREDICTION_REFERENCE_DIRECT_LIMIT=6000,PREDICTION_REFERENCE_TRIM_BATCH=512;
+// Keep a flat trace connected at 1 Hz without storing every unchanged quote.
+const PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS=1000;
 const PREDICTION_REFERENCE_SOURCE_STALE_MS=10000,PREDICTION_REFERENCE_POLY_STALE_MS=15000;
 const PREDICTION_REFERENCE_PAINT_INTERVAL_MS=200;
 function schedulePredictionReferenceChartPaint(){
@@ -2323,14 +2325,22 @@ function recordPredictionReferencePolyTick(side,value,sourceTimestamp){
   if(!window||!['up','down'].includes(side)||!Number.isFinite(price)||price<0||price>1)return;
   const sourceTs=predictionReferenceTimestamp(sourceTimestamp),ts=sourceTs&&Math.abs(now-sourceTs)<=5000?sourceTs:now;
   const series=S.predictionReferenceSamples[asset]||(S.predictionReferenceSamples[asset]={}),key=`poly_${side}`,points=series[key]||(series[key]=[]),last=points.at(-1);
-  if(last&&Math.abs(Number(last.value)-price)<1e-9&&now-Number(last.received_at_ms||last.t)<100)return;
+  const unchanged=!!last&&Math.abs(Number(last.value)-price)<1e-9;
+  if(unchanged&&now-Number(last.received_at_ms||last.t)<100)return;
   const point={t:ts,value:price,source_ts_ms:sourceTs,received_at_ms:now,live:true};
-  if(last&&ts<=last.t){if(ts===last.t){last.value=price;last.source_ts_ms=sourceTs;last.received_at_ms=now;}else points.push({...point,t:Math.max(Number(last.t)+1,now)});}
-  else points.push(point);
+  let chartChanged=false;
+  if(last&&ts<=last.t){
+    if(ts===last.t){chartChanged=!unchanged;last.value=price;last.source_ts_ms=sourceTs;last.received_at_ms=now;}
+    else if(!unchanged){points.push({...point,t:Math.max(Number(last.t)+1,now)});chartChanged=true;}
+    else{last.source_ts_ms=sourceTs;last.received_at_ms=now;}
+  }else if(!last||!unchanged||ts-Number(last.t)>=PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS){points.push(point);chartChanged=true;}
+  else{last.source_ts_ms=sourceTs;last.received_at_ms=now;}
+  if(last)last.live=true;
   if(points.length>PREDICTION_REFERENCE_POLY_LIMIT+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-PREDICTION_REFERENCE_POLY_LIMIT);
   const state=S.predictionReferencePolySocket;if(state){state.lastQuoteAt=now;state.lastSourceTimestamp=sourceTs;state.status='live';}
   predictionReferencePolyStatus();
-  if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset)schedulePredictionReferenceChartPaint();
+  if(chartChanged&&S.curTab==='manualpred'&&S.predictionReferenceAsset===asset&&S.predictionReferenceSeriesVisibility[key]!==false)
+    schedulePredictionReferenceChartPaint();
 }
 function connectPredictionReferencePolySocket(data){
   const tokens=data?.share_tokens||{},up=String(tokens.up||''),down=String(tokens.down||''),key=`${S.predictionReferenceWindow?.key||''}:${up}:${down}`;
@@ -2651,12 +2661,17 @@ function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
   if(previous&&ts<previous.ts_ms)return;
   direct[source]={value,ts_ms:ts,received_at_ms:now};
   const series=S.predictionReferenceSamples[asset]||(S.predictionReferenceSamples[asset]={}),points=series[source]||(series[source]=[]),last=points.at(-1);
-  if(last&&last.t===ts)last.value=value;
-  else if(!last||ts>last.t)points.push({t:ts,value,age_s:Math.max(0,(now-ts)/1000),direct:true});
+  let chartChanged=false;
+  if(last&&last.t===ts){chartChanged=last.value!==value;last.value=value;last.age_s=Math.max(0,(now-ts)/1000);last.direct=true;last.received_at_ms=now;}
+  else if(!last||ts>last.t){
+    const point={t:ts,value,age_s:Math.max(0,(now-ts)/1000),direct:true};
+    if(!last||last.value!==value||ts-Number(last.t)>=PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS){points.push(point);chartChanged=true;}
+    else{last.age_s=point.age_s;last.received_at_ms=now;last.direct=true;}
+  }
   if(points.length>PREDICTION_REFERENCE_DIRECT_LIMIT+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-PREDICTION_REFERENCE_DIRECT_LIMIT);
   if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset){
     if(now-S.predictionReferenceDirectUiAt>100){S.predictionReferenceDirectUiAt=now;patchPredictionReferenceDirectQuotes(asset);}
-    schedulePredictionReferenceChartPaint();
+    if(chartChanged&&S.predictionReferenceSeriesVisibility[source]!==false)schedulePredictionReferenceChartPaint();
   }
   schedulePredictionReferenceDirectStatus();
 }
@@ -2673,7 +2688,7 @@ function patchPredictionReferenceDirectQuotes(asset){
     }
   });
 }
-function updatePredictionReferenceDisplays(prices=S.prices){
+function updatePredictionReferenceDisplays(prices=S.prices,{scheduleChart=true}={}){
   startPredictionReferenceSockets();
   predictionReferenceDirectStatus();
   const livePrices=predictionReferenceLivePrices(prices);
@@ -2701,7 +2716,7 @@ function updatePredictionReferenceDisplays(prices=S.prices){
   });
   const status=$('predictionReferenceStreamStatus');
   if(status){const age=ageMs(S.lastSseAt);status.textContent=age==null?'COCKPIT SSE CONNECTING':`COCKPIT SSE ${age<1000?`${age}ms`:`${(age/1000).toFixed(1)}s`} AGO · ~500ms PUSH`;status.dataset.state=age==null||age>2500?'stale':'live';}
-  schedulePredictionReferenceChartPaint();
+  if(scheduleChart)schedulePredictionReferenceChartPaint();
   if(S.curTab==='manualpred'&&S.predictionBoard)void refreshPredictionReferenceWindow();
 }
 function setPredictionReferenceAsset(asset){
@@ -2725,26 +2740,37 @@ function setPredictionReferenceHorizon(horizon){
   refreshPredictionReferenceWindow(true);
 }
 function capturePredictionReferenceSample(prices=S.prices,receivedAt=Date.now()){
-  if(!prices||typeof prices!=='object')return;
+  if(!prices||typeof prices!=='object')return false;
   prices=predictionReferenceLivePrices(prices);
   const asset=S.predictionReferenceAsset||'BTC',quote=prices[asset]||{},window=S.predictionReferenceWindow;
-  const series=S.predictionReferenceSamples[asset]||(S.predictionReferenceSamples[asset]={});
+  const series=S.predictionReferenceSamples[asset]||(S.predictionReferenceSamples[asset]={});let chartChanged=false;
   for(const source of PREDICTION_REFERENCE_SOURCES){
     const value=Number(quote[source.key]),ageRaw=quote[`${source.key}_age_s`],age=ageRaw==null?NaN:Number(ageRaw);
     if(!Number.isFinite(value)||value<=0||Number.isFinite(age)&&age>source.maxAge)continue;
     const sourceTime=Number(quote[`${source.key}_ts_ms`]),sampleTime=Number.isFinite(sourceTime)&&sourceTime>0?sourceTime:receivedAt;
     if(window&&(sampleTime<Number(window.window_open)||sampleTime>Number(window.window_close)))continue;
     const points=series[source.key]||(series[source.key]=[]);
-    const last=points.at(-1),point={t:sampleTime,value,age_s:Number.isFinite(age)?age:null};
-    if(last?.t===sampleTime)continue;
-    if(!last||sampleTime>last.t)points.push(point);
+    const last=points.at(-1),point={t:sampleTime,value,age_s:Number.isFinite(age)?age:null},visible=S.predictionReferenceSeriesVisibility[source.key]!==false;
+    if(last?.t===sampleTime){
+      if(last.direct)continue;
+      if(last.value!==value){last.value=value;last.age_s=point.age_s;if(visible)chartChanged=true;}
+      continue;
+    }
+    if(!last||sampleTime>last.t){
+      if(last&&last.value===value&&sampleTime-last.t<PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS)continue;
+      points.push(point);if(visible)chartChanged=true;
+    }
     else{
       const [from,to]=predictionReferenceRangeBounds(points,sampleTime,sampleTime);
-      if(from<to)continue;
-      points.splice(from,0,point);
+      if(from<to){
+        if(points[from].value!==value){points[from].value=value;points[from].age_s=point.age_s;if(visible)chartChanged=true;}
+        continue;
+      }
+      points.splice(from,0,point);if(visible)chartChanged=true;
     }
     if(points.length>1200+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-1200);
   }
+  return chartChanged;
 }
 function predictionReferenceSelectedWindow(board=S.predictionBoard){
   const asset=S.predictionReferenceAsset||'BTC',horizon=Number(S.predictionReferenceHorizon)||300,now=Date.now();
@@ -3030,7 +3056,7 @@ function renderPredictionReferenceChart(){
   }).join('');
   const closeLine=visible.oracle!==false&&closeMove!=null&&Number.isFinite(closeMove)?`<line class="pred-reference-close-line" x1="${x(Math.max(viewportStart,Number(closeRef.ts_ms)||close)).toFixed(1)}" y1="${yMove(closeMove).toFixed(1)}" x2="${plotRight}" y2="${yMove(closeMove).toFixed(1)}"><title>Window close reference ${predictionReferencePrice(closeRef.price,asset)}</title></line>`:'';
   const priceLabel=`${asset} MOVE FROM OPEN · ${anchorPrice?predictionReferencePrice(anchorPrice,asset):'OPEN REFERENCE UNAVAILABLE'}`;
-  const aria=`${asset} ${window.horizon/60}-minute ${window.period==='NEXT'?'upcoming':'current'} window. Spot venues are percent from ${anchorSource}; Polymarket UP and DOWN use ${shareMode==='delta'?'change in cents from their first in-window midpoint':'midpoint prices in cents'}. ${PREDICTION_REFERENCE_SERIES.filter(series=>visible[series.key]!==false).map(series=>`${series.label} ${series.key.startsWith('poly_')?visibleShares[series.key.slice(5)].length:samplesBySource[series.key]?.length||0} ticks`).join(', ')}.`;
+  const aria=`${asset} ${window.horizon/60}-minute ${window.period==='NEXT'?'upcoming':'current'} window. Spot venues are percent from ${anchorSource}; Polymarket UP and DOWN use ${shareMode==='delta'?'change in cents from their first in-window midpoint':'midpoint prices in cents'}. ${PREDICTION_REFERENCE_SERIES.filter(series=>visible[series.key]!==false).map(series=>`${series.label} ${series.key.startsWith('poly_')?visibleShares[series.key.slice(5)].length:samplesBySource[series.key]?.length||0} price points`).join(', ')}.`;
   const cursorDots=PREDICTION_REFERENCE_SOURCES.filter(source=>visible[source.key]!==false).map(source=>`<circle id="predictionReferenceCursor${source.key[0].toUpperCase()+source.key.slice(1)}" class="pred-reference-cursor ${source.key}" r="5" visibility="hidden"/>`).join('');
   const shareCursorDots=['up','down'].filter(side=>visible[`poly_${side}`]!==false).map(side=>`<circle id="predictionReferenceCursor${side[0].toUpperCase()+side.slice(1)}" class="pred-reference-cursor share ${side}" r="5" visibility="hidden"/>`).join('');
   target.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(aria)}"><title>${esc(aria)}</title><g class="pred-reference-grid">${priceGrid}${shareGrid}${timeTicks}</g>${stageLines}<line class="pred-reference-zero-line" x1="${L}" y1="${yMove(0).toFixed(1)}" x2="${plotRight}" y2="${yMove(0).toFixed(1)}"/><text class="pred-reference-panel-title" x="${L}" y="${priceTop-25}">${esc(priceLabel)}</text><text class="pred-reference-panel-title" x="${L}" y="${shareTop-23}">POLYMARKET UP / DOWN · ${shareMode==='delta'?'CHANGE FROM FIRST IN-WINDOW MIDPOINT':'SHARE MIDPOINT PRICE'}</text><text class="pred-reference-panel-unit" x="${plotRight}" y="${shareTop-23}" text-anchor="end">${shareMode==='delta'?'Δ CENTS FROM OPEN':'PRICE IN CENTS · 0–100¢'}</text>${closeLine}${spotLines}${shareOpenLines}${shareLines}<g id="predictionReferenceCursor" visibility="hidden"><line id="predictionReferenceCursorLine" class="pred-reference-cursor-line" y1="${priceTop}" y2="${shareBottom}"/>${cursorDots}${shareCursorDots}</g></svg>`;
@@ -3041,16 +3067,16 @@ function renderPredictionReferenceChart(){
   if(stats&&(statsContext!==_predictionReferenceStatsContext||now-_predictionReferenceStatsPaintAt>=250)){
     const spotStats=PREDICTION_REFERENCE_SOURCES.map(source=>{
       if(visible[source.key]===false)return'';
-      const points=samplesBySource[source.key];if(!points.length)return`<div class="pred-reference-stat ${source.key}" data-empty="true"><b>${source.label}</b><span>NO TICKS IN VIEW</span><small>${source.assets&&!source.assets.includes(asset)?'PAIR NOT SUPPORTED':'Waiting for venue data'}</small></div>`;
+      const points=samplesBySource[source.key];if(!points.length)return`<div class="pred-reference-stat ${source.key}" data-empty="true"><b>${source.label}</b><span>NO PRICE POINTS IN VIEW</span><small>${source.assets&&!source.assets.includes(asset)?'PAIR NOT SUPPORTED':'Waiting for venue data'}</small></div>`;
       const range=sourceMoveStats[source.key],last=points.at(-1),lo=range.low,hi=range.high,move=last?.move_pct,sign=move>0?'+':'';
-      return`<div class="pred-reference-stat ${source.key}"><b>${source.label}</b><span>FROM OPEN ${Number.isFinite(move)?`${sign}${move.toFixed(3)}%`:'—'}</span><small>${predictionReferencePrice(last?.value,asset)} · ${lo>0?'+':''}${lo.toFixed(3)}% to ${hi>0?'+':''}${hi.toFixed(3)}% · ${points.length} ticks</small></div>`;
+      return`<div class="pred-reference-stat ${source.key}"><b>${source.label}</b><span>FROM OPEN ${Number.isFinite(move)?`${sign}${move.toFixed(3)}%`:'—'}</span><small>${predictionReferencePrice(last?.value,asset)} · ${lo>0?'+':''}${lo.toFixed(3)}% to ${hi>0?'+':''}${hi.toFixed(3)}% · ${points.length} price points</small></div>`;
     });
     for(const side of ['up','down']){
       if(visible[`poly_${side}`]===false)continue;
       const points=visibleShares[side],last=points.at(-1),label=side.toUpperCase(),colorClass=side==='up'?'up':'down';
       const opened=openingShares[side],delta=opened&&last?(Number(last.value)-Number(opened.value))*100:null,sign=delta>0?'+':'';
       const quoteAge=last?.received_at_ms?Math.max(0,(Date.now()-last.received_at_ms)/1000):null;
-      spotStats.push(points.length?`<div class="pred-reference-stat share ${colorClass}"><b>POLY ${label}</b><span>${(Number(last.value)*100).toFixed(1)}¢ · ${delta==null?'OPEN —':`OPEN ${(Number(opened.value)*100).toFixed(1)}¢ · Δ ${sign}${delta.toFixed(1)}¢`}</span><small>${points.length} BBO points · ${quoteAge==null?clock(last.t):`updated ${quoteAge<1?`${Math.round(quoteAge*1000)}ms`:quoteAge.toFixed(1)+'s'} ago`}</small></div>`:`<div class="pred-reference-stat share ${colorClass}" data-empty="true"><b>POLY ${label}</b><span>NO BOOK DATA</span><small>Waiting for live CLOB midpoint</small></div>`);
+      spotStats.push(points.length?`<div class="pred-reference-stat share ${colorClass}"><b>POLY ${label}</b><span>${(Number(last.value)*100).toFixed(1)}¢ · ${delta==null?'OPEN —':`OPEN ${(Number(opened.value)*100).toFixed(1)}¢ · Δ ${sign}${delta.toFixed(1)}¢`}</span><small>${points.length} price points · ${quoteAge==null?clock(last.t):`updated ${quoteAge<1?`${Math.round(quoteAge*1000)}ms`:quoteAge.toFixed(1)+'s'} ago`}</small></div>`:`<div class="pred-reference-stat share ${colorClass}" data-empty="true"><b>POLY ${label}</b><span>NO BOOK DATA</span><small>Waiting for live CLOB midpoint</small></div>`);
     }
     stats.innerHTML=spotStats.filter(Boolean).join('')||'<span class="pred-reference-no-series">All series are hidden. Turn a series back on above.</span>';
     _predictionReferenceStatsContext=statsContext;_predictionReferenceStatsPaintAt=now;
@@ -3227,8 +3253,9 @@ function connectSSE(){
       updateCbStrip(S.prices);
       updatePriceTicker(S.prices);
       if(S.curTab==='manualpred'){
-        capturePredictionReferenceSample(S.prices,Date.now());
-        updatePredictionReferenceDisplays(S.prices);
+        const referenceChartChanged=capturePredictionReferenceSample(S.prices,Date.now());
+        updatePredictionReferenceDisplays(S.prices,{scheduleChart:false});
+        if(referenceChartChanged)schedulePredictionReferenceChartPaint();
       }
       const streamFills=d.recent_fills||[];
       if(!S.paused)checkNewFills(streamFills);
