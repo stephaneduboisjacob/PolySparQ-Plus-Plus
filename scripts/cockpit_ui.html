@@ -1996,6 +1996,12 @@ const S={paused:false,refreshing:false,activityRefreshing:false,curInstance:'',c
   predAsset:'BTC',predWindows:new Set(['300:CURRENT','300:NEXT','900:CURRENT','900:NEXT']),
   predRequestController:null,predForceQueued:false,predRequestForced:false,predDisplayHidden:false,
   predRetryMs:0,predBoardReceivedAt:0,predSnapshotAgeAtReceive:0,manualPredLoading:false};
+const _predictionReferenceSeriesVersionsByAsset=Object.create(null);
+function predictionReferenceSeriesVersion(asset,key){return Number(_predictionReferenceSeriesVersionsByAsset[asset]?.[key])||0;}
+function bumpPredictionReferenceSeriesVersion(asset,key){
+  const versions=_predictionReferenceSeriesVersionsByAsset[asset]||(_predictionReferenceSeriesVersionsByAsset[asset]=Object.create(null));
+  versions[key]=(Number(versions[key])||0)+1;return versions[key];
+}
 const BOT_COLORS={cb:'#18c98b',conv:'#f4bd38',synth:'#39c5df',i1:'#ef4f5f',i2:'#4d8dff',i3:'#a466ff'};
 const CB_THRESH={BTC:.08,ETH:.08,SOL:.10,XRP:.10};
 
@@ -2387,15 +2393,18 @@ function recordPredictionReferencePolyTick(side,value,sourceTimestamp){
   const unchanged=!!last&&Math.abs(Number(last.value)-price)<1e-9;
   if(unchanged&&now-Number(last.received_at_ms||last.t)<100)return;
   const point={t:ts,value:price,source_ts_ms:sourceTs,received_at_ms:now,live:true};
-  let chartChanged=false;
+  let chartChanged=false,seriesChanged=false;
   if(last&&ts<=last.t){
-    if(ts===last.t){chartChanged=!unchanged;last.value=price;last.source_ts_ms=sourceTs;last.received_at_ms=now;}
-    else if(!unchanged){points.push({...point,t:Math.max(Number(last.t)+1,now)});chartChanged=true;}
+    if(ts===last.t){chartChanged=!unchanged;seriesChanged=chartChanged;last.value=price;last.source_ts_ms=sourceTs;last.received_at_ms=now;}
+    else if(!unchanged){points.push({...point,t:Math.max(Number(last.t)+1,now)});chartChanged=seriesChanged=true;}
     else{last.source_ts_ms=sourceTs;last.received_at_ms=now;}
-  }else if(!last||!unchanged||ts-Number(last.t)>=PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS){points.push(point);chartChanged=true;}
+  }else if(!last||!unchanged||ts-Number(last.t)>=PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS){points.push(point);chartChanged=seriesChanged=true;}
   else{last.source_ts_ms=sourceTs;last.received_at_ms=now;}
   if(last)last.live=true;
+  const previousLength=points.length;
   if(points.length>PREDICTION_REFERENCE_POLY_LIMIT+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-PREDICTION_REFERENCE_POLY_LIMIT);
+  if(points.length!==previousLength)seriesChanged=true;
+  if(seriesChanged)bumpPredictionReferenceSeriesVersion(asset,key);
   const state=S.predictionReferencePolySocket;if(state){state.lastQuoteAt=now;state.lastSourceTimestamp=sourceTs;state.status='live';}
   predictionReferencePolyStatus();
   if(chartChanged&&S.curTab==='manualpred'&&S.predictionReferenceAsset===asset&&S.predictionReferenceSeriesVisibility[key]!==false)
@@ -2720,14 +2729,17 @@ function recordPredictionReferenceDirectTick(asset,source,value,timestamp){
   if(previous&&ts<previous.ts_ms)return;
   direct[source]={value,ts_ms:ts,received_at_ms:now};
   const series=S.predictionReferenceSamples[asset]||(S.predictionReferenceSamples[asset]={}),points=series[source]||(series[source]=[]),last=points.at(-1);
-  let chartChanged=false;
-  if(last&&last.t===ts){chartChanged=last.value!==value;last.value=value;last.age_s=Math.max(0,(now-ts)/1000);last.direct=true;last.received_at_ms=now;}
+  let chartChanged=false,seriesChanged=false;
+  if(last&&last.t===ts){chartChanged=last.value!==value;seriesChanged=chartChanged;last.value=value;last.age_s=Math.max(0,(now-ts)/1000);last.direct=true;last.received_at_ms=now;}
   else if(!last||ts>last.t){
     const point={t:ts,value,age_s:Math.max(0,(now-ts)/1000),direct:true};
-    if(!last||last.value!==value||ts-Number(last.t)>=PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS){points.push(point);chartChanged=true;}
+    if(!last||last.value!==value||ts-Number(last.t)>=PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS){points.push(point);chartChanged=seriesChanged=true;}
     else{last.age_s=point.age_s;last.received_at_ms=now;last.direct=true;}
   }
+  const previousLength=points.length;
   if(points.length>PREDICTION_REFERENCE_DIRECT_LIMIT+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-PREDICTION_REFERENCE_DIRECT_LIMIT);
+  if(points.length!==previousLength)seriesChanged=true;
+  if(seriesChanged)bumpPredictionReferenceSeriesVersion(asset,source);
   if(S.curTab==='manualpred'&&S.predictionReferenceAsset===asset){
     if(now-S.predictionReferenceDirectUiAt>100){S.predictionReferenceDirectUiAt=now;patchPredictionReferenceDirectQuotes(asset);}
     if(chartChanged&&S.predictionReferenceSeriesVisibility[source]!==false)schedulePredictionReferenceChartPaint();
@@ -2813,22 +2825,26 @@ function capturePredictionReferenceSample(prices=S.prices,receivedAt=Date.now())
     const last=points.at(-1),point={t:sampleTime,value,age_s:Number.isFinite(age)?age:null},visible=S.predictionReferenceSeriesVisibility[source.key]!==false;
     if(last?.t===sampleTime){
       if(last.direct)continue;
-      if(last.value!==value){last.value=value;last.age_s=point.age_s;if(visible)chartChanged=true;}
+      if(last.value!==value){last.value=value;last.age_s=point.age_s;bumpPredictionReferenceSeriesVersion(asset,source.key);if(visible)chartChanged=true;}
       continue;
     }
+    let seriesChanged=false;
     if(!last||sampleTime>last.t){
       if(last&&last.value===value&&sampleTime-last.t<PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS)continue;
-      points.push(point);if(visible)chartChanged=true;
+      points.push(point);seriesChanged=true;if(visible)chartChanged=true;
     }
     else{
       const [from,to]=predictionReferenceRangeBounds(points,sampleTime,sampleTime);
       if(from<to){
-        if(points[from].value!==value){points[from].value=value;points[from].age_s=point.age_s;if(visible)chartChanged=true;}
+        if(points[from].value!==value){points[from].value=value;points[from].age_s=point.age_s;bumpPredictionReferenceSeriesVersion(asset,source.key);if(visible)chartChanged=true;}
         continue;
       }
-      points.splice(from,0,point);if(visible)chartChanged=true;
+      points.splice(from,0,point);seriesChanged=true;if(visible)chartChanged=true;
     }
+    const previousLength=points.length;
     if(points.length>1200+PREDICTION_REFERENCE_TRIM_BATCH)points.splice(0,points.length-1200);
+    if(points.length!==previousLength)seriesChanged=true;
+    if(seriesChanged)bumpPredictionReferenceSeriesVersion(asset,source.key);
   }
   return chartChanged;
 }
@@ -2850,7 +2866,10 @@ function mergePredictionReferenceWindowSeries(data,window){
       const t=Number(point.ts_ms),value=Number(point.price);
       if(Number.isFinite(t)&&Number.isFinite(value)&&value>0&&t>=Number(window.window_open)&&t<=Number(window.window_close))byTime.set(t,{t,value,age_s:null});
     }
-    stored[source.key]=[...byTime.values()].sort((a,b)=>a.t-b.t).slice(-1200);
+    const merged=[...byTime.values()].sort((a,b)=>a.t-b.t).slice(-1200),current=stored[source.key]||[];
+    let same=current.length===merged.length;
+    for(let index=0;same&&index<merged.length;index++)same=current[index].t===merged[index].t&&current[index].value===merged[index].value;
+    if(!same){stored[source.key]=merged;bumpPredictionReferenceSeriesVersion(asset,source.key);}
   }
   for(const side of ['up','down']){
     const byTime=new Map((stored[`poly_${side}`]||[]).map(point=>[Number(point.t),point]));
@@ -2858,7 +2877,10 @@ function mergePredictionReferenceWindowSeries(data,window){
       const t=Number(point.ts_ms),value=Number(point.price);
       if(Number.isFinite(t)&&Number.isFinite(value)&&value>=0&&value<=1&&t>=Number(window.window_open)&&t<=Number(window.window_close))byTime.set(t,{t,value});
     }
-    stored[`poly_${side}`]=[...byTime.values()].sort((a,b)=>a.t-b.t).slice(-1500);
+    const key=`poly_${side}`,merged=[...byTime.values()].sort((a,b)=>a.t-b.t).slice(-1500),current=stored[key]||[];
+    let same=current.length===merged.length;
+    for(let index=0;same&&index<merged.length;index++)same=current[index].t===merged[index].t&&current[index].value===merged[index].value;
+    if(!same){stored[key]=merged;bumpPredictionReferenceSeriesVersion(asset,key);}
   }
   updatePredictionReferenceDisplays(S.prices);
 }
@@ -2948,16 +2970,30 @@ function predictionReferenceTimeRange(points,start,end,output=null){
   if(!output)return points.slice(from,to);
   output.length=0;for(let index=from;index<to;index++)output.push(points[index]);return output;
 }
+function predictionReferenceViewport(points,start,end,output,cache,version){
+  const [from,to]=predictionReferenceRangeBounds(points,start,end);
+  if(cache.source!==points||cache.version!==version||cache.from!==from||cache.to!==to){
+    output.length=0;for(let index=from;index<to;index++)output.push(points[index]);
+    cache.source=points;cache.version=version;cache.from=from;cache.to=to;
+  }
+  return output;
+}
+function predictionReferenceCachedDecimate(source,points,limit,output,cache,version,from,to){
+  if(cache.source===source&&cache.version===version&&cache.from===from&&cache.to===to&&cache.limit===limit)return cache.points;
+  const reduced=predictionReferenceDecimate(points,limit,output);
+  cache.source=source;cache.version=version;cache.from=from;cache.to=to;cache.limit=limit;cache.points=reduced;
+  return reduced;
+}
 function predictionReferenceFirstInRange(points,start,end){
   const [from,to]=predictionReferenceRangeBounds(points,start,end);return from<to?points[from]:null;
 }
 const _predictionReferenceBuffersByAsset=Object.create(null),_predictionReferenceEmptyPoints=[];
 function predictionReferenceChartBuffers(asset){
   let buffers=_predictionReferenceBuffersByAsset[asset];if(buffers)return buffers;
-  const raw=Object.create(null),decimated=Object.create(null),shares={up:[],down:[]};
-  for(const source of PREDICTION_REFERENCE_SOURCES){raw[source.key]=[];decimated[source.key]=[];}
-  for(const side of ['up','down'])decimated[`poly_${side}`]=[];
-  buffers={raw,decimated,shares};_predictionReferenceBuffersByAsset[asset]=buffers;return buffers;
+  const raw=Object.create(null),decimated=Object.create(null),rawMeta=Object.create(null),shareMeta=Object.create(null),decimationMeta=Object.create(null),shares={up:[],down:[]};
+  for(const source of PREDICTION_REFERENCE_SOURCES){raw[source.key]=[];decimated[source.key]=[];rawMeta[source.key]={};decimationMeta[source.key]={};}
+  for(const side of ['up','down']){decimated[`poly_${side}`]=[];shareMeta[side]={};decimationMeta[`poly_${side}`]={};}
+  buffers={raw,decimated,rawMeta,shareMeta,decimationMeta,shares};_predictionReferenceBuffersByAsset[asset]=buffers;return buffers;
 }
 let _predictionReferenceForecastHtml=null,_predictionReferenceStatsContext='',_predictionReferenceStatsPaintAt=0;
 function setPredictionReferenceChartStatsMessage(message){
@@ -3000,13 +3036,14 @@ function renderPredictionReferenceChart(){
   document.querySelectorAll('[data-ref-range]').forEach(button=>{const pressed=String(Number(button.dataset.refRange)===rangeMs);if(button.getAttribute('aria-pressed')!==pressed)button.setAttribute('aria-pressed',pressed);});
   if(windowEnd<start){target.innerHTML='<div class="pred-reference-chart-empty" role="status" aria-live="polite">This window has not opened yet. Live venue prices are shown above.</div>';setPredictionReferenceChartStatsMessage('Window has not opened yet.');return;}
   const sourceSeries=S.predictionReferenceSamples[asset]||{},openRef=S.predictionReferenceTimeline?.open_reference,closeRef=S.predictionReferenceTimeline?.close_reference;
-  const visible=S.predictionReferenceSeriesVisibility,buffers=predictionReferenceChartBuffers(asset),rawBySource={};
+  const visible=S.predictionReferenceSeriesVisibility,buffers=predictionReferenceChartBuffers(asset),rawBySource={},seriesBySource={},versionsBySource={};
   // Feed producers keep each series time-ordered; use binary range bounds so
   // zoomed views do not scan and re-sort every retained tick on every redraw.
-  // Reuse viewport buffers because the chart repaints frequently as quotes arrive.
+  // Rebuild only the affected viewport when a source changes or its view moves.
   for(const source of PREDICTION_REFERENCE_SOURCES){
-    const key=source.key,points=sourceSeries[key]||[];
-    rawBySource[key]=visible[key]!==false?predictionReferenceTimeRange(points,viewportStart,viewEnd,buffers.raw[key]):_predictionReferenceEmptyPoints;
+    const key=source.key,points=sourceSeries[key]||_predictionReferenceEmptyPoints,version=predictionReferenceSeriesVersion(asset,key);
+    seriesBySource[key]=points;versionsBySource[key]=version;
+    rawBySource[key]=visible[key]!==false?predictionReferenceViewport(points,viewportStart,viewEnd,buffers.raw[key],buffers.rawMeta[key],version):_predictionReferenceEmptyPoints;
   }
   const explicitOpen=Number(openRef?.price),hasExplicitOpen=Number.isFinite(explicitOpen)&&explicitOpen>0;
   let firstSpot=null;
@@ -3018,8 +3055,12 @@ function renderPredictionReferenceChart(){
   }
   const anchorPrice=hasExplicitOpen?explicitOpen:(firstSpot?.value||null);
   const anchorSource=hasExplicitOpen?(openRef?.source||'window opening reference'):(firstSpot?'first available in-window feed':'opening reference unavailable');
-  const visibleShares={};
-  for(const side of ['up','down'])visibleShares[side]=visible[`poly_${side}`]!==false?predictionReferenceTimeRange(sourceSeries[`poly_${side}`]||[],viewportStart,viewEnd,buffers.shares[side]):_predictionReferenceEmptyPoints;
+  const visibleShares={},shareSeries={},shareVersions={};
+  for(const side of ['up','down']){
+    const key=`poly_${side}`,points=sourceSeries[key]||_predictionReferenceEmptyPoints,version=predictionReferenceSeriesVersion(asset,key);
+    shareSeries[side]=points;shareVersions[side]=version;
+    visibleShares[side]=visible[key]!==false?predictionReferenceViewport(points,viewportStart,viewEnd,buffers.shares[side],buffers.shareMeta[side],version):_predictionReferenceEmptyPoints;
+  }
   const compactViewport=target.clientWidth<760,chartWidth=Math.max(320,Math.round(target.clientWidth||1280)),plotWidth=chartWidth-(compactViewport?62:104)-(compactViewport?10:64);
   const visibleLineCount=Math.max(1,
     PREDICTION_REFERENCE_SOURCES.filter(source=>visible[source.key]!==false&&rawBySource[source.key].length>0).length+
@@ -3030,7 +3071,8 @@ function renderPredictionReferenceChart(){
   const samplesBySource={},plotSamplesBySource={},sourceMoveStats={};
   let hasMoves=false,low=0,high=0;
   for(const source of PREDICTION_REFERENCE_SOURCES){
-    const key=source.key,rawPoints=rawBySource[key],points=predictionReferenceDecimate(rawPoints,pointLimit,buffers.decimated[key]);
+    const key=source.key,rawPoints=rawBySource[key],range=buffers.rawMeta[key],from=visible[key]!==false?range.from:0,to=visible[key]!==false?range.to:0;
+    const points=predictionReferenceCachedDecimate(seriesBySource[key],rawPoints,pointLimit,buffers.decimated[key],buffers.decimationMeta[key],versionsBySource[key],from,to);
     let sourceLow=Infinity,sourceHigh=-Infinity,count=0;
     for(const point of points){
       const move=anchorPrice?(point.value/anchorPrice-1)*100:null;
@@ -3048,7 +3090,10 @@ function renderPredictionReferenceChart(){
     else{low=Math.min(low,closeMove);high=Math.max(high,closeMove);}
   }
   const plotShares={};
-  for(const side of ['up','down'])plotShares[side]=predictionReferenceDecimate(visibleShares[side],pointLimit,buffers.decimated[`poly_${side}`]);
+  for(const side of ['up','down']){
+    const key=`poly_${side}`,range=buffers.shareMeta[side],from=visible[key]!==false?range.from:0,to=visible[key]!==false?range.to:0;
+    plotShares[side]=predictionReferenceCachedDecimate(shareSeries[side],visibleShares[side],pointLimit,buffers.decimated[key],buffers.decimationMeta[key],shareVersions[side],from,to);
+  }
   const openingShares=Object.fromEntries(['up','down'].map(side=>[side,predictionReferenceFirstInRange(sourceSeries[`poly_${side}`]||[],start,windowEnd)]));
   const shareMode=S.predictionReferenceShareMode||'delta';
   const shareYValue=(value,side)=>shareMode==='delta'&&openingShares[side]?(Number(value)-Number(openingShares[side].value))*100:Number(value)*100;
