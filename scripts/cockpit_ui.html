@@ -3028,16 +3028,28 @@ function predictionReferenceCachedGapLimit(points,cache,version,from,to,limit){
   cache.points=points;cache.version=version;cache.from=from;cache.to=to;cache.limit=limit;cache.gapLimit=gapLimit;
   return gapLimit;
 }
+// Keep path geometry in window-relative seconds and native prices. The SVG
+// transform handles the moving viewport and scale so unchanged feeds reuse d.
+function predictionReferenceCachedPath(points,cache,version,from,to,limit,windowStart,gapLimit){
+  if(cache.points===points&&cache.version===version&&cache.from===from&&cache.to===to&&cache.limit===limit&&cache.windowStart===windowStart&&cache.gapLimit===gapLimit)return cache.path;
+  let path='',previous=null;
+  for(const point of points){
+    const move=!previous||point.t-previous.t>gapLimit;
+    path+=`${move?'M':' L'}${((point.t-windowStart)/1000).toFixed(3)} ${Number(point.value)}`;previous=point;
+  }
+  cache.points=points;cache.version=version;cache.from=from;cache.to=to;cache.limit=limit;cache.windowStart=windowStart;cache.gapLimit=gapLimit;cache.path=path;
+  return path;
+}
 function predictionReferenceFirstInRange(points,start,end){
   const [from,to]=predictionReferenceRangeBounds(points,start,end);return from<to?points[from]:null;
 }
 const _predictionReferenceBuffersByAsset=Object.create(null),_predictionReferenceEmptyPoints=[];
 function predictionReferenceChartBuffers(asset){
   let buffers=_predictionReferenceBuffersByAsset[asset];if(buffers)return buffers;
-  const raw=Object.create(null),decimated=Object.create(null),rawMeta=Object.create(null),shareMeta=Object.create(null),decimationMeta=Object.create(null),moveStats=Object.create(null),shareStats=Object.create(null),gapLimits=Object.create(null),shares={up:[],down:[]};
-  for(const source of PREDICTION_REFERENCE_SOURCES){raw[source.key]=[];decimated[source.key]=[];rawMeta[source.key]={};decimationMeta[source.key]={};moveStats[source.key]={};gapLimits[source.key]={};}
-  for(const side of ['up','down']){decimated[`poly_${side}`]=[];shareMeta[side]={};decimationMeta[`poly_${side}`]={};shareStats[side]={};gapLimits[`poly_${side}`]={};}
-  buffers={raw,decimated,rawMeta,shareMeta,decimationMeta,moveStats,shareStats,gapLimits,shares};_predictionReferenceBuffersByAsset[asset]=buffers;return buffers;
+  const raw=Object.create(null),decimated=Object.create(null),rawMeta=Object.create(null),shareMeta=Object.create(null),decimationMeta=Object.create(null),moveStats=Object.create(null),shareStats=Object.create(null),gapLimits=Object.create(null),pathData=Object.create(null),shares={up:[],down:[]};
+  for(const source of PREDICTION_REFERENCE_SOURCES){raw[source.key]=[];decimated[source.key]=[];rawMeta[source.key]={};decimationMeta[source.key]={};moveStats[source.key]={};gapLimits[source.key]={};pathData[source.key]={};}
+  for(const side of ['up','down']){decimated[`poly_${side}`]=[];shareMeta[side]={};decimationMeta[`poly_${side}`]={};shareStats[side]={};gapLimits[`poly_${side}`]={};pathData[`poly_${side}`]={};}
+  buffers={raw,decimated,rawMeta,shareMeta,decimationMeta,moveStats,shareStats,gapLimits,pathData,shares};_predictionReferenceBuffersByAsset[asset]=buffers;return buffers;
 }
 let _predictionReferenceForecastHtml=null,_predictionReferenceStatsContext='',_predictionReferenceStatsPaintAt=0;
 function setPredictionReferenceChartStatsMessage(message){
@@ -3075,16 +3087,18 @@ function predictionReferenceSetSvgMarkup(node,value){
 }
 function renderPredictionReferenceSvg(target,chart){
   const {W,H,compact,aria,priceTop,shareTop,shareBottom,priceGrid,shareGrid,timeTicks,stageMarkup,L,plotRight,zeroY,priceLabel,shareLabel,shareUnitLabel,visible,
-    closeLine,spotLines,shareOpenLines,shareLines}=chart;
+    spotTransform,closeLine,spotLines,shareOpenLines,shareLines}=chart;
   const layoutKey=`${W}x${H}:${compact?'compact':'wide'}`;
   let svg=target.querySelector('svg');
   if(!svg||target.dataset.predictionReferenceSvgLayout!==layoutKey){
-    const spotMarkup=PREDICTION_REFERENCE_SOURCES.map(source=>`<path class="pred-reference-line ${source.key}" data-ref-spot-path="${source.key}" visibility="hidden"/><circle class="pred-reference-dot ${source.key}" data-ref-spot-dot="${source.key}" visibility="hidden"/>`).join('');
-    const shareMarkup=['up','down'].map(side=>`<path class="pred-reference-share-line ${side}" data-ref-share-path="${side}" visibility="hidden"/><circle class="pred-reference-share-dot ${side}" data-ref-share-dot="${side}" visibility="hidden"/>`).join('');
+    const spotMarkup=PREDICTION_REFERENCE_SOURCES.map(source=>`<path class="pred-reference-line ${source.key}" data-ref-spot-path="${source.key}" vector-effect="non-scaling-stroke" visibility="hidden"/>`).join('');
+    const spotDotsMarkup=PREDICTION_REFERENCE_SOURCES.map(source=>`<circle class="pred-reference-dot ${source.key}" data-ref-spot-dot="${source.key}" visibility="hidden"/>`).join('');
+    const shareMarkup=['up','down'].map(side=>`<g data-ref-share-series="${side}"><path class="pred-reference-share-line ${side}" data-ref-share-path="${side}" vector-effect="non-scaling-stroke" visibility="hidden"/></g>`).join('');
+    const shareDotsMarkup=['up','down'].map(side=>`<circle class="pred-reference-share-dot ${side}" data-ref-share-dot="${side}" visibility="hidden"/>`).join('');
     const openMarkup=['up','down'].map(side=>`<line class="pred-reference-share-open ${side}" data-ref-share-open="${side}" visibility="hidden"><title></title></line>`).join('');
     const cursorMarkup=PREDICTION_REFERENCE_SOURCES.map(source=>`<circle id="predictionReferenceCursor${source.key[0].toUpperCase()+source.key.slice(1)}" class="pred-reference-cursor ${source.key}" data-ref-cursor="${source.key}" r="5" visibility="hidden"/>`).join('')+
       ['up','down'].map(side=>`<circle id="predictionReferenceCursor${side[0].toUpperCase()+side.slice(1)}" class="pred-reference-cursor share ${side}" data-ref-cursor="poly_${side}" r="5" visibility="hidden"/>`).join('');
-    target.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label=""><title data-ref-chart-title></title><g class="pred-reference-grid"><g data-ref-price-grid></g><g data-ref-share-grid></g><g data-ref-time-grid></g></g><g data-ref-stages></g><line class="pred-reference-zero-line" data-ref-zero/><text class="pred-reference-panel-title" data-ref-price-title></text><text class="pred-reference-panel-title" data-ref-share-title></text><text class="pred-reference-panel-unit" data-ref-share-unit text-anchor="end"></text><line class="pred-reference-close-line" data-ref-close visibility="hidden"><title></title></line><g data-ref-spot-lines>${spotMarkup}</g><g data-ref-share-open-lines>${openMarkup}</g><g data-ref-share-lines>${shareMarkup}</g><g id="predictionReferenceCursor" visibility="hidden"><line id="predictionReferenceCursorLine" class="pred-reference-cursor-line"/><g data-ref-cursor-dots>${cursorMarkup}</g></g></svg>`;
+    target.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label=""><title data-ref-chart-title></title><g class="pred-reference-grid"><g data-ref-price-grid></g><g data-ref-share-grid></g><g data-ref-time-grid></g></g><g data-ref-stages></g><line class="pred-reference-zero-line" data-ref-zero/><text class="pred-reference-panel-title" data-ref-price-title></text><text class="pred-reference-panel-title" data-ref-share-title></text><text class="pred-reference-panel-unit" data-ref-share-unit text-anchor="end"></text><line class="pred-reference-close-line" data-ref-close visibility="hidden"><title></title></line><g data-ref-spot-lines>${spotMarkup}</g><g data-ref-spot-dots>${spotDotsMarkup}</g><g data-ref-share-open-lines>${openMarkup}</g><g data-ref-share-lines>${shareMarkup}</g><g data-ref-share-dots>${shareDotsMarkup}</g><g id="predictionReferenceCursor" visibility="hidden"><line id="predictionReferenceCursorLine" class="pred-reference-cursor-line"/><g data-ref-cursor-dots>${cursorMarkup}</g></g></svg>`;
     target.dataset.predictionReferenceSvgLayout=layoutKey;svg=target.querySelector('svg');
   }
   let nodes=svg._predictionReferenceNodes;
@@ -3095,12 +3109,12 @@ function renderPredictionReferenceSvg(target,chart){
       cursor[source.key]=svg.querySelector(`[data-ref-cursor="${source.key}"]`);
     }
     for(const side of ['up','down']){
-      shares[side]={path:svg.querySelector(`[data-ref-share-path="${side}"]`),dot:svg.querySelector(`[data-ref-share-dot="${side}"]`)};
+      shares[side]={group:svg.querySelector(`[data-ref-share-series="${side}"]`),path:svg.querySelector(`[data-ref-share-path="${side}"]`),dot:svg.querySelector(`[data-ref-share-dot="${side}"]`)};
       shareOpen[side]=svg.querySelector(`[data-ref-share-open="${side}"]`);cursor[`poly_${side}`]=svg.querySelector(`[data-ref-cursor="poly_${side}"]`);
     }
     nodes=svg._predictionReferenceNodes={title:svg.querySelector('[data-ref-chart-title]'),priceGrid:svg.querySelector('[data-ref-price-grid]'),shareGrid:svg.querySelector('[data-ref-share-grid]'),timeGrid:svg.querySelector('[data-ref-time-grid]'),stages:svg.querySelector('[data-ref-stages]'),zero:svg.querySelector('[data-ref-zero]'),
       priceTitle:svg.querySelector('[data-ref-price-title]'),shareTitle:svg.querySelector('[data-ref-share-title]'),shareUnit:svg.querySelector('[data-ref-share-unit]'),close:svg.querySelector('[data-ref-close]'),
-      spot,shares,shareOpen,cursor,cursorGroup:svg.querySelector('#predictionReferenceCursor'),cursorLine:svg.querySelector('#predictionReferenceCursorLine')};
+      spotGroup:svg.querySelector('[data-ref-spot-lines]'),spot,shares,shareOpen,cursor,cursorGroup:svg.querySelector('#predictionReferenceCursor'),cursorLine:svg.querySelector('#predictionReferenceCursorLine')};
   }
   predictionReferenceSetSvgAttribute(svg,'aria-label',aria);
   predictionReferenceSetSvgText(nodes.title,aria);
@@ -3108,6 +3122,7 @@ function renderPredictionReferenceSvg(target,chart){
   predictionReferenceSetSvgMarkup(nodes.shareGrid,shareGrid);
   predictionReferenceSetSvgMarkup(nodes.timeGrid,timeTicks);
   predictionReferenceSetSvgMarkup(nodes.stages,stageMarkup);
+  predictionReferenceSetSvgAttribute(nodes.spotGroup,'transform',spotTransform);
   predictionReferenceSetSvgAttribute(nodes.zero,'x1',L);
   predictionReferenceSetSvgAttribute(nodes.zero,'y1',zeroY.toFixed(1));
   predictionReferenceSetSvgAttribute(nodes.zero,'x2',plotRight);
@@ -3128,7 +3143,8 @@ function renderPredictionReferenceSvg(target,chart){
     if(line.visible){predictionReferenceSetSvgAttribute(node,'x1',line.x1);predictionReferenceSetSvgAttribute(node,'y1',line.y1);predictionReferenceSetSvgAttribute(node,'x2',line.x2);predictionReferenceSetSvgAttribute(node,'y2',line.y2);predictionReferenceSetSvgText(node.querySelector('title'),line.title);}
   }
   for(const line of shareLines){
-    const {path,dot}=nodes.shares[line.side],visibility=line.path?'visible':'hidden';
+    const {group,path,dot}=nodes.shares[line.side],visibility=line.path?'visible':'hidden';
+    predictionReferenceSetSvgAttribute(group,'transform',line.transform);
     predictionReferenceSetSvgAttribute(path,'d',line.path);predictionReferenceSetSvgAttribute(path,'visibility',visibility);
     predictionReferenceSetSvgAttribute(dot,'visibility',line.dot?'visible':'hidden');
     if(line.dot){predictionReferenceSetSvgAttribute(dot,'cx',line.dot.cx);predictionReferenceSetSvgAttribute(dot,'cy',line.dot.cy);predictionReferenceSetSvgAttribute(dot,'r',line.dot.r);}
@@ -3234,6 +3250,9 @@ function renderPredictionReferenceChart(){
   const x=t=>L+Math.max(0,Math.min(1,(t-viewportStart)/duration))*PW;
   const yMove=value=>priceTop+(high-value)/(high-low)*(priceBottom-priceTop);
   const yShare=(value,side)=>shareTop+(shareHigh-shareYValue(value,side))/(shareHigh-shareLow)*(shareBottom-shareTop);
+  const xScale=1000*PW/duration,xTranslate=L-((viewportStart-start)/1000)*xScale;
+  const svgMatrix=(scaleX,scaleY,translateX,translateY)=>`matrix(${scaleX.toPrecision(12)} 0 0 ${scaleY.toPrecision(12)} ${translateX.toPrecision(12)} ${translateY.toPrecision(12)})`;
+  const spotTransform=anchorPrice?svgMatrix(xScale,-100*(priceBottom-priceTop)/(anchorPrice*(high-low)),xTranslate,priceTop+(high+100)*(priceBottom-priceTop)/(high-low)):'matrix(1 0 0 1 0 0)';
   const clock=predictionReferenceClock;
   const priceGrid=Array.from({length:6},(_,index)=>{
     const fraction=index/5,yy=priceTop+fraction*(priceBottom-priceTop),value=high-fraction*(high-low);
@@ -3254,24 +3273,21 @@ function renderPredictionReferenceChart(){
     const ts=start+fraction*(close-start);if(ts<viewportStart||ts>viewEnd)return'';
     const xx=x(ts);return`<line class="pred-reference-stage" x1="${xx.toFixed(1)}" y1="${priceTop}" x2="${xx.toFixed(1)}" y2="${shareBottom}"/><text class="pred-reference-stage-label" x="${xx.toFixed(1)}" y="${priceTop-12}" text-anchor="${fraction===0?'start':fraction===1?'end':'middle'}">${label}</text>`;
   }).join('');
-  const linePath=(points,valueFn,gapLimit)=>{
-    let path='',previous=null;
-    for(const point of points){const move=!previous||point.t-previous.t>gapLimit;path+=`${move?'M':' L'}${x(point.t).toFixed(1)} ${valueFn(point).toFixed(1)}`;previous=point;}
-    return path;
-  };
   const liveQuote=predictionReferenceLivePrices()[asset]||{};
   const spotLines=PREDICTION_REFERENCE_SOURCES.map(source=>{
     if(visible[source.key]===false||!sourceMoveStats[source.key].count)return{key:source.key,path:'',fresh:false,dot:null};
     const key=source.key,points=plotSamplesBySource[key],range=buffers.rawMeta[key],from=visible[key]!==false?range.from:0,to=visible[key]!==false?range.to:0;
     const gapLimit=predictionReferenceCachedGapLimit(points,buffers.gapLimits[key],versionsBySource[key],from,to,pointLimit);
-    const path=linePath(points,point=>yMove((point.value/anchorPrice-1)*100),gapLimit),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
+    const path=predictionReferenceCachedPath(points,buffers.pathData[key],versionsBySource[key],from,to,pointLimit,start,gapLimit),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
     return{key:source.key,path,fresh,dot:last?{cx:x(last.t).toFixed(1),cy:yMove((last.value/anchorPrice-1)*100).toFixed(1),r:compact?4:5}:null};
   });
   const shareLines=['up','down'].map(side=>{
     const key=`poly_${side}`,points=plotShares[side],range=buffers.shareMeta[side],from=visible[key]!==false?range.from:0,to=visible[key]!==false?range.to:0;
     const gapLimit=predictionReferenceCachedGapLimit(points,buffers.gapLimits[key],shareVersions[side],from,to,pointLimit);
-    const path=linePath(points,point=>yShare(point.value,side),gapLimit),last=points.at(-1);
-    return{side,path,dot:path&&last?{cx:x(last.t).toFixed(1),cy:yShare(last.value,side).toFixed(1),r:compact?4:5}:null};
+    const path=predictionReferenceCachedPath(points,buffers.pathData[key],shareVersions[side],from,to,pointLimit,start,gapLimit),last=points.at(-1);
+    const opened=shareMode==='delta'&&openingShares[side]?Number(openingShares[side].value):null,shareScaleY=-100*(shareBottom-shareTop)/(shareHigh-shareLow);
+    const shareTranslateY=shareTop+(shareHigh+(opened==null?0:opened*100))*(shareBottom-shareTop)/(shareHigh-shareLow);
+    return{side,path,transform:svgMatrix(xScale,shareScaleY,xTranslate,shareTranslateY),dot:path&&last?{cx:x(last.t).toFixed(1),cy:yShare(last.value,side).toFixed(1),r:compact?4:5}:null};
   });
   const shareOpenLines=['up','down'].map(side=>{
     const point=openingShares[side];if(!point||visible[`poly_${side}`]===false)return{side,visible:false};
@@ -3284,7 +3300,7 @@ function renderPredictionReferenceChart(){
   }:null;
   const priceLabel=`${asset} MOVE FROM OPEN · ${anchorPrice?predictionReferencePrice(anchorPrice,asset):'OPEN REFERENCE UNAVAILABLE'}`;
   const aria=`${asset} ${window.horizon/60}-minute ${window.period==='NEXT'?'upcoming':'current'} window. Spot venues are percent from ${anchorSource}; Polymarket UP and DOWN use ${shareMode==='delta'?'change in cents from their first in-window midpoint':'midpoint prices in cents'}. ${PREDICTION_REFERENCE_SERIES.filter(series=>visible[series.key]!==false).map(series=>`${series.label} ${series.key.startsWith('poly_')?visibleShares[series.key.slice(5)].length:samplesBySource[series.key]?.length||0} price points`).join(', ')}.`;
-  renderPredictionReferenceSvg(target,{W,H,compact,aria,priceTop,priceBottom,shareTop,shareBottom,priceGrid,shareGrid,timeTicks,stageMarkup:stageLines,
+  renderPredictionReferenceSvg(target,{W,H,compact,aria,priceTop,shareTop,shareBottom,priceGrid,shareGrid,timeTicks,stageMarkup:stageLines,spotTransform,
     L,plotRight,zeroY:yMove(0),priceLabel,shareLabel:`POLYMARKET UP / DOWN · ${shareMode==='delta'?'CHANGE FROM FIRST IN-WINDOW MIDPOINT':'SHARE MIDPOINT PRICE'}`,
     shareUnitLabel:shareMode==='delta'?'Δ CENTS FROM OPEN':'PRICE IN CENTS · 0–100¢',visible,closeLine,spotLines,shareOpenLines,shareLines});
   const stats=$('predictionReferenceChartStats');
