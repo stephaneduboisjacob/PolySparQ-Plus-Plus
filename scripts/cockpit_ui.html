@@ -2293,6 +2293,16 @@ const PREDICTION_REFERENCE_SOURCE_STALE_MS=10000,PREDICTION_REFERENCE_POLY_STALE
 const PREDICTION_REFERENCE_PAINT_INTERVAL_MS=50;
 const PREDICTION_REFERENCE_DIRECT_STATUS_PAINT_INTERVAL_MS=250;
 const PREDICTION_REFERENCE_INTERACTION_PAINT_INTERVAL_MS=33;
+const _predictionReferenceClockLabels=new Map(),_predictionReferenceClockFormatter=new Intl.DateTimeFormat(undefined,{timeZone:'UTC',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+function predictionReferenceClock(timestamp){
+  const second=Math.floor(Number(timestamp)/1000);
+  let label=_predictionReferenceClockLabels.get(second);
+  if(label===undefined){
+    label=_predictionReferenceClockFormatter.format(new Date(second*1000));_predictionReferenceClockLabels.set(second,label);
+    if(_predictionReferenceClockLabels.size>128)_predictionReferenceClockLabels.delete(_predictionReferenceClockLabels.keys().next().value);
+  }
+  return label;
+}
 let _predictionReferenceInteractionTimer=0,_predictionReferenceInteractionFrame=0,_predictionReferenceInteractionPending=false,_predictionReferenceInteractionPaintAt=0;
 function cancelPredictionReferenceInteractionPaint(){
   if(_predictionReferenceInteractionTimer)clearTimeout(_predictionReferenceInteractionTimer);
@@ -3041,6 +3051,82 @@ function renderPredictionReferenceForecast(){
   const html=`<div class="pred-reference-forecast-call ${side}"><small>POLYSPARQ PREDICTOR · ${Number(card.horizon_seconds)/60} MIN · ${period}</small><strong>MODEL TENDENCY <b>${esc(direction)}</b></strong></div><div class="pred-reference-forecast-probability"><small>INDEPENDENT FORECAST</small><strong>${label}</strong><span>${esc(card.independent_model_version||card.model_version||card.prediction_basis||'MODEL VERSION UNAVAILABLE')}</span></div><div class="pred-reference-forecast-open"><small>WINDOW OPEN REFERENCE</small><strong>${predictionReferencePrice(S.predictionReferenceTimeline?.open_reference?.price,card.asset)}</strong><span title="${esc(openSource)}">${esc(predictionReferenceSourceLabel(openSource))}</span></div>`;
   if(html!==_predictionReferenceForecastHtml){target.innerHTML=html;_predictionReferenceForecastHtml=html;}
 }
+function predictionReferenceSetSvgAttribute(node,name,value){
+  if(!node)return;const next=String(value);if(node.getAttribute(name)!==next)node.setAttribute(name,next);
+}
+function predictionReferenceSetSvgText(node,value){
+  if(!node)return;const next=String(value);if(node.textContent!==next)node.textContent=next;
+}
+function predictionReferenceSetSvgMarkup(node,value){
+  if(!node||node._predictionReferenceMarkup===value)return;
+  node.innerHTML=value;node._predictionReferenceMarkup=value;
+}
+function renderPredictionReferenceSvg(target,chart){
+  const {W,H,compact,aria,priceTop,shareTop,shareBottom,priceGrid,shareGrid,timeTicks,stageMarkup,L,plotRight,zeroY,priceLabel,shareLabel,shareUnitLabel,visible,
+    closeLine,spotLines,shareOpenLines,shareLines}=chart;
+  const layoutKey=`${W}x${H}:${compact?'compact':'wide'}`;
+  let svg=target.querySelector('svg');
+  if(!svg||target.dataset.predictionReferenceSvgLayout!==layoutKey){
+    const spotMarkup=PREDICTION_REFERENCE_SOURCES.map(source=>`<path class="pred-reference-line ${source.key}" data-ref-spot-path="${source.key}" visibility="hidden"/><circle class="pred-reference-dot ${source.key}" data-ref-spot-dot="${source.key}" visibility="hidden"/>`).join('');
+    const shareMarkup=['up','down'].map(side=>`<path class="pred-reference-share-line ${side}" data-ref-share-path="${side}" visibility="hidden"/><circle class="pred-reference-share-dot ${side}" data-ref-share-dot="${side}" visibility="hidden"/>`).join('');
+    const openMarkup=['up','down'].map(side=>`<line class="pred-reference-share-open ${side}" data-ref-share-open="${side}" visibility="hidden"><title></title></line>`).join('');
+    const cursorMarkup=PREDICTION_REFERENCE_SOURCES.map(source=>`<circle id="predictionReferenceCursor${source.key[0].toUpperCase()+source.key.slice(1)}" class="pred-reference-cursor ${source.key}" data-ref-cursor="${source.key}" r="5" visibility="hidden"/>`).join('')+
+      ['up','down'].map(side=>`<circle id="predictionReferenceCursor${side[0].toUpperCase()+side.slice(1)}" class="pred-reference-cursor share ${side}" data-ref-cursor="poly_${side}" r="5" visibility="hidden"/>`).join('');
+    target.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label=""><title data-ref-chart-title></title><g class="pred-reference-grid"><g data-ref-price-grid></g><g data-ref-share-grid></g><g data-ref-time-grid></g></g><g data-ref-stages></g><line class="pred-reference-zero-line" data-ref-zero/><text class="pred-reference-panel-title" data-ref-price-title></text><text class="pred-reference-panel-title" data-ref-share-title></text><text class="pred-reference-panel-unit" data-ref-share-unit text-anchor="end"></text><line class="pred-reference-close-line" data-ref-close visibility="hidden"><title></title></line><g data-ref-spot-lines>${spotMarkup}</g><g data-ref-share-open-lines>${openMarkup}</g><g data-ref-share-lines>${shareMarkup}</g><g id="predictionReferenceCursor" visibility="hidden"><line id="predictionReferenceCursorLine" class="pred-reference-cursor-line"/><g data-ref-cursor-dots>${cursorMarkup}</g></g></svg>`;
+    target.dataset.predictionReferenceSvgLayout=layoutKey;svg=target.querySelector('svg');
+  }
+  let nodes=svg._predictionReferenceNodes;
+  if(!nodes){
+    const spot=Object.create(null),shares=Object.create(null),shareOpen=Object.create(null),cursor=Object.create(null);
+    for(const source of PREDICTION_REFERENCE_SOURCES){
+      spot[source.key]={path:svg.querySelector(`[data-ref-spot-path="${source.key}"]`),dot:svg.querySelector(`[data-ref-spot-dot="${source.key}"]`)};
+      cursor[source.key]=svg.querySelector(`[data-ref-cursor="${source.key}"]`);
+    }
+    for(const side of ['up','down']){
+      shares[side]={path:svg.querySelector(`[data-ref-share-path="${side}"]`),dot:svg.querySelector(`[data-ref-share-dot="${side}"]`)};
+      shareOpen[side]=svg.querySelector(`[data-ref-share-open="${side}"]`);cursor[`poly_${side}`]=svg.querySelector(`[data-ref-cursor="poly_${side}"]`);
+    }
+    nodes=svg._predictionReferenceNodes={title:svg.querySelector('[data-ref-chart-title]'),priceGrid:svg.querySelector('[data-ref-price-grid]'),shareGrid:svg.querySelector('[data-ref-share-grid]'),timeGrid:svg.querySelector('[data-ref-time-grid]'),stages:svg.querySelector('[data-ref-stages]'),zero:svg.querySelector('[data-ref-zero]'),
+      priceTitle:svg.querySelector('[data-ref-price-title]'),shareTitle:svg.querySelector('[data-ref-share-title]'),shareUnit:svg.querySelector('[data-ref-share-unit]'),close:svg.querySelector('[data-ref-close]'),
+      spot,shares,shareOpen,cursor,cursorGroup:svg.querySelector('#predictionReferenceCursor'),cursorLine:svg.querySelector('#predictionReferenceCursorLine')};
+  }
+  predictionReferenceSetSvgAttribute(svg,'aria-label',aria);
+  predictionReferenceSetSvgText(nodes.title,aria);
+  predictionReferenceSetSvgMarkup(nodes.priceGrid,priceGrid);
+  predictionReferenceSetSvgMarkup(nodes.shareGrid,shareGrid);
+  predictionReferenceSetSvgMarkup(nodes.timeGrid,timeTicks);
+  predictionReferenceSetSvgMarkup(nodes.stages,stageMarkup);
+  predictionReferenceSetSvgAttribute(nodes.zero,'x1',L);
+  predictionReferenceSetSvgAttribute(nodes.zero,'y1',zeroY.toFixed(1));
+  predictionReferenceSetSvgAttribute(nodes.zero,'x2',plotRight);
+  predictionReferenceSetSvgAttribute(nodes.zero,'y2',zeroY.toFixed(1));
+  predictionReferenceSetSvgAttribute(nodes.priceTitle,'x',L);predictionReferenceSetSvgAttribute(nodes.priceTitle,'y',priceTop-25);predictionReferenceSetSvgText(nodes.priceTitle,priceLabel);
+  predictionReferenceSetSvgAttribute(nodes.shareTitle,'x',L);predictionReferenceSetSvgAttribute(nodes.shareTitle,'y',shareTop-23);predictionReferenceSetSvgText(nodes.shareTitle,shareLabel);
+  predictionReferenceSetSvgAttribute(nodes.shareUnit,'x',plotRight);predictionReferenceSetSvgAttribute(nodes.shareUnit,'y',shareTop-23);predictionReferenceSetSvgText(nodes.shareUnit,shareUnitLabel);
+  predictionReferenceSetSvgAttribute(nodes.close,'visibility',closeLine?'visible':'hidden');
+  if(closeLine){for(const [name,value] of Object.entries(closeLine))if(name!=='title')predictionReferenceSetSvgAttribute(nodes.close,name,value);predictionReferenceSetSvgText(nodes.close.querySelector('title'),closeLine.title);}
+  for(const line of spotLines){
+    const {path,dot}=nodes.spot[line.key],visibility=line.path?'visible':'hidden';
+    predictionReferenceSetSvgAttribute(path,'d',line.path);predictionReferenceSetSvgAttribute(path,'data-fresh',line.fresh);predictionReferenceSetSvgAttribute(path,'visibility',visibility);
+    predictionReferenceSetSvgAttribute(dot,'visibility',line.dot?'visible':'hidden');
+    if(line.dot){predictionReferenceSetSvgAttribute(dot,'cx',line.dot.cx);predictionReferenceSetSvgAttribute(dot,'cy',line.dot.cy);predictionReferenceSetSvgAttribute(dot,'r',line.dot.r);}
+  }
+  for(const line of shareOpenLines){
+    const node=nodes.shareOpen[line.side];predictionReferenceSetSvgAttribute(node,'visibility',line.visible?'visible':'hidden');
+    if(line.visible){predictionReferenceSetSvgAttribute(node,'x1',line.x1);predictionReferenceSetSvgAttribute(node,'y1',line.y1);predictionReferenceSetSvgAttribute(node,'x2',line.x2);predictionReferenceSetSvgAttribute(node,'y2',line.y2);predictionReferenceSetSvgText(node.querySelector('title'),line.title);}
+  }
+  for(const line of shareLines){
+    const {path,dot}=nodes.shares[line.side],visibility=line.path?'visible':'hidden';
+    predictionReferenceSetSvgAttribute(path,'d',line.path);predictionReferenceSetSvgAttribute(path,'visibility',visibility);
+    predictionReferenceSetSvgAttribute(dot,'visibility',line.dot?'visible':'hidden');
+    if(line.dot){predictionReferenceSetSvgAttribute(dot,'cx',line.dot.cx);predictionReferenceSetSvgAttribute(dot,'cy',line.dot.cy);predictionReferenceSetSvgAttribute(dot,'r',line.dot.r);}
+  }
+  predictionReferenceSetSvgAttribute(nodes.cursorGroup,'visibility','hidden');
+  predictionReferenceSetSvgAttribute(nodes.cursorLine,'y1',priceTop);predictionReferenceSetSvgAttribute(nodes.cursorLine,'y2',shareBottom);
+  for(const source of PREDICTION_REFERENCE_SOURCES)if(visible[source.key]===false)predictionReferenceSetSvgAttribute(nodes.cursor[source.key],'visibility','hidden');
+  for(const side of ['up','down'])if(visible[`poly_${side}`]===false)predictionReferenceSetSvgAttribute(nodes.cursor[`poly_${side}`],'visibility','hidden');
+  return svg;
+}
 function renderPredictionReferenceChart(){
   cancelPredictionReferenceInteractionPaint();
   const target=$('predictionReferenceChart');if(!target)return;
@@ -3136,7 +3222,7 @@ function renderPredictionReferenceChart(){
   const x=t=>L+Math.max(0,Math.min(1,(t-viewportStart)/duration))*PW;
   const yMove=value=>priceTop+(high-value)/(high-low)*(priceBottom-priceTop);
   const yShare=(value,side)=>shareTop+(shareHigh-shareYValue(value,side))/(shareHigh-shareLow)*(shareBottom-shareTop);
-  const clock=t=>new Date(t).toLocaleTimeString([],{timeZone:'UTC',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+  const clock=predictionReferenceClock;
   const priceGrid=Array.from({length:6},(_,index)=>{
     const fraction=index/5,yy=priceTop+fraction*(priceBottom-priceTop),value=high-fraction*(high-low);
     return`<line class="pred-reference-grid-line" x1="${L}" y1="${yy.toFixed(1)}" x2="${plotRight}" y2="${yy.toFixed(1)}"/><text class="pred-reference-axis" x="${L-10}" y="${(yy+4).toFixed(1)}" text-anchor="end">${value>0?'+':''}${value.toFixed(2)}%</text>`;
@@ -3170,25 +3256,28 @@ function renderPredictionReferenceChart(){
   };
   const liveQuote=predictionReferenceLivePrices()[asset]||{};
   const spotLines=PREDICTION_REFERENCE_SOURCES.map(source=>{
-    if(visible[source.key]===false||!sourceMoveStats[source.key].count)return'';
+    if(visible[source.key]===false||!sourceMoveStats[source.key].count)return{key:source.key,path:'',fresh:false,dot:null};
     const points=plotSamplesBySource[source.key],path=linePath(points,point=>yMove((point.value/anchorPrice-1)*100)),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
-    return path?`<path class="pred-reference-line ${source.key}" d="${path}" data-fresh="${fresh}"/>${last?`<circle class="pred-reference-dot ${source.key}" cx="${x(last.t).toFixed(1)}" cy="${yMove((last.value/anchorPrice-1)*100).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
-  }).join('');
+    return{key:source.key,path,fresh,dot:last?{cx:x(last.t).toFixed(1),cy:yMove((last.value/anchorPrice-1)*100).toFixed(1),r:compact?4:5}:null};
+  });
   const shareLines=['up','down'].map(side=>{
     const points=plotShares[side],path=linePath(points,point=>yShare(point.value,side)),last=points.at(-1);
-    return path?`<path class="pred-reference-share-line ${side}" d="${path}"/>${last?`<circle class="pred-reference-share-dot ${side}" cx="${x(last.t).toFixed(1)}" cy="${yShare(last.value,side).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
-  }).join('');
+    return{side,path,dot:path&&last?{cx:x(last.t).toFixed(1),cy:yShare(last.value,side).toFixed(1),r:compact?4:5}:null};
+  });
   const shareOpenLines=['up','down'].map(side=>{
-    const point=openingShares[side];if(!point||visible[`poly_${side}`]===false)return'';
+    const point=openingShares[side];if(!point||visible[`poly_${side}`]===false)return{side,visible:false};
     const yy=shareMode==='delta'?shareTop+(shareHigh/(shareHigh-shareLow))*(shareBottom-shareTop):yShare(point.value,side);
-    return`<line class="pred-reference-share-open ${side}" x1="${L}" y1="${yy.toFixed(1)}" x2="${plotRight}" y2="${yy.toFixed(1)}"><title>${side.toUpperCase()} opening midpoint ${(point.value*100).toFixed(1)}¢</title></line>`;
-  }).join('');
-  const closeLine=visible.oracle!==false&&closeMove!=null&&Number.isFinite(closeMove)?`<line class="pred-reference-close-line" x1="${x(Math.max(viewportStart,Number(closeRef.ts_ms)||close)).toFixed(1)}" y1="${yMove(closeMove).toFixed(1)}" x2="${plotRight}" y2="${yMove(closeMove).toFixed(1)}"><title>Window close reference ${predictionReferencePrice(closeRef.price,asset)}</title></line>`:'';
+    return{side,visible:true,x1:L,y1:yy.toFixed(1),x2:plotRight,y2:yy.toFixed(1),title:`${side.toUpperCase()} opening midpoint ${(point.value*100).toFixed(1)}¢`};
+  });
+  const closeLine=visible.oracle!==false&&closeMove!=null&&Number.isFinite(closeMove)?{
+    x1:x(Math.max(viewportStart,Number(closeRef.ts_ms)||close)).toFixed(1),y1:yMove(closeMove).toFixed(1),x2:plotRight,y2:yMove(closeMove).toFixed(1),
+    title:`Window close reference ${predictionReferencePrice(closeRef.price,asset)}`
+  }:null;
   const priceLabel=`${asset} MOVE FROM OPEN · ${anchorPrice?predictionReferencePrice(anchorPrice,asset):'OPEN REFERENCE UNAVAILABLE'}`;
   const aria=`${asset} ${window.horizon/60}-minute ${window.period==='NEXT'?'upcoming':'current'} window. Spot venues are percent from ${anchorSource}; Polymarket UP and DOWN use ${shareMode==='delta'?'change in cents from their first in-window midpoint':'midpoint prices in cents'}. ${PREDICTION_REFERENCE_SERIES.filter(series=>visible[series.key]!==false).map(series=>`${series.label} ${series.key.startsWith('poly_')?visibleShares[series.key.slice(5)].length:samplesBySource[series.key]?.length||0} price points`).join(', ')}.`;
-  const cursorDots=PREDICTION_REFERENCE_SOURCES.filter(source=>visible[source.key]!==false).map(source=>`<circle id="predictionReferenceCursor${source.key[0].toUpperCase()+source.key.slice(1)}" class="pred-reference-cursor ${source.key}" r="5" visibility="hidden"/>`).join('');
-  const shareCursorDots=['up','down'].filter(side=>visible[`poly_${side}`]!==false).map(side=>`<circle id="predictionReferenceCursor${side[0].toUpperCase()+side.slice(1)}" class="pred-reference-cursor share ${side}" r="5" visibility="hidden"/>`).join('');
-  target.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(aria)}"><title>${esc(aria)}</title><g class="pred-reference-grid">${priceGrid}${shareGrid}${timeTicks}</g>${stageLines}<line class="pred-reference-zero-line" x1="${L}" y1="${yMove(0).toFixed(1)}" x2="${plotRight}" y2="${yMove(0).toFixed(1)}"/><text class="pred-reference-panel-title" x="${L}" y="${priceTop-25}">${esc(priceLabel)}</text><text class="pred-reference-panel-title" x="${L}" y="${shareTop-23}">POLYMARKET UP / DOWN · ${shareMode==='delta'?'CHANGE FROM FIRST IN-WINDOW MIDPOINT':'SHARE MIDPOINT PRICE'}</text><text class="pred-reference-panel-unit" x="${plotRight}" y="${shareTop-23}" text-anchor="end">${shareMode==='delta'?'Δ CENTS FROM OPEN':'PRICE IN CENTS · 0–100¢'}</text>${closeLine}${spotLines}${shareOpenLines}${shareLines}<g id="predictionReferenceCursor" visibility="hidden"><line id="predictionReferenceCursorLine" class="pred-reference-cursor-line" y1="${priceTop}" y2="${shareBottom}"/>${cursorDots}${shareCursorDots}</g></svg>`;
+  renderPredictionReferenceSvg(target,{W,H,compact,aria,priceTop,priceBottom,shareTop,shareBottom,priceGrid,shareGrid,timeTicks,stageMarkup:stageLines,
+    L,plotRight,zeroY:yMove(0),priceLabel,shareLabel:`POLYMARKET UP / DOWN · ${shareMode==='delta'?'CHANGE FROM FIRST IN-WINDOW MIDPOINT':'SHARE MIDPOINT PRICE'}`,
+    shareUnitLabel:shareMode==='delta'?'Δ CENTS FROM OPEN':'PRICE IN CENTS · 0–100¢',visible,closeLine,spotLines,shareOpenLines,shareLines});
   const stats=$('predictionReferenceChartStats');
   const visibilityKey=PREDICTION_REFERENCE_SERIES.map(series=>visible[series.key]!==false?'1':'0').join('');
   const viewportKey=S.predictionReferenceViewEndMs==null?'follow':String(S.predictionReferenceViewEndMs);
@@ -3218,7 +3307,7 @@ function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,
   if(!target.querySelector('svg')||target._predictionReferenceInspectorBound)return;
   target._predictionReferenceInspectorBound=true;
   const current=()=>target._predictionReferenceInspectorState;
-  const clockText=ts=>new Date(ts).toLocaleTimeString([],{timeZone:'UTC',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+' UTC';
+  const clockText=ts=>predictionReferenceClock(ts)+' UTC';
   const localPoint=event=>{
     const svg=target.querySelector('svg'),matrix=svg?.getScreenCTM();if(!matrix)return null;
     const screen=svg.createSVGPoint();screen.x=event.clientX;screen.y=event.clientY;return screen.matrixTransform(matrix.inverse());
