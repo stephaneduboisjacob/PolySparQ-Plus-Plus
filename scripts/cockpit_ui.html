@@ -1981,7 +1981,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
 <script>
 const S={paused:false,refreshing:false,activityRefreshing:false,curInstance:'',curTab:'overview',
   data:{},activity:{},prices:{},prevFillTs:0,token:null,configRaw:'',configEdits:{},curConfig:'',configFingerprint:'',configLoadedMtime:0,configMtimes:{},configRuntimeStatus:{state:'checking'},
-  strategyInvalidCount:0,
+  strategyInvalidCount:0,strategyEditRevision:0,
   instNames:{},chartObj:null,candleSeries:null,pnlChartObj:null,pnlSeries:{},
   execution:{},executionRefreshing:false,fetchMs:null,paintMs:null,lastLoopAt:0,lastSseAt:0,lastServerTs:0,sseReconnecting:false,
   predictionTrails:{},predictionPulseTrails:{},predictionReferenceSamples:{},predictionReferenceDirectPrices:{},predictionReferenceSockets:null,predictionReferencePolySocket:null,predictionReferenceRangeMs:0,predictionReferenceViewEndMs:null,predictionReferenceShareMode:'delta',predictionReferenceSeriesVisibility:{oracle:true,coinbase:true,binance:true,kraken:true,gemini:true,okx:true,poly_up:true,poly_down:true},predictionReferenceGesture:null,predictionReferencePaintTimer:null,predictionReferenceDirectStatusTimer:null,predictionReferenceResizeTimer:null,predictionReferenceDirectUiAt:0,predictionReferenceAsset:'BTC',predictionReferenceHorizon:300,predictionReferenceWindow:null,predictionReferenceTimeline:null,predictionReferenceFetchAt:0,predictionReferenceRequest:null,predictionReferenceApiUnavailable:false,predictionPulseHorizon:300,predictionPulseLookback:60,predictionPulseThreshold:2,predictionPulseSort:'asset',
@@ -9805,12 +9805,16 @@ function applyStrategyDrafts(edits){
 async function loadConfig(name,recheckRuntimeAfterSave=false,discardPending=false){
   const loadSeq=++_strategyConfigLoadSeq;
   const pending=!discardPending&&name===S.curConfig?{...(S.configEdits||{})}:{};
+  const editRevisionAtStart=Number(S.strategyEditRevision)||0;
   if(name!==S.configLoadedName)renderStrategyLoadState('loading','Loading selected profile',`Loading editable settings for ${name}. The previous profile is hidden until this profile finishes loading.`);
   const r=await apiFetch('/api/config?name='+encodeURIComponent(name),{timeoutMs:10000});
   if(loadSeq!==_strategyConfigLoadSeq||name!==S.curConfig)return;
+  const editsChangedDuringLoad=(Number(S.strategyEditRevision)||0)!==editRevisionAtStart;
+  const currentPending={...(S.configEdits||{})};
+  const pendingToRestore=discardPending&&!editsChangedDuringLoad?pending:currentPending;
   if(!r||r.error){
-    if(Object.keys(pending).length){
-      $('saveStatus').innerHTML='<span class="save-status err">Could not refresh profile; '+Object.keys(pending).length+' unsaved change'+(Object.keys(pending).length===1?'':'s')+' kept.</span>';
+    if(Object.keys(pendingToRestore).length){
+      $('saveStatus').innerHTML='<span class="save-status err">Could not refresh profile; '+Object.keys(pendingToRestore).length+' unsaved change'+(Object.keys(pendingToRestore).length===1?'':'s')+' kept.</span>';
       return;
     }
     if(S.configLoadedName===name){
@@ -9843,8 +9847,8 @@ async function loadConfig(name,recheckRuntimeAfterSave=false,discardPending=fals
   S.strategyMode=(((r.config||{}).runtime||{}).mode||'').toLowerCase();
   S.configRuntimeStatus={state:'checking',instance:name};
   renderConfigEditor(r.config||{});
-  S.configEdits=pending;
-  if(Object.keys(pending).length)applyStrategyDrafts(pending);
+  S.configEdits=pendingToRestore;
+  if(Object.keys(pendingToRestore).length)applyStrategyDrafts(pendingToRestore);
   const status=await refreshStrategyRuntimeStatus(name,!!(recheckRuntimeAfterSave||configChanged));
   if(recheckRuntimeAfterSave&&status&&status.state==='file_ahead')setTimeout(()=>refreshStrategyRuntimeStatus(name,true),2500);
 }
@@ -9913,6 +9917,7 @@ async function copyStrategyFingerprint(){
 }
 
 function onKnobEdit(input){
+  S.strategyEditRevision=(Number(S.strategyEditRevision)||0)+1;
   const kind=input.dataset.kind,qkey=input.dataset.qkey,card=input.closest('.knob-card');
   let val,valid=true;
   if(kind==='bool'){
@@ -9931,6 +9936,7 @@ function onKnobEdit(input){
   updateStrategyState(false,card);
 }
 function toggleAssetKnob(btn){
+  S.strategyEditRevision=(Number(S.strategyEditRevision)||0)+1;
   btn.classList.toggle('on');const picker=btn.closest('.asset-picker'),card=btn.closest('.knob-card');
   const val=[...picker.querySelectorAll('.asset-chip.on')].map(x=>x.dataset.asset);
   S.configEdits[picker.dataset.qkey]=val;card.classList.add('changed');card.dataset.enabled=val.length?'true':'false';
