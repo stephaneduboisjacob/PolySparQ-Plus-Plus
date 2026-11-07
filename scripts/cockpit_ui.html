@@ -2279,7 +2279,10 @@ const PREDICTION_REFERENCE_POLY_LIMIT=12000,PREDICTION_REFERENCE_DIRECT_LIMIT=60
 // Keep a flat trace connected at 1 Hz without storing every unchanged quote.
 const PREDICTION_REFERENCE_FLAT_SAMPLE_INTERVAL_MS=1000;
 const PREDICTION_REFERENCE_SOURCE_STALE_MS=10000,PREDICTION_REFERENCE_POLY_STALE_MS=15000;
-const PREDICTION_REFERENCE_PAINT_INTERVAL_MS=200;
+// Cap full SVG rebuilds at 20 fps so live exchange/CLOB ticks reach the plot
+// quickly without rebuilding the chart once per socket message.
+const PREDICTION_REFERENCE_PAINT_INTERVAL_MS=50;
+const PREDICTION_REFERENCE_DIRECT_STATUS_PAINT_INTERVAL_MS=250;
 const PREDICTION_REFERENCE_INTERACTION_PAINT_INTERVAL_MS=33;
 let _predictionReferenceInteractionTimer=0,_predictionReferenceInteractionFrame=0,_predictionReferenceInteractionPending=false,_predictionReferenceInteractionPaintAt=0;
 function cancelPredictionReferenceInteractionPaint(){
@@ -2321,7 +2324,9 @@ function schedulePredictionReferenceChartPaint(){
   if(S.predictionReferencePaintTimer)return;
   S.predictionReferencePaintTimer=setTimeout(()=>{
     S.predictionReferencePaintTimer=null;
-    if(S.curTab==='manualpred'&&!document.hidden)renderPredictionReferenceChart();
+    // Pointer-driven redraws already consume the latest buffers; don't replace
+    // the SVG mid-gesture and cancel the higher-rate pan/zoom paint.
+    if(S.curTab==='manualpred'&&!document.hidden&&!S.predictionReferenceGesture?.moved)renderPredictionReferenceChart();
   },PREDICTION_REFERENCE_PAINT_INTERVAL_MS);
 }
 function renderPredictionReferenceSeriesControls(){
@@ -2611,7 +2616,7 @@ function schedulePredictionReferenceDirectStatus(){
   S.predictionReferenceDirectStatusTimer=setTimeout(()=>{
     S.predictionReferenceDirectStatusTimer=null;
     predictionReferenceDirectStatus();
-  },PREDICTION_REFERENCE_PAINT_INTERVAL_MS);
+  },PREDICTION_REFERENCE_DIRECT_STATUS_PAINT_INTERVAL_MS);
 }
 function stopPredictionReferenceSockets(){
   const state=S.predictionReferenceSockets;
