@@ -276,6 +276,9 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code','C
 .fleet-stat-lbl{font-size:9px;color:var(--text3);letter-spacing:.5px}
 .fleet-stat-val{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
 .fleet-stat-val.pos{color:var(--green)}.fleet-stat-val.neg{color:var(--red)}.fleet-stat-val.neutral{color:var(--text)}
+.fleet-stat-head{display:flex;flex-direction:column;gap:2px;min-width:0}
+.fleet-stat-meta{font-size:8px;line-height:1.2;color:var(--text3);letter-spacing:.25px;white-space:nowrap}
+.fleet-stat-meta.stale{color:var(--gold)}.fleet-stat-meta.failed{color:var(--red)}
 .fleet-controls{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .fleet-btn{padding:5px 10px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--text2);cursor:pointer;font-size:10px;font-weight:600;font-family:inherit;transition:all .15s}
 .fleet-btn:hover{background:var(--bg3);color:var(--text)}
@@ -7276,6 +7279,8 @@ $('assetSel').onchange=()=>loadCandles();
 // ── Fleet tab v2 ──────────────────────────────────────────────────────────
 let _fleetPnl={};
 let _fleetPnlFetchedAt=0;
+let _fleetPnlSnapshotAt=0;
+let _fleetPnlRefreshFailed=false;
 // The server rebuilds fee-aware P&L every 30s and serves stale data while it
 // refreshes; this mid-window fetch picks up the completed snapshot without
 // retransmitting its history on every 3s Fleet refresh.
@@ -7300,7 +7305,13 @@ async function loadFleet(){
     const [fleet,live,pnlData]=await Promise.all([
       apiFetch('/api/fleet'),liveSnapshot,pnlSnapshot]);
     const tourn={};(((live||{}).tournament||{}).instances||[]).forEach(x=>{tourn[x.instance]=x;});
-    if(pnlFetchDue)_fleetPnl=(pnlData||{}).instances||{};
+    if(pnlFetchDue){
+      if(pnlData&&pnlData.instances&&typeof pnlData.instances==='object'){
+        _fleetPnl=pnlData.instances;
+        _fleetPnlSnapshotAt=Number(pnlData.server_ts)||0;
+        _fleetPnlRefreshFailed=false;
+      }else _fleetPnlRefreshFailed=true;
+    }
     _availConfigs=(fleet||{}).available_configs||[];
     _allowedModels=(fleet||{}).allowed_models||[];
     _allowCustomModel=!!(fleet||{}).allow_custom_model;
@@ -7310,7 +7321,7 @@ async function loadFleet(){
       const t=tourn[f.instance]||{};
       const perf=_fleetPnl[f.instance]||{};
       const pnl=perf.pnl_available&&perf.net_pnl!=null?Number(perf.net_pnl):null;
-      return{instance:f.instance,html:fleetCard(f,t,pnl,perf),perf};
+      return{instance:f.instance,html:fleetCard(f,t,pnl,perf,_fleetPnlSnapshotAt,_fleetPnlRefreshFailed),perf};
     });
     const fleetHost=$('fleetGrid'),wanted=new Set(cards.map(card=>card.instance));
     for(const card of Array.from(fleetHost.children)){
@@ -7603,11 +7614,22 @@ function fleetRuntimePresentation(f,running=!!(f&&f.running)){
   return{tone:'paused',label:`${mode} · ENTRY SCANNER OFF`,detail:'Autopilot is off; the automatic signal-entry scanner is disabled.'};
 }
 
-function fleetCard(f,t,pnl,perf={}){
+function fleetCard(f,t,pnl,perf={},pnlSnapshotAt=0,pnlRefreshFailed=false){
   const inst=f.instance,name=f.name||inst,running=typeof t.running==='boolean'?t.running:!!f.running;
   const col=BOT_COLORS[inst]||'var(--text)';
   const s=f.strategy||{},sup=f.supervisor||{},w=f.wallet||{};
   const runtimeState=fleetRuntimePresentation(f,running);
+  const snapshotAt=Number(pnlSnapshotAt);
+  const hasPnlSnapshotAt=Number.isFinite(snapshotAt)&&snapshotAt>0;
+  const pnlSnapshotAge=hasPnlSnapshotAt?Date.now()-snapshotAt:null;
+  const pnlSnapshotStale=pnlSnapshotAge>60_000;
+  const pnlSnapshotLabel=hasPnlSnapshotAt
+    ?`AS OF ${new Date(snapshotAt).toISOString().slice(11,19)}Z${pnlSnapshotStale?' · STALE':''}${pnlRefreshFailed?' · REFRESH FAILED':''}`
+    :pnlRefreshFailed?'REFRESH FAILED · NO SNAPSHOT TIME':'SNAPSHOT TIME UNAVAILABLE';
+  const pnlSnapshotClass=`fleet-stat-meta${pnlSnapshotStale?' stale':''}${pnlRefreshFailed?' failed':''}`;
+  const pnlSnapshotTitle=hasPnlSnapshotAt
+    ?`P&L snapshot as of ${new Date(snapshotAt).toISOString()}${pnlSnapshotStale?'; snapshot is over 60 seconds old':''}${pnlRefreshFailed?'; latest refresh failed, showing last successful snapshot':''}`
+    :pnlRefreshFailed?'P&L refresh failed and no successful snapshot timestamp is available':'The P&L response did not include a snapshot timestamp';
   // Wallet row
   const walletMode=w.mode||'paper';
   const walletAllApi=w.api_key_set&&w.api_secret_set&&w.api_passphrase_set;
@@ -7658,7 +7680,7 @@ function fleetCard(f,t,pnl,perf={}){
     <div class="fleet-runtime-status ${runtimeState.tone}" role="group" aria-label="${esc(runtimeState.label)}" title="${esc(runtimeState.detail)}"><i aria-hidden="true"></i><strong>${esc(runtimeState.label)}</strong><small>${esc(runtimeState.detail)}</small></div>
     <canvas class="fleet-spark" id="spark-${esc(inst)}" height="34"></canvas>
     <div class="fleet-stats">
-      <div title="${esc(perf.accounting_status||'P&L unavailable')}: ${esc(perf.pnl_scope||'session realized after fees')}. Current/last session realized net after fees; open-position market movement is excluded. A dash means reconciliation or freshness checks did not pass."><div class="fleet-stat-lbl">SESSION NET</div><div class="fleet-stat-val ${pnl==null?'neutral':pnl>=0?'pos':'neg'}">${pnl==null?'—':`${pnlSign(pnl)}$${fmt(Math.abs(pnl))}`}</div></div>
+      <div title="${esc(perf.accounting_status||'P&L unavailable')}: ${esc(perf.pnl_scope||'session realized after fees')}. Current/last session realized net after fees; open-position market movement is excluded. A dash means reconciliation or freshness checks did not pass. ${esc(pnlSnapshotTitle)}"><div class="fleet-stat-head"><div class="fleet-stat-lbl">SESSION NET</div><small class="${pnlSnapshotClass}">${esc(pnlSnapshotLabel)}</small></div><div class="fleet-stat-val ${pnl==null?'neutral':pnl>=0?'pos':'neg'}">${pnl==null?'—':`${pnlSign(pnl)}$${fmt(Math.abs(pnl))}`}</div></div>
       <div><div class="fleet-stat-lbl">W/L</div><div class="fleet-stat-val neutral">${t.wins||0}/${t.losses||0}</div></div>
       <div><div class="fleet-stat-lbl">FILLS</div><div class="fleet-stat-val neutral">${t.fills||0}</div></div>
     </div>
