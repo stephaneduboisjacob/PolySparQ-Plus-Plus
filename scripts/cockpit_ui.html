@@ -1284,7 +1284,7 @@ body::after{display:none}button,input,select{font-family:inherit}button{letter-s
         <div class="exec-field"><label>VENUE POLL<small>authoritative fill reconciliation cadence</small></label><input id="execPoll" type="number" min="100" max="60000"></div>
         <div class="exec-field"><label>ENTRY QUOTE AGE<small>expired quotes are cancelled without taking liquidity</small></label><input id="execAge" type="number" min="0" max="300000"></div>
         <div class="exec-field"><label>ENTRY CLOSE GUARD<small>withdraw entry quote before market expiry</small></label><input id="execClose" type="number" min="0" max="120000"></div>
-        <button class="btn-primary" style="width:100%;margin-top:12px" onclick="saveExecutionPolicy()">COMMIT ROUTING POLICY</button>
+        <button id="execPolicyCommit" class="btn-primary" style="width:100%;margin-top:12px" onclick="saveExecutionPolicy()">COMMIT ROUTING POLICY</button>
       </div>
       <div class="card danger-zone">
         <div class="card-title"><span class="ct-accent" style="background:var(--red)"></span>QUOTE CONTAINMENT</div>
@@ -3915,10 +3915,11 @@ const _execPolicyFields=[
 const _execPolicyDrafts=new Map();
 let _executionRefreshQueued=false;
 let _execPolicyInputInstance='';
+let _execPolicySaving=false;
 function _setExecPolicyInputInstance(instance){
   _execPolicyInputInstance=instance||'';
   const ready=!!_execPolicyInputInstance;
-  document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!ready||_whoami.role==='demo');
+  document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!ready||_whoami.role==='demo'||(el.id==='execPolicyCommit'&&_execPolicySaving));
 }
 function _readExecutionPolicyInputs(){
   return Object.fromEntries(_execPolicyFields.map(field=>[field.id,$(field.id)?.value??'']));
@@ -4098,7 +4099,7 @@ async function loadExecution(force=false){
         _setExecPolicyInputInstance(requestedInstance);
       }else _setExecPolicyInputInstance('');
     }
-    document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!S.curInstance||S.curInstance!==_execPolicyInputInstance||_whoami.role==='demo');
+    document.querySelectorAll('.exec-policy input,.exec-policy button').forEach(el=>el.disabled=!S.curInstance||S.curInstance!==_execPolicyInputInstance||_whoami.role==='demo'||(el.id==='execPolicyCommit'&&_execPolicySaving));
 
     commitCockpitHtml($('execOrders'),open.length
       ? `<div class="exec-order hdr"><span>BOT</span><span>ASSET</span><span>ROUTE</span><span>ORDER / VENUE ID</span><span>PRICE</span><span>REMAIN</span><span>AGE</span></div>${open.map(o=>{
@@ -4129,7 +4130,13 @@ async function saveExecutionPolicy(){
     maker_max_age_ms:+draftValues.execAge,
     maker_cancel_before_close_ms:+draftValues.execClose
   };
-  const r=await apiPost('/api/config/write',{name:instance,updates});
+  const button=$('execPolicyCommit');
+  if(button){if(button.disabled)return;_execPolicySaving=true;button.disabled=true;button.textContent='COMMITTING…';button.setAttribute('aria-busy','true');}
+  let r;
+  try{r=await apiPost('/api/config/write',{name:instance,updates});}
+  finally{
+    if(button){_execPolicySaving=false;button.textContent='COMMIT ROUTING POLICY';button.removeAttribute('aria-busy');button.disabled=!S.curInstance||S.curInstance!==_execPolicyInputInstance||_whoami.role==='demo';}
+  }
   if(r&&r.ok){
     if(S.curInstance===instance&&_execPolicyInputInstance===instance){
       const latestValues=_readExecutionPolicyInputs();
