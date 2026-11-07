@@ -104,19 +104,19 @@ struct WsClient::Impl : std::enable_shared_from_this<WsClient::Impl> {
     }
     void stop() {
         if (stopping_.exchange(true)) return; // idempotent
-        // Cancel the reconnect timer so it doesn't fire during shutdown.
-        if (reconnect_timer_) reconnect_timer_->cancel();
-        // Close the TCP socket from outside the io_context thread.
-        // This interrupts any pending async_read/async_write with
-        // operation_aborted → on_socket_error → checks stopping_ → no retry.
-        // This is the SAFE way to break out of a stuck WS without depending
-        // on a posted handler (which ioc_.stop() might prevent from running).
-        with_stream([](auto& s) {
-            beast::error_code ec;
-            beast::get_lowest_layer(s).socket().close(ec);
+        // Cancel on the owning io_context thread, then let the canceled handlers
+        // run to completion. They capture shared_from_this(); stopping the
+        // context before draining them can leave the context, resolver worker,
+        // and Impl in a reference cycle after every reconnect.
+        asio::post(ioc_, [this] {
+            if (reconnect_timer_) reconnect_timer_->cancel();
+            resolver_.cancel();
+            with_stream([](auto& s) {
+                beast::error_code ec;
+                beast::get_lowest_layer(s).socket().close(ec);
+            });
         });
-        // Now stop the io_context so the thread exits quickly.
-        ioc_.stop();
+        // The run loop exits after cancellation completions release their work.
         if (th_.joinable()) th_.join();
         // Clean up TLS/WS state now that the io_context thread is done.
         // If on_socket_error's close_ws() already cleaned up, this is a no-op.
@@ -163,6 +163,7 @@ private:
         auto self = shared_from_this();
         resolver_.async_resolve(url_p_.host, url_p_.port,
             [self](beast::error_code ec, tcp::resolver::results_type r) {
+                if (self->stopping_.load()) return;
                 if (ec) { self->retry("resolve: " + ec.message()); return; }
                 self->do_connect(std::move(r));
             });
@@ -176,6 +177,7 @@ private:
     bool has_stream() const { return stream_ || plain_; }
 
     void do_connect(tcp::resolver::results_type results) {
+        if (stopping_.load()) return;
         if (url_p_.tls) {
             stream_ = std::make_unique<Stream>(asio::make_strand(ioc_), ssl_ctx_);
             if (!SSL_set_tlsext_host_name(stream_->next_layer().native_handle(),
@@ -194,6 +196,7 @@ private:
             beast::get_lowest_layer(s).async_connect(results,
                 [self](beast::error_code ec,
                        tcp::resolver::results_type::endpoint_type) {
+                    if (self->stopping_.load()) return;
                     if (ec) { self->retry("tcp: " + ec.message()); return; }
                     if (self->stream_) self->do_tls();
                     else               self->do_ws();
@@ -201,15 +204,18 @@ private:
         });
     }
     void do_tls() {
+        if (stopping_.load() || !stream_) return;
         beast::get_lowest_layer(*stream_).expires_after(std::chrono::seconds(15));
         auto self = shared_from_this();
         stream_->next_layer().async_handshake(ssl::stream_base::client,
             [self](beast::error_code ec) {
+                if (self->stopping_.load()) return;
                 if (ec) { self->retry("tls: " + ec.message()); return; }
                 self->do_ws();
             });
     }
     void do_ws() {
+        if (stopping_.load()) return;
         auto self = shared_from_this();
         with_stream([&](auto& s) {
             beast::get_lowest_layer(s).expires_never();
@@ -233,12 +239,14 @@ private:
                 }));
             s.async_handshake(url_p_.host, url_p_.target,
                 [self](beast::error_code ec) {
+                    if (self->stopping_.load()) return;
                     if (ec) { self->retry("ws hs: " + ec.message()); return; }
                     self->on_open();
                 });
         });
     }
     void on_open() {
+        if (stopping_.load()) return;
         connected_.store(true);
         // NOTE: do NOT reset backoff here. A socket that completes the WS
         // handshake but is then closed by the server before sending any data
@@ -253,10 +261,12 @@ private:
         if (!tx_queue_.empty()) drain_tx();
     }
     void do_read() {
+        if (stopping_.load()) return;
         auto self = shared_from_this();
         with_stream([&](auto& s) {
         s.async_read(rx_buffer_,
             [self, &s](beast::error_code ec, std::size_t bytes) {
+                if (self->stopping_.load()) return;
                 if (ec) { self->on_socket_error("read: " + ec.message()); return; }
                 // Copy the buffer into a contiguous string to ensure the payload
                 // is contiguous (flat_buffer may expose a buffer sequence). Use
@@ -285,7 +295,8 @@ private:
         });
     }
     void drain_tx() {
-        if (!has_stream() || !connected_.load() || tx_queue_.empty()) {
+        if (stopping_.load() || !has_stream() || !connected_.load() ||
+            tx_queue_.empty()) {
             writing_ = false; return;
         }
         writing_ = true;
