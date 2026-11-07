@@ -4605,16 +4605,20 @@ function renderOverview(d){
   loadEntryGateDiagnostics();
 }
 
-let _slowTs=0;
-function loadOverviewSlow(force){
+let _slowTs=0,_overviewSlowLoading=false,_overviewSlowPending=false;
+function loadOverviewSlow(force=false){
+  if(_overviewSlowLoading){_overviewSlowPending=_overviewSlowPending||force;return;}
   const now=Date.now();
   if(!force&&now-_slowTs<25000)return;
   _slowTs=now;
-  loadActivity(force);
-  renderSignalHistory();
-  loadPerfStats();
-  loadHeatmap();
-  loadPnlByInstance();
+  _overviewSlowLoading=true;
+  Promise.allSettled([
+    loadActivity(force),renderSignalHistory(),loadPerfStats(),loadHeatmap(),loadPnlByInstance()
+  ]).finally(()=>{
+    _overviewSlowLoading=false;
+    const pending=_overviewSlowPending;_overviewSlowPending=false;
+    if(pending&&!document.hidden&&S.curTab==='overview')loadOverviewSlow(true);
+  });
 }
 
 let _entryDiagAt=0,_entryDiagLoading=false;
