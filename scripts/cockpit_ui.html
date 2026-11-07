@@ -6521,7 +6521,6 @@ function _marketExplorerSyncBookStream(){
       entry.streamStatus=Number(entry.streamLastEventAt)>=Number(entry.streamConnectedAt)&&Number(entry.streamLastEventAt)>0?'live':'connected';
       _marketExplorerStreamBookStatus(id);
     }
-    _marketExplorerStreamStatusForTargets();
     return;
   }
   if(stream.retryTimer||stream.socket?.readyState===0)return;
