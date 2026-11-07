@@ -104,10 +104,9 @@ struct WsClient::Impl : std::enable_shared_from_this<WsClient::Impl> {
     }
     void stop() {
         if (stopping_.exchange(true)) return; // idempotent
-        // Cancel on the owning io_context thread, then let the canceled handlers
-        // run to completion. They capture shared_from_this(); stopping the
-        // context before draining them can leave the context, resolver worker,
-        // and Impl in a reference cycle after every reconnect.
+        // Cancel on the owning io_context thread. Active handlers release their
+        // shared Impl captures, then the final drained handler destroys Beast's
+        // stream (including its idle timer) before stopping the context.
         asio::post(ioc_, [this] {
             if (reconnect_timer_) reconnect_timer_->cancel();
             resolver_.cancel();
@@ -115,8 +114,10 @@ struct WsClient::Impl : std::enable_shared_from_this<WsClient::Impl> {
                 beast::error_code ec;
                 beast::get_lowest_layer(s).socket().close(ec);
             });
+            finish_stop_when_drained();
         });
-        // The run loop exits after cancellation completions release their work.
+        // Beast keeps an idle-timeout timer alive while a read is pending. Wait
+        // for canceled I/O callbacks, then stop from the posted finalizer.
         if (th_.joinable()) th_.join();
         // Clean up TLS/WS state now that the io_context thread is done.
         // If on_socket_error's close_ws() already cleaned up, this is a no-op.
@@ -140,6 +141,24 @@ struct WsClient::Impl : std::enable_shared_from_this<WsClient::Impl> {
 private:
     void notify(const std::string& s) { if (on_state_) on_state_(s); }
 
+    void begin_async_op() { ++pending_async_ops_; }
+    void finish_async_op() {
+        if (pending_async_ops_ > 0) --pending_async_ops_;
+        finish_stop_when_drained();
+    }
+    void finish_stop_when_drained() {
+        if (!stopping_.load() || pending_async_ops_ != 0 ||
+            stop_finalize_posted_ || stop_finalized_) return;
+        stop_finalize_posted_ = true;
+        asio::post(ioc_, [this] {
+            stop_finalize_posted_ = false;
+            if (!stopping_.load() || pending_async_ops_ != 0 || stop_finalized_) return;
+            stop_finalized_ = true;
+            close_ws();
+            ioc_.stop();
+        });
+    }
+
     void schedule_connect() {
         if (stopping_.load()) return;
         // Re-arm the teardown gate and destroy the previous stream now that we're
@@ -161,8 +180,10 @@ private:
         if (!u) { spdlog::error("ws: bad url {}", url_); return; }
         url_p_ = *u;
         auto self = shared_from_this();
+        begin_async_op();
         resolver_.async_resolve(url_p_.host, url_p_.port,
             [self](beast::error_code ec, tcp::resolver::results_type r) {
+                self->finish_async_op();
                 if (self->stopping_.load()) return;
                 if (ec) { self->retry("resolve: " + ec.message()); return; }
                 self->do_connect(std::move(r));
@@ -193,9 +214,11 @@ private:
         auto self = shared_from_this();
         with_stream([&](auto& s) {
             beast::get_lowest_layer(s).expires_after(std::chrono::seconds(15));
+            begin_async_op();
             beast::get_lowest_layer(s).async_connect(results,
                 [self](beast::error_code ec,
                        tcp::resolver::results_type::endpoint_type) {
+                    self->finish_async_op();
                     if (self->stopping_.load()) return;
                     if (ec) { self->retry("tcp: " + ec.message()); return; }
                     if (self->stream_) self->do_tls();
@@ -207,8 +230,10 @@ private:
         if (stopping_.load() || !stream_) return;
         beast::get_lowest_layer(*stream_).expires_after(std::chrono::seconds(15));
         auto self = shared_from_this();
+        begin_async_op();
         stream_->next_layer().async_handshake(ssl::stream_base::client,
             [self](beast::error_code ec) {
+                self->finish_async_op();
                 if (self->stopping_.load()) return;
                 if (ec) { self->retry("tls: " + ec.message()); return; }
                 self->do_ws();
@@ -237,8 +262,10 @@ private:
                 [](bws::request_type& req) {
                     req.set(http::field::user_agent, "vantage-pulse/0.1");
                 }));
+            begin_async_op();
             s.async_handshake(url_p_.host, url_p_.target,
                 [self](beast::error_code ec) {
+                    self->finish_async_op();
                     if (self->stopping_.load()) return;
                     if (ec) { self->retry("ws hs: " + ec.message()); return; }
                     self->on_open();
@@ -264,8 +291,10 @@ private:
         if (stopping_.load()) return;
         auto self = shared_from_this();
         with_stream([&](auto& s) {
+        begin_async_op();
         s.async_read(rx_buffer_,
             [self, &s](beast::error_code ec, std::size_t bytes) {
+                self->finish_async_op();
                 if (self->stopping_.load()) return;
                 if (ec) { self->on_socket_error("read: " + ec.message()); return; }
                 // Copy the buffer into a contiguous string to ensure the payload
@@ -304,8 +333,11 @@ private:
         std::string& msg = tx_queue_.front();
         with_stream([&](auto& s) {
             s.text(true);
+            begin_async_op();
             s.async_write(asio::buffer(msg),
                 [self](beast::error_code ec, std::size_t) {
+                    self->finish_async_op();
+                    if (self->stopping_.load()) return;
                     if (ec) { self->writing_ = false;
                               self->on_socket_error("write: " + ec.message()); return; }
                     self->tx_queue_.pop_front();
@@ -369,7 +401,10 @@ private:
         reconnect_timer_ = std::make_unique<asio::steady_timer>(ioc_);
         reconnect_timer_->expires_after(delay);
         auto self = shared_from_this();
+        begin_async_op();
         reconnect_timer_->async_wait([self](beast::error_code ec) {
+            self->finish_async_op();
+            if (self->stopping_.load()) return;
             if (ec) return;
             self->schedule_connect();
         });
@@ -387,6 +422,9 @@ private:
     beast::flat_buffer         rx_buffer_;
     std::deque<std::string>    tx_queue_;
     bool                       writing_ = false;
+    std::size_t                pending_async_ops_ = 0; // io_context thread only
+    bool                       stop_finalize_posted_ = false; // io_context thread only
+    bool                       stop_finalized_ = false; // io_context thread only
     std::unique_ptr<asio::steady_timer> reconnect_timer_;
     std::chrono::milliseconds  backoff_;
     std::atomic<bool> connected_{false};
