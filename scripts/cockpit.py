@@ -7050,11 +7050,36 @@ def _admin_wallet_instances():
 _tournament_cache = [0.0, None]
 _tournament_lock = threading.Lock()
 _tournament_refreshing = False
+_tournament_retry_after = 0.0
 
 
-def api_tournament():
-    """Serve the lightweight instance leaderboard without stacking refreshes."""
-    global _tournament_refreshing
+def _build_and_cache_tournament():
+    """Refresh the shared instance leaderboard and release its single-flight lock."""
+    global _tournament_refreshing, _tournament_retry_after
+    try:
+        result = _build_tournament_payload()
+    except Exception:
+        with _tournament_lock:
+            _tournament_refreshing = False
+            _tournament_retry_after = time.monotonic() + 2.0
+        raise
+    with _tournament_lock:
+        _tournament_cache[0], _tournament_cache[1] = time.monotonic(), result
+        _tournament_retry_after = 0.0
+        _tournament_refreshing = False
+    return result
+
+
+def _refresh_tournament_background():
+    try:
+        _build_and_cache_tournament()
+    except Exception:
+        pass
+
+
+def api_tournament(stale_while_refresh=False):
+    """Serve the instance leaderboard, optionally keeping lightweight views nonblocking."""
+    global _tournament_refreshing, _tournament_retry_after
     now = time.monotonic()
     with _tournament_lock:
         cached = _tournament_cache[1]
@@ -7062,19 +7087,28 @@ def api_tournament():
             return cached
         if _tournament_refreshing:
             return cached or {"instances": []}
+        if now < _tournament_retry_after:
+            return cached or {"instances": []}
         _tournament_refreshing = True
+    if stale_while_refresh:
+        try:
+            threading.Thread(
+                target=_refresh_tournament_background,
+                name="cockpit-tournament-refresh",
+                daemon=True,
+            ).start()
+        except Exception:
+            with _tournament_lock:
+                _tournament_refreshing = False
+                _tournament_retry_after = time.monotonic() + 2.0
+        return cached or {"instances": []}
     try:
-        result = _build_tournament_payload()
+        return _build_and_cache_tournament()
     except Exception:
         with _tournament_lock:
-            _tournament_refreshing = False
             if _tournament_cache[1] is not None:
                 return _tournament_cache[1]
         raise
-    with _tournament_lock:
-        _tournament_cache[0], _tournament_cache[1] = time.monotonic(), result
-        _tournament_refreshing = False
-        return result
 
 
 def _build_tournament_payload():
@@ -7149,6 +7183,8 @@ _live_cache_build_locks = tuple(threading.Lock() for _ in range(32))
 _live_lite_cache = {}
 _live_lite_cache_lock = threading.Lock()
 _live_lite_refreshing = set()
+_live_lite_refresh_events = {}
+_live_lite_refresh_slots = threading.BoundedSemaphore(2)
 _live_lite_retry_after = {}
 _live_lite_failures = {}
 _activity_cache = {}
@@ -7335,18 +7371,17 @@ def build_operator_radar(status, positions_payload, markets_payload, health):
     return sorted(alerts, key=lambda a: order.get(a.get("level"), 9))[:12]
 
 
-def _refresh_live_lite_cache(key, instance):
-    try:
-        result = _build_api_live_lite(instance)
-    except Exception:
-        with _live_lite_cache_lock:
-            _live_lite_refreshing.discard(key)
-            failures = min(6, _live_lite_failures.get(key, 0) + 1)
-            _live_lite_failures[key] = failures
-            _live_lite_retry_after[key] = time.monotonic() + min(
-                30.0, 0.5 * (2 ** (failures - 1))
-            )
-        return
+# The warmed snapshot currently completes in about 160 ms. Joining for at most
+# 200 ms lets the usual refresh reach this poll instead of waiting another cycle.
+_LIVE_LITE_REFRESH_JOIN_WAIT_S = 0.2
+
+
+def _finish_live_lite_refresh_locked(key):
+    _live_lite_refreshing.discard(key)
+    return _live_lite_refresh_events.pop(key, None)
+
+
+def _store_live_lite_cache(key, result):
     with _live_lite_cache_lock:
         if len(_live_lite_cache) >= 128 and key not in _live_lite_cache:
             oldest = min(_live_lite_cache,
@@ -7357,31 +7392,78 @@ def _refresh_live_lite_cache(key, instance):
         _live_lite_cache[key] = (time.monotonic(), result)
         _live_lite_retry_after.pop(key, None)
         _live_lite_failures.pop(key, None)
-        _live_lite_refreshing.discard(key)
+        event = _finish_live_lite_refresh_locked(key)
+    if event:
+        event.set()
+
+
+def _wait_for_live_lite_refresh(key, event, previous_at, stale):
+    if event and event.wait(_LIVE_LITE_REFRESH_JOIN_WAIT_S):
+        with _live_lite_cache_lock:
+            latest = _live_lite_cache.get(key)
+        if latest and latest[0] > previous_at:
+            return latest[1]
+    return stale
+
+
+def _refresh_live_lite_cache(key, instance):
+    try:
+        try:
+            result = _build_api_live_lite(instance)
+        except Exception:
+            with _live_lite_cache_lock:
+                failures = min(6, _live_lite_failures.get(key, 0) + 1)
+                _live_lite_failures[key] = failures
+                _live_lite_retry_after[key] = time.monotonic() + min(
+                    30.0, 0.5 * (2 ** (failures - 1))
+                )
+                event = _finish_live_lite_refresh_locked(key)
+            if event:
+                event.set()
+            return
+        _store_live_lite_cache(key, result)
+    finally:
+        _live_lite_refresh_slots.release()
 
 
 def api_live_lite(instance=None):
-    """Share fresh snapshots and return stale data while one refresh runs."""
+    """Share fast snapshots, briefly joining an in-flight refresh before serving stale data."""
     key = instance or ""
     now = time.monotonic()
     stale = None
+    previous_at = 0.0
+    event = None
+    start_refresh = False
     with _live_lite_cache_lock:
         hit = _live_lite_cache.get(key)
         if hit and now - hit[0] < 1.5:
             return hit[1]
+        previous_at = hit[0] if hit else 0.0
+        stale = hit[1] if hit else None
         if key in _live_lite_refreshing:
-            return hit[1] if hit else {
-                "status": {}, "positions": {"positions": []}, "markets": {"markets": []},
-                "health": {}, "tournament": {"instances": []}, "radar": [],
-                "instance": instance or "", "server_ts": int(time.time() * 1000),
-                "warming_up": True,
-            }
-        if hit:
-            stale = hit[1]
-            if now < _live_lite_retry_after.get(key, 0.0):
+            event = _live_lite_refresh_events.get(key)
+        else:
+            if hit and now < _live_lite_retry_after.get(key, 0.0):
                 return stale
-        _live_lite_refreshing.add(key)
+            _live_lite_refreshing.add(key)
+            event = threading.Event()
+            _live_lite_refresh_events[key] = event
+            start_refresh = True
+    if not start_refresh:
+        ready = _wait_for_live_lite_refresh(key, event, previous_at, stale)
+        return ready if ready is not None else {
+            "status": {}, "positions": {"positions": []}, "markets": {"markets": []},
+            "health": {}, "tournament": {"instances": []}, "radar": [],
+            "instance": instance or "", "server_ts": int(time.time() * 1000),
+            "warming_up": True,
+        }
     if stale is not None:
+        if not _live_lite_refresh_slots.acquire(blocking=False):
+            with _live_lite_cache_lock:
+                event = _finish_live_lite_refresh_locked(key)
+            if event:
+                event.set()
+            return stale
         try:
             threading.Thread(
                 target=_refresh_live_lite_cache,
@@ -7389,31 +7471,28 @@ def api_live_lite(instance=None):
                 name="cockpit-live-lite-refresh",
                 daemon=True,
             ).start()
-            return stale
         except Exception:
+            _live_lite_refresh_slots.release()
             with _live_lite_cache_lock:
-                _live_lite_refreshing.discard(key)
+                event = _finish_live_lite_refresh_locked(key)
+            if event:
+                event.set()
+            return stale
+        ready = _wait_for_live_lite_refresh(key, event, previous_at, stale)
+        return ready if ready is not None else stale
     try:
         result = _build_api_live_lite(instance)
     except Exception:
         with _live_lite_cache_lock:
-            _live_lite_refreshing.discard(key)
+            event = _finish_live_lite_refresh_locked(key)
             cached = _live_lite_cache.get(key)
+        if event:
+            event.set()
         if cached:
             return cached[1]
         raise
-    with _live_lite_cache_lock:
-        if len(_live_lite_cache) >= 128 and key not in _live_lite_cache:
-            oldest = min(_live_lite_cache,
-                         key=lambda cache_key: _live_lite_cache[cache_key][0])
-            _live_lite_cache.pop(oldest, None)
-            _live_lite_retry_after.pop(oldest, None)
-            _live_lite_failures.pop(oldest, None)
-        _live_lite_cache[key] = (time.monotonic(), result)
-        _live_lite_retry_after.pop(key, None)
-        _live_lite_failures.pop(key, None)
-        _live_lite_refreshing.discard(key)
-        return result
+    _store_live_lite_cache(key, result)
+    return result
 
 
 def _build_api_live_lite(instance=None):
@@ -7428,7 +7507,7 @@ def _build_api_live_lite(instance=None):
         "positions": positions,
         "markets": markets,
         "health": health,
-        "tournament": api_tournament(),
+        "tournament": api_tournament(stale_while_refresh=True),
         "radar": build_operator_radar(status, positions, markets, health),
         "instance": instance or "",
         "server_ts": int(time.time() * 1000),
