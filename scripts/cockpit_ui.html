@@ -3018,35 +3018,42 @@ function renderPredictionReferenceChart(){
   }
   const anchorPrice=hasExplicitOpen?explicitOpen:(firstSpot?.value||null);
   const anchorSource=hasExplicitOpen?(openRef?.source||'window opening reference'):(firstSpot?'first available in-window feed':'opening reference unavailable');
-  const samplesBySource={},sourceMoveStats={};
+  const visibleShares={};
+  for(const side of ['up','down'])visibleShares[side]=visible[`poly_${side}`]!==false?predictionReferenceTimeRange(sourceSeries[`poly_${side}`]||[],viewportStart,viewEnd,buffers.shares[side]):_predictionReferenceEmptyPoints;
+  const compactViewport=target.clientWidth<760,chartWidth=Math.max(320,Math.round(target.clientWidth||1280)),plotWidth=chartWidth-(compactViewport?62:104)-(compactViewport?10:64);
+  const visibleLineCount=Math.max(1,
+    PREDICTION_REFERENCE_SOURCES.filter(source=>visible[source.key]!==false&&rawBySource[source.key].length>0).length+
+    ['up','down'].filter(side=>visibleShares[side].length>0).length);
+  // Keep SVG path work near screen resolution. Full samples remain available
+  // to the cursor; extrema-preserving decimation bounds per-frame processing.
+  const pointLimit=Math.max(240,Math.min(1400,Math.floor(plotWidth*.85),Math.floor(7200/visibleLineCount)));
+  const samplesBySource={},plotSamplesBySource={},sourceMoveStats={};
   let hasMoves=false,low=0,high=0;
   for(const source of PREDICTION_REFERENCE_SOURCES){
-    const points=rawBySource[source.key];let sourceLow=Infinity,sourceHigh=-Infinity,count=0;
+    const key=source.key,rawPoints=rawBySource[key],points=predictionReferenceDecimate(rawPoints,pointLimit,buffers.decimated[key]);
+    let sourceLow=Infinity,sourceHigh=-Infinity,count=0;
     for(const point of points){
-      if(point._predictionReferenceAnchorPrice!==anchorPrice||point._predictionReferenceMoveSourceValue!==point.value){
-        point.move_pct=anchorPrice?(point.value/anchorPrice-1)*100:null;
-        point._predictionReferenceAnchorPrice=anchorPrice;point._predictionReferenceMoveSourceValue=point.value;
-      }
-      if(!Number.isFinite(point.move_pct))continue;
-      if(!hasMoves){low=high=point.move_pct;hasMoves=true;}
-      else{low=Math.min(low,point.move_pct);high=Math.max(high,point.move_pct);}
-      sourceLow=Math.min(sourceLow,point.move_pct);sourceHigh=Math.max(sourceHigh,point.move_pct);count++;
+      const move=anchorPrice?(point.value/anchorPrice-1)*100:null;
+      if(!Number.isFinite(move))continue;
+      if(!hasMoves){low=high=move;hasMoves=true;}
+      else{low=Math.min(low,move);high=Math.max(high,move);}
+      sourceLow=Math.min(sourceLow,move);sourceHigh=Math.max(sourceHigh,move);count++;
     }
-    samplesBySource[source.key]=points;
-    sourceMoveStats[source.key]={low:count?sourceLow:0,high:count?sourceHigh:0,count};
+    samplesBySource[key]=rawPoints;plotSamplesBySource[key]=points;
+    sourceMoveStats[key]={low:count?sourceLow:0,high:count?sourceHigh:0,count};
   }
   const closeMove=visible.oracle!==false&&closeRef?.price!=null&&anchorPrice?(Number(closeRef.price)/anchorPrice-1)*100:null;
   if(Number.isFinite(closeMove)){
     if(!hasMoves){low=high=closeMove;hasMoves=true;}
     else{low=Math.min(low,closeMove);high=Math.max(high,closeMove);}
   }
-  const visibleShares={};
-  for(const side of ['up','down'])visibleShares[side]=visible[`poly_${side}`]!==false?predictionReferenceTimeRange(sourceSeries[`poly_${side}`]||[],viewportStart,viewEnd,buffers.shares[side]):_predictionReferenceEmptyPoints;
+  const plotShares={};
+  for(const side of ['up','down'])plotShares[side]=predictionReferenceDecimate(visibleShares[side],pointLimit,buffers.decimated[`poly_${side}`]);
   const openingShares=Object.fromEntries(['up','down'].map(side=>[side,predictionReferenceFirstInRange(sourceSeries[`poly_${side}`]||[],start,windowEnd)]));
   const shareMode=S.predictionReferenceShareMode||'delta';
   const shareYValue=(value,side)=>shareMode==='delta'&&openingShares[side]?(Number(value)-Number(openingShares[side].value))*100:Number(value)*100;
   let maxAbsShare=0;
-  if(shareMode==='delta')for(const side of ['up','down'])for(const point of visibleShares[side]){
+  if(shareMode==='delta')for(const side of ['up','down'])for(const point of plotShares[side]){
     const value=shareYValue(point.value,side);
     if(Number.isFinite(value))maxAbsShare=Math.max(maxAbsShare,Math.abs(value));
   }
@@ -3087,33 +3094,26 @@ function renderPredictionReferenceChart(){
     const ts=start+fraction*(close-start);if(ts<viewportStart||ts>viewEnd)return'';
     const xx=x(ts);return`<line class="pred-reference-stage" x1="${xx.toFixed(1)}" y1="${priceTop}" x2="${xx.toFixed(1)}" y2="${shareBottom}"/><text class="pred-reference-stage-label" x="${xx.toFixed(1)}" y="${priceTop-12}" text-anchor="${fraction===0?'start':fraction===1?'end':'middle'}">${label}</text>`;
   }).join('');
-  const linePath=(points,valueFn,output)=>{
-    const reduced=predictionReferenceDecimate(points,pointLimit,output),intervals=[],stride=Math.max(1,Math.ceil((reduced.length-1)/64));
-    for(let index=stride;index<reduced.length;index+=stride){
-      const previous=Math.max(0,index-stride),steps=index-previous,interval=(reduced[index].t-reduced[previous].t)/steps;
+  const linePath=(points,valueFn)=>{
+    const intervals=[],stride=Math.max(1,Math.ceil((points.length-1)/64));
+    for(let index=stride;index<points.length;index+=stride){
+      const previous=Math.max(0,index-stride),steps=index-previous,interval=(points[index].t-points[previous].t)/steps;
       if(interval>0)intervals.push(interval);
     }
     intervals.sort((a,b)=>a-b);
     const median=intervals.length?intervals[Math.floor(intervals.length/2)]:0,gapLimit=Math.max(2500,Math.min(15000,median*4||2500));
     let path='',previous=null;
-    for(const point of reduced){const move=!previous||point.t-previous.t>gapLimit;path+=`${move?'M':' L'}${x(point.t).toFixed(1)} ${valueFn(point).toFixed(1)}`;previous=point;}
+    for(const point of points){const move=!previous||point.t-previous.t>gapLimit;path+=`${move?'M':' L'}${x(point.t).toFixed(1)} ${valueFn(point).toFixed(1)}`;previous=point;}
     return path;
   };
-  const visibleLineCount=Math.max(1,
-    PREDICTION_REFERENCE_SOURCES.filter(source=>visible[source.key]!==false&&sourceMoveStats[source.key].count>0).length+
-    ['up','down'].filter(side=>visible[`poly_${side}`]!==false&&visibleShares[side].length>0).length);
-  // Keep SVG path work near the screen's horizontal resolution. The cursor
-  // still uses full-resolution samples, and decimation keeps local extrema.
-  const pointLimit=Math.max(240,Math.min(1400,Math.floor(PW*.85),Math.floor(7200/visibleLineCount)));
   const liveQuote=predictionReferenceLivePrices()[asset]||{};
   const spotLines=PREDICTION_REFERENCE_SOURCES.map(source=>{
     if(visible[source.key]===false||!sourceMoveStats[source.key].count)return'';
-    const allPoints=samplesBySource[source.key],points=sourceMoveStats[source.key].count===allPoints.length?allPoints:allPoints.filter(point=>Number.isFinite(point.move_pct));
-    const path=linePath(points,point=>yMove(point.move_pct),buffers.decimated[source.key]),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
-    return path?`<path class="pred-reference-line ${source.key}" d="${path}" data-fresh="${fresh}"/>${last?`<circle class="pred-reference-dot ${source.key}" cx="${x(last.t).toFixed(1)}" cy="${yMove(last.move_pct).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
+    const points=plotSamplesBySource[source.key],path=linePath(points,point=>yMove((point.value/anchorPrice-1)*100)),last=points.at(-1),age=liveQuote[`${source.key}_age_s`],fresh=age!=null&&Number(age)<=source.maxAge;
+    return path?`<path class="pred-reference-line ${source.key}" d="${path}" data-fresh="${fresh}"/>${last?`<circle class="pred-reference-dot ${source.key}" cx="${x(last.t).toFixed(1)}" cy="${yMove((last.value/anchorPrice-1)*100).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
   }).join('');
   const shareLines=['up','down'].map(side=>{
-    const points=visibleShares[side],path=linePath(points,point=>yShare(point.value,side),buffers.decimated[`poly_${side}`]),last=points.at(-1);
+    const points=plotShares[side],path=linePath(points,point=>yShare(point.value,side)),last=points.at(-1);
     return path?`<path class="pred-reference-share-line ${side}" d="${path}"/>${last?`<circle class="pred-reference-share-dot ${side}" cx="${x(last.t).toFixed(1)}" cy="${yShare(last.value,side).toFixed(1)}" r="${compact?4:5}"/>`:''}`:'';
   }).join('');
   const shareOpenLines=['up','down'].map(side=>{
@@ -3134,8 +3134,8 @@ function renderPredictionReferenceChart(){
   if(stats&&(statsContext!==_predictionReferenceStatsContext||now-_predictionReferenceStatsPaintAt>=250)){
     const spotStats=PREDICTION_REFERENCE_SOURCES.map(source=>{
       if(visible[source.key]===false)return'';
-      const points=samplesBySource[source.key];if(!points.length)return`<div class="pred-reference-stat ${source.key}" data-empty="true"><b>${source.label}</b><span>NO PRICE POINTS IN VIEW</span><small>${source.assets&&!source.assets.includes(asset)?'PAIR NOT SUPPORTED':'Waiting for venue data'}</small></div>`;
-      const range=sourceMoveStats[source.key],last=points.at(-1),lo=range.low,hi=range.high,move=last?.move_pct,sign=move>0?'+':'';
+      const points=samplesBySource[source.key],plotted=plotSamplesBySource[source.key];if(!points.length)return`<div class="pred-reference-stat ${source.key}" data-empty="true"><b>${source.label}</b><span>NO PRICE POINTS IN VIEW</span><small>${source.assets&&!source.assets.includes(asset)?'PAIR NOT SUPPORTED':'Waiting for venue data'}</small></div>`;
+      const range=sourceMoveStats[source.key],last=plotted.at(-1),lo=range.low,hi=range.high,move=last&&anchorPrice?(last.value/anchorPrice-1)*100:null,sign=move>0?'+':'';
       return`<div class="pred-reference-stat ${source.key}"><b>${source.label}</b><span>FROM OPEN ${Number.isFinite(move)?`${sign}${move.toFixed(3)}%`:'—'}</span><small>${predictionReferencePrice(last?.value,asset)} · ${lo>0?'+':''}${lo.toFixed(3)}% to ${hi>0?'+':''}${hi.toFixed(3)}% · ${points.length} price points</small></div>`;
     });
     for(const side of ['up','down']){
@@ -3179,9 +3179,10 @@ function bindPredictionReferenceInspector(target,viewportStart,viewEnd,duration,
     for(const source of PREDICTION_REFERENCE_SOURCES){
       if(chart.visible[source.key]===false)continue;
       const point=nearest(chart.samplesBySource[source.key],time,tolerance),dot=$(`predictionReferenceCursor${source.key[0].toUpperCase()+source.key.slice(1)}`);
-      if(dot){if(point){dot.setAttribute('visibility','visible');dot.setAttribute('cx',chart.x(point.t).toFixed(1));dot.setAttribute('cy',chart.yMove(point.move_pct).toFixed(1));}else dot.setAttribute('visibility','hidden');}
       const move=point&&chart.anchorPrice?(point.value/chart.anchorPrice-1)*100:null;
-      rows.push(`<span class="${source.key}"><b>${source.label}</b> ${point?predictionReferencePrice(point.value,chart.asset):'NO TICK'}<small>${point?`${move>0?'+':''}${move.toFixed(3)}% · ${clockText(point.t)}`:'outside venue cadence'}</small></span>`);
+      const hasMove=Number.isFinite(move);
+      if(dot){if(point&&hasMove){dot.setAttribute('visibility','visible');dot.setAttribute('cx',chart.x(point.t).toFixed(1));dot.setAttribute('cy',chart.yMove(move).toFixed(1));}else dot.setAttribute('visibility','hidden');}
+      rows.push(`<span class="${source.key}"><b>${source.label}</b> ${point?predictionReferencePrice(point.value,chart.asset):'NO TICK'}<small>${point&&hasMove?`${move>0?'+':''}${move.toFixed(3)}% · ${clockText(point.t)}`:point?'open reference unavailable':'outside venue cadence'}</small></span>`);
     }
     for(const side of ['up','down'])if(chart.visible[`poly_${side}`]!==false){
       const point=nearest(chart.visibleShares[side],time,tolerance),dot=$(`predictionReferenceCursor${side[0].toUpperCase()+side.slice(1)}`),opened=chart.openingShares[side];
