@@ -9762,20 +9762,30 @@ function renderStrategyRuntimeStatus(){
   if(button)button.disabled=state==='checking';
 }
 
-let _strategyRuntimeCheckedAt=0,_strategyRuntimeCheckedName='';
+let _strategyRuntimeCheckedAt=0,_strategyRuntimeCheckedName='',_strategyRuntimeRequest=null,_strategyRuntimeRequestName='',_strategyRuntimeRequestSeq=0;
 async function refreshStrategyRuntimeStatus(name,force){
   if(name===undefined)name=S.curConfig;
   if(force===undefined)force=true;
   if(!name||name!==S.curConfig)return null;
   if(!force&&_strategyRuntimeCheckedName===name&&Date.now()-_strategyRuntimeCheckedAt<15000&&S.configRuntimeStatus?.state!=='checking')return S.configRuntimeStatus;
+  if(!force&&_strategyRuntimeRequest&&_strategyRuntimeRequestName===name)return _strategyRuntimeRequest;
   S.configRuntimeStatus={state:'checking',instance:name};renderStrategyRuntimeStatus();
-  let r=null;
-  try{r=await apiFetch('/api/config/runtime?name='+encodeURIComponent(name),{timeoutMs:8000});}catch(_){r=null;}
-  if(name!==S.curConfig)return null;
-  S.configRuntimeStatus=r&&!r.error?r:{state:'runtime_unverified',instance:name};
-  _strategyRuntimeCheckedName=name;_strategyRuntimeCheckedAt=Date.now();
-  renderStrategyRuntimeStatus();
-  return S.configRuntimeStatus;
+  const requestSeq=++_strategyRuntimeRequestSeq;
+  let request;
+  request=(async()=>{
+    let r=null;
+    try{r=await apiFetch('/api/config/runtime?name='+encodeURIComponent(name),{timeoutMs:8000});}catch(_){r=null;}
+    if(name!==S.curConfig||requestSeq!==_strategyRuntimeRequestSeq)return null;
+    S.configRuntimeStatus=r&&!r.error?r:{state:'runtime_unverified',instance:name};
+    _strategyRuntimeCheckedName=name;_strategyRuntimeCheckedAt=Date.now();
+    renderStrategyRuntimeStatus();
+    return S.configRuntimeStatus;
+  })();
+  _strategyRuntimeRequest=request;_strategyRuntimeRequestName=name;
+  try{return await request;}
+  finally{
+    if(_strategyRuntimeRequest===request){_strategyRuntimeRequest=null;_strategyRuntimeRequestName='';}
+  }
 }
 
 let _strategyConfigLoadSeq=0;
@@ -9830,11 +9840,11 @@ async function loadConfig(name,recheckRuntimeAfterSave=false,discardPending=fals
   const configChanged=S.configLoadedName!==name||fingerprint!==S.configFingerprint;
   if(configChanged&&!discardPending&&name===S.curConfig&&strategyInvalidCount()){
     $('saveStatus').textContent='The saved profile changed, but invalid text is being kept on screen. Fix it or reset to load the latest profile.';
-    await refreshStrategyRuntimeStatus(name,false);
+    refreshStrategyRuntimeStatus(name,false);
     return;
   }
   if(!configChanged&&!discardPending){
-    await refreshStrategyRuntimeStatus(name,false);
+    refreshStrategyRuntimeStatus(name,false);
     return;
   }
   S.configRaw=r.raw||'';
@@ -9850,8 +9860,8 @@ async function loadConfig(name,recheckRuntimeAfterSave=false,discardPending=fals
   renderConfigEditor(r.config||{});
   S.configEdits=pendingToRestore;
   if(Object.keys(pendingToRestore).length)applyStrategyDrafts(pendingToRestore);
-  const status=await refreshStrategyRuntimeStatus(name,!!(recheckRuntimeAfterSave||configChanged));
-  if(recheckRuntimeAfterSave&&status&&status.state==='file_ahead')setTimeout(()=>refreshStrategyRuntimeStatus(name,true),2500);
+  const statusCheck=refreshStrategyRuntimeStatus(name,!!(recheckRuntimeAfterSave||configChanged));
+  if(recheckRuntimeAfterSave)statusCheck.then(status=>{if(name===S.curConfig&&status?.state==='file_ahead')setTimeout(()=>refreshStrategyRuntimeStatus(name,true),2500);}).catch(()=>{});
 }
 
 function renderConfigEditor(cfg){
