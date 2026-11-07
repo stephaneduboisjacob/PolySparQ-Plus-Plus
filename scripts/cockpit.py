@@ -1348,6 +1348,8 @@ def synthetic_mark(side, oracle_now, strike, secs_left, sigma):
 
 _ledger_cache = {}
 _ledger_lock = threading.Lock()
+# Reuse immutable fill-ledger replays across adjacent 1.5-second live snapshots.
+_FILL_LEDGER_CACHE_TTL_S = 2.0
 
 
 def scoped_fill_ledger(mode, since=None, instance=None, session_id=None):
@@ -1361,7 +1363,7 @@ def scoped_fill_ledger(mode, since=None, instance=None, session_id=None):
     key = (mode, since, instance, session_id)
     with _ledger_lock:
         cached = _ledger_cache.get(key)
-        if cached and time.monotonic()-cached[0] < 0.5:
+        if cached and time.monotonic()-cached[0] < _FILL_LEDGER_CACHE_TTL_S:
             return cached[1]
     filters, args = ["o.mode=%s"], [mode]
     if since:
