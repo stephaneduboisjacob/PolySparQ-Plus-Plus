@@ -1819,6 +1819,10 @@ def api_price_history(cid, side, minutes=30):
     # Snake chart: share price (0..1) over time.
     # Primary: pm_book_snapshots (live feed midprice).
     # Fallback: synthetic oracle-derived line, then sparse fill prices.
+    try:
+        minutes = max(1, min(120, int(minutes)))
+    except (TypeError, ValueError):
+        minutes = 30
     # Keep a one-second visual series even when the feed stores several book
     # snapshots per second. The position chart refreshes frequently; returning
     # every raw frame makes each poll and browser redraw grow with feed rate.
