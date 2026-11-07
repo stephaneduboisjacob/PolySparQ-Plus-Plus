@@ -1499,6 +1499,11 @@ def build_board(query, public_json, root, news_fn, resolve=True):
     except Exception: errors.append('News context unavailable')
     stories=news.get('stories',[])
     references = references_future.result()
+    close_series_by_asset = {
+        asset: [row['close'] for row in candles.get(asset, {}).get('rows', [])]
+        for asset in ASSETS
+    }
+    series_index_by_asset = {asset: index for index, asset in enumerate(ASSETS)}
     requests=[];metadata={};
     for a,h,o in combos:
         m=markets.get((a,h,o),{})
@@ -1514,7 +1519,7 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         req={'spot':spot,'strike':_number(ref.get('strike')),
              'seconds_left':max(0,o+h-now),'twap_window_s':ref['window_s'],
              'reference_age_s':reference_age,'candle_age_s':candle_age,
-             'closes':[r['close'] for r in bars],
+             'series_index':series_index_by_asset[a],
              'fee_rate':fee_rate,'fee_exponent':fee_exponent}
         metadata[(a,h,o)]={'market':m,'ref':ref,'tape':current_tape,'bars':bars,
                            'ask_levels':{}}
@@ -1542,7 +1547,7 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         next_fee,next_exp=fee_parameters(next_m)
         next_req={'spot':spot,'strike':spot,'seconds_left':h,'twap_window_s':next_ref['window_s'],
                   'reference_age_s':now_s-spot_ts if spot_ts else 1e9,'candle_age_s':candle_age,
-                  'closes':[r['close'] for r in bars],'use_drift':1,
+                  'series_index':series_index_by_asset[a],'use_drift':1,
                   'fee_rate':next_fee,'fee_exponent':next_exp}
         next_sides=dict(zip([str(x).upper() for x in array(next_m.get('outcomes'))],
                             array(next_m.get('clobTokenIds'))))
@@ -1566,7 +1571,9 @@ def build_board(query, public_json, root, news_fn, resolve=True):
         next_req['book_age_s']=max(next_req.pop('book_ages',[-1]))
         requests.append(next_req)
     proc=subprocess.run([os.path.join(root,'build','bin','polypulse-forecast')],
-        input=json.dumps(requests,allow_nan=False),capture_output=True,text=True,timeout=3,check=True)
+        input=json.dumps({'close_series':[close_series_by_asset[a] for a in ASSETS],
+                          'requests':requests},allow_nan=False),
+        capture_output=True,text=True,timeout=3,check=True)
     forecasts=json.loads(proc.stdout)
     cards=[];technical_cache={};sparkline_by_asset={}
 

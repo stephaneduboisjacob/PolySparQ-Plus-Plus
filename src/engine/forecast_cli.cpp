@@ -1,20 +1,12 @@
 #include "forecast.hpp"
 #include <simdjson.h>
 #include <fmt/format.h>
-#include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <iostream>
 #include <iterator>
 #include <utility>
 #include <vector>
-
-namespace {
-struct CachedCloseFeatures {
-    std::vector<double> closes;
-    vp::engine::VolatilityEstimate volatility;
-    vp::engine::DriftEstimate drift;
-    bool has_drift = false;
-};
-}
 
 int main() {
     try {
@@ -22,30 +14,38 @@ int main() {
         if (raw.size() > 4*1024*1024) return 2;
         simdjson::dom::parser parser;
         const auto doc = parser.parse(raw);
-        std::vector<CachedCloseFeatures> close_cache;
+        std::vector<std::vector<double>> close_series;
+        for (auto series : doc["close_series"].get_array()) {
+            std::vector<double> closes;
+            for (auto c : series.get_array()) closes.push_back(double(c));
+            close_series.push_back(std::move(closes));
+        }
+        std::vector<vp::engine::VolatilityEstimate> volatilities;
+        volatilities.reserve(close_series.size());
+        for (const auto& closes : close_series)
+            volatilities.push_back(vp::engine::estimate_volatility(closes));
+        std::vector<vp::engine::DriftEstimate> drifts(close_series.size());
+        std::vector<bool> has_drift(close_series.size(), false);
         std::string result = "[";
         bool first = true;
-        for (auto row : doc.get_array()) {
+        for (auto row : doc["requests"].get_array()) {
             auto number = [&](const char* key, double fallback=0) {
                 double v; return row[key].get(v) == simdjson::SUCCESS ? v : fallback;
             };
-            std::vector<double> closes;
-            for (auto c : row["closes"].get_array()) closes.push_back(double(c));
-            auto cached = std::find_if(close_cache.begin(), close_cache.end(),
-                [&](const auto& entry) { return entry.closes == closes; });
-            if (cached == close_cache.end()) {
-                close_cache.push_back({std::move(closes), {}, {}, false});
-                cached = std::prev(close_cache.end());
-                cached->volatility = vp::engine::estimate_volatility(cached->closes);
-            }
-            const auto& vol = cached->volatility;
+            const double raw_series_index = number("series_index", -1);
+            if (!std::isfinite(raw_series_index) || raw_series_index < 0 ||
+                raw_series_index >= static_cast<double>(close_series.size()) ||
+                std::floor(raw_series_index) != raw_series_index) return 2;
+            const auto series_index = static_cast<std::size_t>(raw_series_index);
+            const auto& vol = volatilities[series_index];
             const bool use_drift = number("use_drift") > 0;
-            if (use_drift && !cached->has_drift) {
-                cached->drift = vp::engine::estimate_drift(
-                    cached->closes, vol.sigma_minute);
-                cached->has_drift = true;
+            if (use_drift && !has_drift[series_index]) {
+                drifts[series_index] = vp::engine::estimate_drift(
+                    close_series[series_index], vol.sigma_minute);
+                has_drift[series_index] = true;
             }
-            const auto drift = use_drift ? cached->drift : vp::engine::DriftEstimate{};
+            const vp::engine::DriftEstimate empty_drift{};
+            const auto& drift = use_drift ? drifts[series_index] : empty_drift;
             vp::engine::ForecastInput in{number("spot"), number("strike"), number("seconds_left"),
                 vol.sigma_minute, number("reference_age_s",-1), number("candle_age_s",-1),
                 vol.samples, int(number("twap_window_s",-1)), drift.log_drift_minute};
