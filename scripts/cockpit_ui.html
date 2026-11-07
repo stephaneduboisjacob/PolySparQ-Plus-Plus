@@ -7424,6 +7424,7 @@ function editStrategyProfile(inst){
   if(Object.keys(S.configEdits||{}).length&&
      !confirm('Discard unsaved strategy changes and open '+inst+'?'))return;
   S.curConfig=inst;S.configEdits={};
+  if(inst!==S.configLoadedName)renderStrategyLoadState('loading','Loading selected profile',`Loading editable settings for ${inst}. The previous profile is hidden until this profile finishes loading.`);
   if(S.curTab==='strategy')loadConfigs();
   else predSwitchTab('strategy');
 }
@@ -9674,7 +9675,8 @@ function strategyInvalidCount(){
 function hasStrategyDrafts(){return Object.keys(S.configEdits||{}).length>0||strategyInvalidCount()>0;}
 function renderStrategyLoadState(state,title,detail){
   const host=$('strategyEditor');if(!host)return;
-  host.innerHTML='<div class="strategy-load-state '+esc(state)+'" role="status"><h2>'+esc(title)+'</h2><p>'+esc(detail)+'</p><button type="button" class="btn-sm" onclick="loadConfigs(true)">RETRY CONNECTION</button></div>';
+  const retry=state==='loading'?'':'<button type="button" class="btn-sm" onclick="loadConfigs(true)">RETRY CONNECTION</button>';
+  host.innerHTML='<div class="strategy-load-state '+esc(state)+'" role="status"><h2>'+esc(title)+'</h2><p>'+esc(detail)+'</p>'+retry+'</div>';
 }
 async function loadConfigs(force=false){
   if(_strategyConfigsLoading)return;
@@ -9684,7 +9686,8 @@ async function loadConfigs(force=false){
     const r=await apiFetch('/api/configs',{timeoutMs:8000});
     _strategyConfigsCheckedAt=Date.now();
     if(!r||!Array.isArray(r.configs)){
-      if(S.configLoadedName)$('saveStatus').textContent='Profile list refresh failed; the loaded settings remain available.';
+      if(S.configLoadedName&&S.curConfig!==S.configLoadedName)renderStrategyLoadState('error','Profile list refresh failed','The requested profile is not loaded yet. The previous profile stays hidden to prevent editing values under the wrong name; retry the connection to continue.');
+      else if(S.configLoadedName)$('saveStatus').textContent='Profile list refresh failed; the loaded settings remain available.';
       else renderStrategyLoadState('error','Could not load profiles','The cockpit did not return a readable profile list. Check the connection, then retry.');
       return;
     }
@@ -9802,6 +9805,7 @@ function applyStrategyDrafts(edits){
 async function loadConfig(name,recheckRuntimeAfterSave=false,discardPending=false){
   const loadSeq=++_strategyConfigLoadSeq;
   const pending=!discardPending&&name===S.curConfig?{...(S.configEdits||{})}:{};
+  if(name!==S.configLoadedName)renderStrategyLoadState('loading','Loading selected profile',`Loading editable settings for ${name}. The previous profile is hidden until this profile finishes loading.`);
   const r=await apiFetch('/api/config?name='+encodeURIComponent(name),{timeoutMs:10000});
   if(loadSeq!==_strategyConfigLoadSeq||name!==S.curConfig)return;
   if(!r||r.error){
